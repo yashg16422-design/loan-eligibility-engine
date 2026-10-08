@@ -1,0 +1,639 @@
+# Loan Eligibility Engine: every AWS resource lives in this one file (PLAN.md §2).
+# Deploy order follows PLAN.md §20: network → RDS → S3/SQS → Lambdas → EC2.
+service: loan-engine
+frameworkVersion: "4"
+
+provider:
+  name: aws
+  region: ap-southeast-2 # the only region this account's SCP allows (PLAN.md §23)
+  stage: ${opt:stage, 'dev'}
+  runtime: python3.12
+  architecture: arm64 # matches the Apple Silicon dev machine, so wheels build natively (PLAN.md §23)
+  logRetentionInDays: 14
+  tags:
+    project: loan-eligibility-engine
+
+custom:
+  # Built as a plain string (not !Ref) to break the bucket <-> queue-policy cycle;
+  # the account id makes the name globally unique.
+  dataBucket: ${self:service}-${sls:stage}-data-${aws:accountId}
+  # Built-in Python packaging (Serverless v4, no plugin). We download prebuilt
+  # Linux arm64 wheels, so no Docker is needed (psycopg-binary ships aarch64 wheels).
+  pythonRequirements:
+    pythonBin: ${env:SLS_PYTHON, '.venv/bin/python'} # a Python 3.12 that has pip
+    usePoetry: false # pyproject.toml is tool config only, not a Poetry project
+    slim: true
+    pipCmdExtraArgs:
+      - --platform=manylinux2014_aarch64
+      - --platform=manylinux_2_28_aarch64
+      - --python-version=3.12
+      - "--only-binary=:all:"
+
+# Ship only our code and SQL; requirements are injected by the packager.
+package:
+  patterns:
+    - "!**"
+    - loan_engine/**
+    - sql/**
+    - "!**/__pycache__/**"
+
+functions:
+  migrate:
+    handler: loan_engine/migrate/handler.handler
+    description: Applies sql/ migrations, DB roles and grants. Invoked manually.
+    role: MigrateRole
+    timeout: 120
+    memorySize: 256
+    vpc:
+      securityGroupIds:
+        - !Ref LambdaSG
+      subnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+    environment:
+      DB_HOST: !GetAtt Database.Endpoint.Address
+      # ARNs only: the Lambda reads the secret values at runtime via the VPC endpoint.
+      MASTER_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
+      APP_INGEST_SECRET_ARN: !Ref AppIngestDbSecret
+      N8N_WORKFLOWS_SECRET_ARN: !Ref N8nWorkflowsDbSecret
+      N8N_META_SECRET_ARN: !Ref N8nMetaDbSecret
+
+  ingest:
+    handler: loan_engine/ingest/handler.handler
+    description: S3 upload (via SQS) -> validate CSV -> load users into RDS -> notify n8n
+    role: IngestRole
+    timeout: 120 # the queue's visibility timeout (720 s) is 6x this
+    memorySize: 512
+    vpc:
+      securityGroupIds:
+        - !Ref LambdaSG
+      subnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+    environment:
+      DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SECRET_ARN: !Ref AppIngestDbSecret
+      # Pluggable seams: change behaviour by config, not code.
+      VALIDATION_RULES: "" # JSON overrides, e.g. '{"age_min": 21}'; empty = PLAN.md §9 defaults
+      N8N_WEBHOOK_URL: "" # empty = NoopNotifier until n8n exists (the sweeper recovers jobs)
+      N8N_WEBHOOK_SECRET_ARN: ""
+      POWERTOOLS_LOG_LEVEL: INFO
+    events:
+      - sqs:
+          arn: !GetAtt IngestQueue.Arn
+          batchSize: 1 # one file per invocation: simple, isolated failures
+          maximumConcurrency: 2 # the minimum allowed; protects RDS connections
+
+  api:
+    handler: loan_engine/api/handler.handler
+    description: Upload UI + presigned POST tickets + job status (HTTP API)
+    role: ApiRole
+    timeout: 10
+    memorySize: 256
+    vpc:
+      securityGroupIds:
+        - !Ref LambdaSG
+      subnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+    environment:
+      DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SECRET_ARN: !Ref AppIngestDbSecret
+      DATA_BUCKET: ${self:custom.dataBucket}
+      POWERTOOLS_LOG_LEVEL: INFO
+    events:
+      - httpApi: GET /
+      - httpApi: POST /uploads
+      - httpApi: GET /uploads/{job_id}
+
+resources:
+  Resources:
+    # ------------------------------------------------------------------
+    # VPC + Internet Gateway
+    # ------------------------------------------------------------------
+    Vpc:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/16
+        EnableDnsSupport: true
+        # Required for the Secrets Manager interface endpoint's private DNS;
+        # without it, Lambdas silently resolve the public endpoint and time out.
+        EnableDnsHostnames: true
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}" }
+
+    InternetGateway:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-igw" }
+
+    VpcGatewayAttachment:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        VpcId: !Ref Vpc
+        InternetGatewayId: !Ref InternetGateway
+
+    # ------------------------------------------------------------------
+    # Subnets: 2 AZs, because an RDS subnet group needs at least two.
+    # Public = n8n EC2 (outbound only). Private = RDS + all Lambdas.
+    # ------------------------------------------------------------------
+    PublicSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref Vpc
+        CidrBlock: 10.0.0.0/24
+        AvailabilityZone: !Select [0, !GetAZs ""]
+        # The public IP is for outbound calls (lender sites, Bedrock, SES).
+        # Nothing can come in: no security group allows internet traffic.
+        MapPublicIpOnLaunch: true
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-public-a" }
+
+    PublicSubnetB:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref Vpc
+        CidrBlock: 10.0.1.0/24
+        AvailabilityZone: !Select [1, !GetAZs ""]
+        MapPublicIpOnLaunch: true
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-public-b" }
+
+    PrivateSubnetA:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref Vpc
+        CidrBlock: 10.0.10.0/24
+        AvailabilityZone: !Select [0, !GetAZs ""]
+        MapPublicIpOnLaunch: false
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-private-a" }
+
+    PrivateSubnetB:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref Vpc
+        CidrBlock: 10.0.11.0/24
+        AvailabilityZone: !Select [1, !GetAZs ""]
+        MapPublicIpOnLaunch: false
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-private-b" }
+
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref Vpc
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-public-rt" }
+
+    PublicDefaultRoute:
+      Type: AWS::EC2::Route
+      # The route can only exist once the gateway is attached; without this
+      # the first deploy can fail at random.
+      DependsOn: VpcGatewayAttachment
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref InternetGateway
+
+    PublicSubnetARouteAssoc:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetA
+        RouteTableId: !Ref PublicRouteTable
+
+    PublicSubnetBRouteAssoc:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PublicSubnetB
+        RouteTableId: !Ref PublicRouteTable
+
+    # No 0.0.0.0/0 route on purpose: private subnets have no internet and no NAT.
+    # They reach S3 and Secrets Manager through VPC endpoints only.
+    PrivateRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref Vpc
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-private-rt" }
+
+    PrivateSubnetARouteAssoc:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnetA
+        RouteTableId: !Ref PrivateRouteTable
+
+    PrivateSubnetBRouteAssoc:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        SubnetId: !Ref PrivateSubnetB
+        RouteTableId: !Ref PrivateRouteTable
+
+    # ------------------------------------------------------------------
+    # Security groups: rules reference other groups, never IP ranges.
+    # ------------------------------------------------------------------
+    LambdaSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Lambdas - no inbound traffic
+        VpcId: !Ref Vpc
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-lambda" }
+
+    N8nSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: n8n EC2 - webhook from Lambdas only; no SSH, no internet inbound
+        VpcId: !Ref Vpc
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5678
+            ToPort: 5678
+            SourceSecurityGroupId: !Ref LambdaSG
+            Description: ingest Lambda to n8n webhook
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-n8n" }
+
+    RdsSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: RDS PostgreSQL - from Lambdas and n8n only
+        VpcId: !Ref Vpc
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            SourceSecurityGroupId: !Ref LambdaSG
+            Description: Lambdas to Postgres
+          - IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            SourceSecurityGroupId: !Ref N8nSG
+            Description: n8n to Postgres (also the SSM tunnel path)
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-rds" }
+
+    EndpointSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Interface endpoints - HTTPS from Lambdas and n8n
+        VpcId: !Ref Vpc
+        # n8n is allowed too: with private DNS on, every host in the VPC
+        # (including the EC2) resolves Secrets Manager to this endpoint (PLAN.md §23).
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            SourceSecurityGroupId: !Ref LambdaSG
+            Description: Lambdas to Secrets Manager
+          - IpProtocol: tcp
+            FromPort: 443
+            ToPort: 443
+            SourceSecurityGroupId: !Ref N8nSG
+            Description: n8n EC2 to Secrets Manager
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-endpoints" }
+
+    # ------------------------------------------------------------------
+    # VPC endpoints: private paths to AWS services instead of a NAT Gateway.
+    # ------------------------------------------------------------------
+    S3GatewayEndpoint:
+      Type: AWS::EC2::VPCEndpoint
+      Properties:
+        VpcId: !Ref Vpc
+        ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+        VpcEndpointType: Gateway # free
+        RouteTableIds:
+          - !Ref PrivateRouteTable
+
+    SecretsManagerEndpoint:
+      Type: AWS::EC2::VPCEndpoint
+      Properties:
+        VpcId: !Ref Vpc
+        ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+        VpcEndpointType: Interface
+        PrivateDnsEnabled: true
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        SecurityGroupIds:
+          - !Ref EndpointSG
+
+    # ------------------------------------------------------------------
+    # RDS PostgreSQL 16: private, encrypted, SSL forced (PG ≥15 default
+    # rds.force_ssl=1, verified in ap-southeast-2), password owned by RDS.
+    # ------------------------------------------------------------------
+    DBSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: Private subnets only - RDS never gets a public address
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+
+    Database:
+      Type: AWS::RDS::DBInstance
+      # Three seatbelts against data loss: a final snapshot on delete or replace,
+      # DeletionProtection, and a fixed identifier (a replacement then fails
+      # loudly instead of silently creating a new, empty database).
+      DeletionPolicy: Snapshot
+      UpdateReplacePolicy: Snapshot
+      Properties:
+        DBInstanceIdentifier: ${self:service}-${sls:stage}
+        Engine: postgres
+        EngineVersion: "16.15"
+        AutoMinorVersionUpgrade: false # no surprise maintenance restart during the demo
+        DBInstanceClass: db.t4g.micro
+        AllocatedStorage: 20
+        StorageType: gp3
+        StorageEncrypted: true
+        DBName: app # engine data; the `n8n` database is created later by the migrate Lambda
+        MasterUsername: dbadmin
+        ManageMasterUserPassword: true # RDS generates the password and keeps it in Secrets Manager
+        DBSubnetGroupName: !Ref DBSubnetGroup
+        VPCSecurityGroups:
+          - !Ref RdsSG
+        PubliclyAccessible: false
+        MultiAZ: false # single-AZ for cost; production would use Multi-AZ
+        BackupRetentionPeriod: 1
+        DeletionProtection: true
+        CopyTagsToSnapshot: true
+
+    # ------------------------------------------------------------------
+    # Claim-check ingestion: browser -> S3 (presigned POST) -> SQS -> ingest Lambda.
+    # The big file never passes through API Gateway or Lambda request limits.
+    # ------------------------------------------------------------------
+    DataBucket:
+      Type: AWS::S3::Bucket
+      DeletionPolicy: Retain # stateful: a stack change must never delete uploaded data
+      UpdateReplacePolicy: Retain
+      # S3 sends a test message to the queue when the notification is saved;
+      # without the policy in place first, the deploy fails "Unable to validate destination".
+      DependsOn: IngestQueuePolicy
+      Properties:
+        BucketName: ${self:custom.dataBucket}
+        # The browser POSTs the file straight to S3, so S3 must allow our API's origin
+        # (and only it) to make that cross-origin POST.
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods: [POST]
+              AllowedOrigins:
+                - !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+              AllowedHeaders: ["*"]
+              MaxAge: 3000
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        LifecycleConfiguration:
+          Rules:
+            - Id: expire-raw-uploads # raw PII doesn't linger; the parsed rows live in RDS
+              Status: Enabled
+              Prefix: raw/
+              ExpirationInDays: 7
+            - Id: abort-incomplete-multipart
+              Status: Enabled
+              AbortIncompleteMultipartUpload:
+                DaysAfterInitiation: 1
+        NotificationConfiguration:
+          QueueConfigurations:
+            - Event: s3:ObjectCreated:*
+              Queue: !GetAtt IngestQueue.Arn
+              Filter:
+                S3Key:
+                  Rules:
+                    - { Name: prefix, Value: raw/ }
+                    - { Name: suffix, Value: .csv }
+
+    DataBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket: !Ref DataBucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: DenyInsecureTransport
+              Effect: Deny
+              Principal: "*"
+              Action: s3:*
+              Resource:
+                - arn:aws:s3:::${self:custom.dataBucket}
+                - arn:aws:s3:::${self:custom.dataBucket}/*
+              Condition:
+                Bool:
+                  aws:SecureTransport: "false"
+
+    IngestQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${sls:stage}-ingest
+        # At least 6x the ingest Lambda timeout (120 s), per AWS guidance for SQS event sources,
+        # so a slow attempt is never redelivered while it is still running.
+        VisibilityTimeout: 720
+        # SSE-SQS, not the AWS-managed KMS key: S3 notifications can't write to a queue
+        # encrypted with aws/sqs.
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt IngestDLQ.Arn
+          maxReceiveCount: 3
+
+    IngestDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${sls:stage}-ingest-dlq
+        MessageRetentionPeriod: 1209600 # 14 days (the maximum), time to investigate
+        SqsManagedSseEnabled: true
+
+    IngestQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref IngestQueue
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: AllowOurBucketOnly
+              Effect: Allow
+              Principal:
+                Service: s3.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt IngestQueue.Arn
+              # Confused-deputy guard: only our bucket, in our account, may enqueue.
+              Condition:
+                ArnLike:
+                  aws:SourceArn: arn:aws:s3:::${self:custom.dataBucket}
+                StringEquals:
+                  aws:SourceAccount: !Ref AWS::AccountId
+
+    # ------------------------------------------------------------------
+    # Database role passwords: generated by Secrets Manager, never typed by a human.
+    # No automatic rotation (PLAN.md §7); production would add a rotation Lambda.
+    # ExcludePunctuation avoids quoting bugs in connection strings and the n8n UI.
+    # ------------------------------------------------------------------
+    AppIngestDbSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${sls:stage}/db/app_ingest
+        Description: Postgres login for the api, ingest and dlq-handler Lambdas
+        GenerateSecretString:
+          SecretStringTemplate: '{"username": "app_ingest"}'
+          GenerateStringKey: password
+          PasswordLength: 32
+          ExcludePunctuation: true
+
+    N8nWorkflowsDbSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${sls:stage}/db/n8n_workflows
+        Description: Postgres login for the n8n Postgres credential (workflows A, B, C)
+        GenerateSecretString:
+          SecretStringTemplate: '{"username": "n8n_workflows"}'
+          GenerateStringKey: password
+          PasswordLength: 32
+          ExcludePunctuation: true
+
+    N8nMetaDbSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${sls:stage}/db/n8n_meta
+        Description: Postgres login for n8n's own storage (database n8n)
+        GenerateSecretString:
+          SecretStringTemplate: '{"username": "n8n_meta"}'
+          GenerateStringKey: password
+          PasswordLength: 32
+          ExcludePunctuation: true
+
+    # ------------------------------------------------------------------
+    # IAM: one role per function, scoped to exact ARNs (least privilege).
+    # ------------------------------------------------------------------
+    MigrateRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          # CloudWatch Logs + the ENI permissions a VPC Lambda needs.
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: read-db-secrets
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource:
+                    - !GetAtt Database.MasterUserSecret.SecretArn
+                    - !Ref AppIngestDbSecret
+                    - !Ref N8nWorkflowsDbSecret
+                    - !Ref N8nMetaDbSecret
+
+    IngestRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: ingest
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: ReadUploadedCsvsOnly
+                  Effect: Allow
+                  Action: s3:GetObject
+                  Resource: arn:aws:s3:::${self:custom.dataBucket}/raw/*
+                - Sid: OwnDbSecretOnly
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref AppIngestDbSecret
+                - Sid: ConsumeIngestQueue # used by the Lambda event source mapping
+                  Effect: Allow
+                  Action:
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:GetQueueAttributes
+                    - sqs:ChangeMessageVisibility
+                  Resource: !GetAtt IngestQueue.Arn
+
+    ApiRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: api
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # A presigned POST acts with the signer's permissions, so the role
+                # needs PutObject, but only under raw/ (and the policy pins the key).
+                - Sid: SignUploadsUnderRawOnly
+                  Effect: Allow
+                  Action: s3:PutObject
+                  Resource: arn:aws:s3:::${self:custom.dataBucket}/raw/*
+                - Sid: OwnDbSecretOnly
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref AppIngestDbSecret
+
+  # Merge throttling into the HTTP API stage that Serverless generates:
+  # the only public surface gets a rate limit (PLAN.md §4.3).
+  extensions:
+    HttpApiStage:
+      Properties:
+        DefaultRouteSettings:
+          ThrottlingRateLimit: 10
+          ThrottlingBurstLimit: 20
+
+  Outputs:
+    UploadUiUrl:
+      Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
+    DataBucketName:
+      Value: !Ref DataBucket
+    IngestQueueUrl:
+      Value: !Ref IngestQueue
+    IngestDLQUrl:
+      Value: !Ref IngestDLQ
+    DbEndpoint:
+      Value: !GetAtt Database.Endpoint.Address
+    DbMasterSecretArn:
+      Value: !GetAtt Database.MasterUserSecret.SecretArn
+    VpcId:
+      Value: !Ref Vpc
+    PrivateSubnetIds:
+      Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+    PublicSubnetIds:
+      Value: !Join [",", [!Ref PublicSubnetA, !Ref PublicSubnetB]]
+    LambdaSGId:
+      Value: !Ref LambdaSG
+    N8nSGId:
+      Value: !Ref N8nSG
+    RdsSGId:
+      Value: !Ref RdsSG

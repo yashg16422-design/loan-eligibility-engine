@@ -1,0 +1,23 @@
+[project]
+name = "loan-eligibility-engine"
+version = "0.1.0"
+description = "Event-driven CSV ingestion + n8n loan matching on AWS"
+requires-python = ">=3.12,<3.13"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W/F: errors, I: import order, B: likely bugs, UP: modern syntax,
+# SIM: simplifications, N: naming, ANN: type hints required, RUF: ruff extras.
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "ANN", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests don't need return-type annotations on every test function.
+"tests/**" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

@@ -1,0 +1,34 @@
+# --- Secrets: never committed (CLAUDE.md "Never") ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+
+# --- Data: users.csv contains (fake) PII; keep real data out of git ---
+data/
+*.csv
+!tests/fixtures/*.csv
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Serverless Framework build output ---
+.serverless/
+.requirements/
+node_modules/
+
+# --- OS / editor noise ---
+.DS_Store
+.vscode/
+.idea/
+
+# --- Local n8n data (docker-compose "local" profile) ---
+n8n_data/
