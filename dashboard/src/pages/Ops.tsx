@@ -253,7 +253,9 @@ function UploadSection({ onDone }: { onDone: () => void }) {
                   label={p?.job.total_rows != null ? `${n(p.job.inserted)} new, ${n(p.job.updated)} changed, ${n(p.job.rejected)} rejected` : "Validated"} />
                 <Step done={p?.job.match_status === "DONE"} active={p?.job.match_status === "RUNNING"} failed={p?.job.match_status === "FAILED"}
                   label={p?.match_run?.matches_new != null ? `${n(p.match_run.matches_new)} matches` : "Matched"} />
-                <Step done={p?.job.match_status === "DONE" && !!p.match_run} label={p?.match_run?.emails_sent != null ? `${n(p.match_run.emails_sent)} emails` : "Notified"} />
+                <Step done={p?.job.match_status === "DONE" && !!p.match_run}
+                  label={p?.match_run?.emails_sent != null ? `${n(p.match_run.emails_sent)} emails`
+                    : p?.job.match_status === "DONE" && !p.match_run?.matches_new ? "Nothing new, no emails" : "Notified"} />
               </ul>
               {p?.job.error && <p className="mt-3 text-danger">{p.job.error}</p>}
               {p && p.rejects.length > 0 && (

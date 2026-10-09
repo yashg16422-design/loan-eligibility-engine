@@ -170,7 +170,12 @@ function render(p) {
 
   const n = p.notifications || {};
   const sent = n.sent || 0, skipped = n.skipped_demo || 0, failed = n.failed || 0;
-  if (sent + skipped + failed > 0) {
+  // Re-uploading the same file changes nobody: 0 new matches means nobody to email, and that
+  // is the finished state (idempotency), not "still sending".
+  const nothingNew = j.match_status === "DONE" && run && !run.matches_new;
+  if (nothingNew && sent + skipped + failed === 0) {
+    setStep("s-notify", "done", "no new matches, so no emails (nobody's data changed)");
+  } else if (sent + skipped + failed > 0) {
     setStep("s-notify", failed ? "warn" : "done",
       `${fmt(sent)} emails sent · ${fmt(skipped)} simulated (demo cap) · ${fmt(failed)} failed`);
   } else if (j.match_status === "DONE") {
@@ -196,7 +201,7 @@ function render(p) {
   }
 
   // Stop polling once nothing more can change: a failure, or emails were handled.
-  return ["FAILED", "EXPIRED"].includes(j.status) || j.match_status === "FAILED" || sent + skipped + failed > 0;
+  return ["FAILED", "EXPIRED"].includes(j.status) || j.match_status === "FAILED" || sent + skipped + failed > 0 || nothingNew;
 }
 
 function poll(jobId, startedAt) {
