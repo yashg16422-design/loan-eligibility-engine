@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANSWERS, classify, freeSlots, QUESTIONS, SLOTS_DESKTOP, SLOTS_PHONE } from "./ask";
+import { ANSWERS, classify, overlaps, pickSpot, QUESTIONS, seeded, shuffle } from "./ask";
 import { burstPoints, fit } from "./camera";
 import { emi, loanCost } from "./finance";
 import { displayParts, fitParts } from "./fit";
@@ -105,17 +105,38 @@ describe("ask", () => {
       expect(ANSWERS[key].href).toMatch(/^#(journey|engine)$/);
     }
   });
-  it("hands out free slots only", () => {
-    expect(freeSlots(5, [0, 2, 4])).toEqual([1, 3]);
-    expect(freeSlots(2, [0, 1])).toEqual([]);
+  it("detects overlap, including the padding gap", () => {
+    const a = { x: 0, y: 0, w: 10, h: 10 };
+    expect(overlaps(a, { x: 5, y: 5, w: 10, h: 10 })).toBe(true);
+    expect(overlaps(a, { x: 12, y: 0, w: 10, h: 10 })).toBe(false);
+    expect(overlaps(a, { x: 12, y: 0, w: 10, h: 10 }, 4)).toBe(true);
   });
-  it("keeps floating questions inside the section", () => {
-    for (const [x, y] of [...SLOTS_DESKTOP, ...SLOTS_PHONE]) {
-      expect(x).toBeGreaterThanOrEqual(0);
-      expect(x).toBeLessThan(90);
-      expect(y).toBeGreaterThan(0);
-      expect(y).toBeLessThan(100);
+  it("never places a question on the ask box or another question", () => {
+    const area = { x: 0, y: 90, w: 1440, h: 730 };
+    const core = { x: 380, y: 260, w: 680, h: 380 }; // heading, live line, form
+    const rand = seeded(7);
+    const placed = [core];
+    for (let i = 0; i < 400; i++) {
+      const spot = pickSpot(area, { w: 260, h: 44 }, placed, rand, 16);
+      if (!spot) continue;
+      expect(placed.some((r) => overlaps(spot, r, 16))).toBe(false);
+      expect(spot.x).toBeGreaterThanOrEqual(area.x);
+      expect(spot.y + spot.h).toBeLessThanOrEqual(area.y + area.h);
+      if (placed.length < 7) placed.push(spot); // keep a realistic crowd on screen
     }
+    expect(placed.length).toBe(7);
+  });
+  it("gives up instead of overlapping when there is no room", () => {
+    const area = { x: 0, y: 0, w: 300, h: 100 };
+    expect(pickSpot(area, { w: 200, h: 50 }, [area], seeded(1))).toBeNull();
+    expect(pickSpot(area, { w: 400, h: 50 }, [], seeded(1))).toBeNull();
+  });
+  it("shuffles without losing questions, reproducibly", () => {
+    const s = shuffle(QUESTIONS, seeded(3));
+    expect(s).toHaveLength(QUESTIONS.length);
+    expect(new Set(s)).toEqual(new Set(QUESTIONS));
+    expect(shuffle(QUESTIONS, seeded(3))).toEqual(s);
+    expect([...Array(1000)].map(seeded(9)).every((x) => x >= 0 && x < 1)).toBe(true);
   });
 });
 

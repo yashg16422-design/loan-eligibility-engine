@@ -5,7 +5,7 @@ import { step } from "../lib/format";
 import { $, $$, isSmall, THEME_EVENT, readStore, writeStore } from "./dom";
 
 const PALETTE_KEY = "cpm-acc";
-const DEFAULT_PALETTE = "mint";
+const DEFAULT_PALETTE = "glacier";
 
 export function initNav(): void {
   const rn = $("#rn");

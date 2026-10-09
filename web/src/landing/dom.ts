@@ -20,7 +20,7 @@ export const isStatic = (): boolean => document.documentElement.classList.contai
 
 /** The current accent colour (it changes with the palette switch). */
 export const accent = (): string =>
-  getComputedStyle(document.documentElement).getPropertyValue("--acc").trim() || "#4BE3A0";
+  getComputedStyle(document.documentElement).getPropertyValue("--acc").trim() || "#9CC3FF";
 
 /** Fired on window when the palette changes, so canvas and SVG colours can follow. */
 export const THEME_EVENT = "themechange";

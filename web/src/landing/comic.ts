@@ -54,7 +54,7 @@ function paintCast(cast: Record<string, string>): void {
 }
 
 function paintConfetti(): void {
-  const colours = [accent(), "#FFC94D", "#8EA8FF", "#FF7A59", "#F2F2F2"];
+  const colours = [accent(), "#FFC94D", "#B79CFF", "#FF7A59", "#F2F2F2"];
   $("#confetti").innerHTML = Array.from(
     { length: CONFETTI },
     (_, i) => `<i style="background:${colours[i % 5]}; width:${8 + (i % 4) * 3}px; height:${6 + (i % 3) * 4}px"></i>`,

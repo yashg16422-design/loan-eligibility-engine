@@ -94,17 +94,52 @@ export function classify(question: string): AnswerKey {
   return RULES.find(([re]) => re.test(q))?.[1] ?? "all";
 }
 
-/** Indices of slots not yet taken, so two floating questions never share a spot. */
-export function freeSlots(total: number, used: Iterable<number>): number[] {
-  const taken = new Set(used);
-  return Array.from({ length: total }, (_, i) => i).filter((i) => !taken.has(i));
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
-/** Where floating questions may sit, in % of the section: around the centre column on desktop,
- *  in bands above and below it on phones. */
-export const SLOTS_DESKTOP: ReadonlyArray<readonly [number, number]> = [
-  [6, 16], [7, 36], [6, 58], [8, 78], [77, 18], [79, 36], [76, 60], [78, 80], [32, 91],
-];
-export const SLOTS_PHONE: ReadonlyArray<readonly [number, number]> = [
-  [4, 11], [34, 16], [6, 21], [4, 82], [34, 87], [8, 92],
-];
+/** Do two boxes overlap, counting `pad` px of breathing room between them? */
+export const overlaps = (a: Box, b: Box, pad = 0): boolean =>
+  a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
+
+/**
+ * A random spot for a w × h question inside `area` that keeps `pad` px clear of every box in
+ * `avoid` (the heading, the ask box, other questions). Tries `tries` random candidates and
+ * gives up with null rather than ever placing a question on top of something.
+ */
+export function pickSpot(
+  area: Box, size: { w: number; h: number }, avoid: readonly Box[], rand: () => number, pad = 16, tries = 80,
+): Box | null {
+  const freeW = area.w - size.w, freeH = area.h - size.h;
+  if (freeW < 0 || freeH < 0) return null;
+  for (let i = 0; i < tries; i++) {
+    const spot = { x: area.x + rand() * freeW, y: area.y + rand() * freeH, w: size.w, h: size.h };
+    if (!avoid.some((r) => overlaps(spot, r, pad))) return spot;
+  }
+  return null;
+}
+
+/** Fisher-Yates shuffle into a new array. */
+export function shuffle<T>(items: readonly T[], rand: () => number): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/** Small seeded PRNG (mulberry32), so the reduced-motion layout is the same on every visit. */
+export function seeded(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}

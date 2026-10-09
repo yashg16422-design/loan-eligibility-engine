@@ -13,8 +13,8 @@ check, dashboard and ops pages live in `dashboard/` (see `docs/EXTRAS_SPEC.md`, 
 |---|---|---|
 | 1 | `#hero` | "Know your yes before you apply." over a slowly spinning dotted Earth; four measured numbers (590,000 / 164 / 5 / 0). |
 | 2 | `#statement` | The problem, revealed letter by letter: rules learned by getting rejected, and the credit score cost. |
-| 3 | `#globe-beat` | The globe locks on India (lit in the accent), then zooms into Surat and raises a pin. |
-| 4 | `#ask` | "What's stopping your loan?": borrower questions type themselves in, each tagged with the feature that answers it. Ask your own and get an answer card. |
+| 3 | `#globe-beat` | The globe locks on India (lit in the accent), then zooms into Surat and raises a pin that settles just above centre, with the caption pinned right under it. |
+| 4 | `#ask` | "What's stopping your loan?": borrower questions type themselves in at random free spots (never over the heading, the ask box or each other), stay to be read, then fade. Each is tagged with the feature that answers it. Ask your own and get an answer card. |
 | 5 | `#comic` | Two frames: engineers pitch the founders ("YES!"), then the team gathers round a laptop; the camera dives into the screen, which becomes the launch lockup. |
 | 6 | `#journey` | Horizontal rail: Aarav (a real demo profile) checks his loans in five steps, with real matches, fit score and EMIs. |
 | 7 | `#engine` | The pipeline draws itself: crawl → robots.txt → Nova Pro → 59 products → 590,000 pairs → 164 classes → 5 AI calls → 276,594 matches → 0-mismatch proof → email. |
@@ -87,12 +87,13 @@ web/
 
 - True black page (`--bg #000`), hairline boxes, Inter plus JetBrains Mono for measurements.
 - Colour carries meaning: **accent = yes/eligible**, coral = rejection, amber = lenders and
-  their rules, periwinkle = AI and engine.
-- The accent is switchable from the section rail (mint by default). The options are mint,
-  glacier, **marigold (the app's `#F2A93B` from `dashboard/DESIGN.md`)**, volt, rose and mono.
-- To make the landing open in the app's colour by default, change `--acc` in
-  `src/styles/landing.css` and `DEFAULT_PALETTE` in `src/landing/nav.ts`. Note that marigold
-  sits close to the amber used for "lenders and rules".
+  their rules, violet = AI and engine.
+- The accent is switchable from the section rail. **Glacier blue is the default** (the owner's
+  pick). The options are glacier, mint, **marigold (the app's `#F2A93B` from
+  `dashboard/DESIGN.md`)**, volt, rose and mono.
+- The default is set by `--acc` in `src/styles/landing.css`, `DEFAULT_PALETTE` in
+  `src/landing/nav.ts` and the inline script in `index.html`. Marigold sits close to the amber
+  used for "lenders and rules".
 
 ## Integration notes (for merging with the app)
 

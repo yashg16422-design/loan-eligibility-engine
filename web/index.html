@@ -21,7 +21,7 @@
           // never leave the curtain up if the script fails to load
           setTimeout(function () { if (r.dataset.intro === "play" && !r.dataset.ready) r.dataset.intro = "done"; }, 3500);
         }
-        try { var acc = localStorage.getItem("cpm-acc"); if (acc && acc !== "mint") r.dataset.acc = acc; } catch (e) {}
+        try { var acc = localStorage.getItem("cpm-acc"); if (acc && acc !== "glacier") r.dataset.acc = acc; } catch (e) {}
       })();
     </script>
   </head>
@@ -43,8 +43,8 @@
         <li><a href="#invite"><i></i><span>Get started</span></a></li>
       </ol>
       <div class="rn-theme"><span>Colour</span><div class="sw" role="group" aria-label="Accent colour">
-        <button type="button" data-acc="mint" aria-label="Mint and white" aria-pressed="true" style="--a:#4BE3A0; --b:#F2F2F2"></button>
-        <button type="button" data-acc="glacier" aria-label="Glacier blue and frost" aria-pressed="false" style="--a:#9CC3FF; --b:#DCE7F7"></button>
+        <button type="button" data-acc="glacier" aria-label="Glacier blue and frost" aria-pressed="true" style="--a:#9CC3FF; --b:#DCE7F7"></button>
+        <button type="button" data-acc="mint" aria-label="Mint and white" aria-pressed="false" style="--a:#4BE3A0; --b:#F2F2F2"></button>
         <button type="button" data-acc="marigold" aria-label="Marigold, the app's colour" aria-pressed="false" style="--a:#F2A93B; --b:#E9ECEE"></button>
         <button type="button" data-acc="volt" aria-label="Volt and graphite" aria-pressed="false" style="--a:#D7FF3B; --b:#A7ADB4"></button>
         <button type="button" data-acc="rose" aria-label="Rose and lilac" aria-pressed="false" style="--a:#FF7AA8; --b:#C9B8FF"></button>

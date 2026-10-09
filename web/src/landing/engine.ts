@@ -11,7 +11,7 @@ import { $, accent, isSmall, isStatic, THEME_EVENT } from "./dom";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const SLOT = 1.4; // timeline seconds per node
 const hueColour = (h: Hue): string =>
-  ({ amber: "#FFC94D", peri: "#8EA8FF", coral: "#FF7A59", mint: accent() })[h];
+  ({ amber: "#FFC94D", peri: "#B79CFF", coral: "#FF7A59", mint: accent() })[h];
 
 function svgEl<K extends keyof SVGElementTagNameMap>(
   tag: K, attrs: Record<string, string | number>, parent?: Element,

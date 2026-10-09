@@ -1,12 +1,12 @@
 /* ClickPar Match landing. A true-black page of a few long pinned scenes on smooth scroll, with
-   sharp hairline boxes. Colour is information: the accent (--acc, mint by default; --mint
+   sharp hairline boxes. Colour is information: the accent (--acc, glacier blue by default; --mint
    aliases it) = yes/eligible, coral = rejection/the problem, amber = lenders and their rules,
-   periwinkle = the AI and engine. */
+   violet (--peri) = the AI and engine. */
 :root {
   --bg: #000000; --panel: #0C0C0C; --panel-2: #121212; --line: #262626; --line-hi: #3C3C3C;
   --fg: #F2F2F2; --mute: #8E8E8E; --dim: #4A4A4A;
-  --acc: #4BE3A0; --acc2: #F2F2F2; --acc-ink: #000000;
-  --mint: var(--acc); --coral: #FF7A59; --amber: #FFC94D; --peri: #8EA8FF;
+  --acc: #9CC3FF; --acc2: #DCE7F7; --acc-ink: #000000; /* glacier: the owner's pick */
+  --mint: var(--acc); --coral: #FF7A59; --amber: #FFC94D; --peri: #B79CFF;
   --sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
   --ink: #111111; --paper: #F4F3EE; --paper-2: #E6E3D9;
@@ -15,7 +15,7 @@
   color-scheme: dark;
 }
 /* palettes: one accent plus a partner tone, all on black */
-:root[data-acc="glacier"] { --acc: #9CC3FF; --acc2: #DCE7F7; }
+:root[data-acc="mint"]    { --acc: #4BE3A0; --acc2: #F2F2F2; }
 :root[data-acc="marigold"] { --acc: #F2A93B; --acc2: #E9ECEE; } /* the app's accent (dashboard/DESIGN.md) */
 :root[data-acc="volt"]    { --acc: #D7FF3B; --acc2: #A7ADB4; }
 :root[data-acc="rose"]    { --acc: #FF7AA8; --acc2: #C9B8FF; }
@@ -139,7 +139,8 @@ main, footer { position: relative; z-index: 2; }
 #globe-beat .sticky { display: grid; align-items: end; padding: 0 var(--gutter) clamp(32px, 8vh, 88px); }
 #globe-beat .sticky::before { content: ""; position: absolute; inset: auto 0 0 0; height: 55%; background: linear-gradient(to top, rgb(0 0 0 / .85), transparent); pointer-events: none; }
 .beat-cap { position: relative; grid-area: 1 / 1; opacity: 0; max-width: 30rem; display: grid; gap: 14px; }
-.beat-cap.center { justify-self: center; align-self: center; margin-top: 34vh; text-align: center; justify-items: center; }
+/* the Surat caption hangs just under the pin: globe.ts writes the pin's screen y to --pin-y */
+.beat-cap.center { position: absolute; left: 0; right: 0; margin-inline: auto; width: min(30rem, calc(100% - 2 * var(--gutter))); top: calc(var(--pin-y, 46svh) + clamp(28px, 4vh, 44px)); text-align: center; justify-items: center; }
 .beat-cap .label { font-size: .76rem; }
 .beat-cap h2 { font-size: clamp(2.1rem, 3.8vw, 3.4rem); letter-spacing: -0.045em; }
 .beat-cap p { color: var(--mute); line-height: 1.55; }
@@ -329,14 +330,14 @@ main, footer { position: relative; z-index: 2; }
 .ask-answer a svg { width: 16px; height: 16px; }
 .floaters { position: absolute; inset: 0; z-index: 1; }
 .fq { position: absolute; display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; max-width: 21vw; padding: 6px 8px; border: 0; background: none; color: #D4D4D4;
-  font: 400 clamp(.82rem, 1vw, .98rem)/1.45 var(--mono); text-align: left; cursor: pointer; transition: opacity .9s ease, color .2s; pointer-events: auto; }
+  font: 400 clamp(.82rem, 1vw, .98rem)/1.45 var(--mono); text-align: left; cursor: pointer; transition: opacity .7s ease, color .2s; pointer-events: auto; animation: fq-in .35s ease-out; }
+@keyframes fq-in { from { opacity: 0; transform: translateY(6px); } }
 .fq:hover { color: var(--fg); }
 .fq .t::after { content: ""; display: inline-block; width: .55em; height: 1.05em; margin-left: 2px; vertical-align: -.15em; background: var(--acc); animation: blink .9s steps(1) infinite; }
 .fq.done .t::after { display: none; }
 .fq em { font-style: normal; font-size: .78em; color: #6F6F6F; white-space: nowrap; }
 .fq em svg { width: 11px; height: 11px; vertical-align: -1px; }
-.fq.old { opacity: .38; }
-.fq.gone { opacity: 0; }
+.fq.gone { opacity: 0; pointer-events: none; }
 @keyframes blink { 50% { opacity: 0; } }
 @media (max-width: 860px) { .fq { max-width: 60vw; font-size: .8rem; } .fq em { display: none; } }
 @media (prefers-reduced-motion: reduce) { .fq .t::after, .dotlive { animation: none; } }
@@ -425,6 +426,8 @@ main, footer { position: relative; z-index: 2; }
 .static #globe-beat, .static #statement, .static #comic, .static #engine { height: auto; }
 .static .sticky { position: relative; height: auto; min-height: 100svh; }
 .static .beat-cap { opacity: 1 !important; }
+.static #globe-beat .sticky { align-content: center; gap: 56px; }
+.static .beat-cap, .static .beat-cap.center { position: relative; top: auto; grid-area: auto; }
 .static .statement .ch { opacity: 1; }
 .static .track { flex-direction: column; width: 100%; transform: none !important; }
 .static .rail { height: auto; }

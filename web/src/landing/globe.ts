@@ -61,6 +61,9 @@ const ATMO_FRAG = /* glsl */ `
   varying vec3 vN;
   void main() { float f = pow(clamp(.72 - vN.z, 0., 2.), 6.) * .16; gl_FragColor = vec4(.56, .66, 1., min(f, 1.) * uAmt); }`;
 
+const BEAM_SCREEN = 0.14; // the pin stands this fraction of the screen height tall, on any device
+const PIN_SHIFT = 0.1; // at full zoom the pin sits this fraction of the screen above centre
+
 /** Scroll-driven state; GSAP tweens these numbers and the render loop reads them. */
 interface GlobeState {
   lock: number; // 0 = idle spin, 1 = held on target
@@ -210,8 +213,24 @@ export async function initGlobe(): Promise<boolean> {
   addEventListener("resize", resize);
   resize();
 
-  const statement = $("#statement"), ask = $("#ask");
-  const pw = new THREE.Vector3(), look = new THREE.Vector3();
+  const statement = $("#statement"), ask = $("#ask"), stage = $("#globe-beat .sticky");
+  const pw = new THREE.Vector3(), look = new THREE.Vector3(), probe = new THREE.Vector3();
+
+  /**
+   * Beam height (pin-local units) that projects to BEAM_SCREEN of the screen. The beam points
+   * almost straight at the camera, so perspective makes its on-screen length depend on lens and
+   * distance; a short binary search on the projection keeps it the same everywhere.
+   */
+  const beamHeight = (baseNdcY: number): number => {
+    let lo = 0, hi = 0.6;
+    for (let i = 0; i < 14; i++) {
+      const mid = (lo + hi) / 2;
+      const dy = pin.localToWorld(probe.set(0, mid, 0)).project(camera).y - baseNdcY;
+      if (dy < BEAM_SCREEN * 2) lo = mid; // NDC spans 2 units of height
+      else hi = mid;
+    }
+    return lo;
+  };
   let idle = 0, last = performance.now();
   const frame = (now: number): void => {
     const dt = Math.min((now - last) / 1000, 0.05), t = now / 1000;
@@ -223,6 +242,10 @@ export async function initGlobe(): Promise<boolean> {
     const away = progress(ask.getBoundingClientRect().top, 0, vh * 0.7);
     const opacity = (1 - 0.8 * dip) * away;
     canvas.style.opacity = String(opacity);
+    // once the Surat scene's sticky stage releases, scroll the globe out with it, so the pin
+    // and its caption leave together instead of the caption sliding up over the pin
+    const release = Math.min(stage.getBoundingClientRect().top, 0);
+    canvas.style.transform = release < 0 ? `translate3d(0, ${release}px, 0)` : "";
     if (opacity > 0.001) {
       if (!isStatic()) idle += dt * 9 * (1 - S.lock);
       const spin = (((idle % 360) + 540) % 360) - 180;
@@ -233,12 +256,19 @@ export async function initGlobe(): Promise<boolean> {
       camera.position.set(0, 0, isSmall() ? S.dist * (1.3 - 0.27 * S.lock) : S.dist);
       G.updateMatrixWorld();
       pin.getWorldPosition(pw);
-      camera.lookAt(look.set(gx * 0.35, gy * 0.6, 0).lerp(pw, S.aim * 0.85));
+      camera.lookAt(look.set(gx * 0.35, gy * 0.6, 0).lerp(pw, S.aim));
+      // with the pin dead centre, shift the picture up so the pin stands just above the middle
+      // and the Surat caption fits under it
+      const shift = PIN_SHIFT * S.aim * innerHeight;
+      camera.setViewOffset(innerWidth, innerHeight, 0, shift, innerWidth, innerHeight);
       dotMat.uniforms.uIndia.value = S.india;
       cityMat.uniforms.uAmt.value = S.cities;
       atmoMat.uniforms.uAmt.value = 1 - S.pin * 0.7;
       pin.scale.setScalar(Math.max(S.dist - 1, 0.03)); // constant on-screen size while zooming
-      const bh = 0.32 * S.pin + 1e-4;
+      camera.updateMatrixWorld();
+      pin.updateMatrixWorld(true);
+      const baseNdcY = probe.copy(pw).project(camera).y; // pw = the pin's base, in world space
+      const bh = S.pin > 0.01 ? beamHeight(baseNdcY) * S.pin + 1e-4 : 1e-4;
       beam.scale.y = bh;
       beam.position.y = bh / 2;
       head.position.y = bh;
@@ -247,6 +277,9 @@ export async function initGlobe(): Promise<boolean> {
       ringMat.opacity = (1 - pulse) * S.pin;
       pinMat.opacity = S.pin;
       renderer.render(scene, camera);
+      if (S.pin > 0.01) {
+        stage.style.setProperty("--pin-y", ((1 - baseNdcY) / 2) * innerHeight + "px");
+      }
     }
     requestAnimationFrame(frame);
   };
