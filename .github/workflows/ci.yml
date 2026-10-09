@@ -53,7 +53,7 @@ jobs:
           ruff format --check .
 
       - name: JS unit tests (n8n Code-node logic)
-        run: node --test n8n/code
+        run: node --test n8n/code/code.test.js
 
       - name: Wait for PostgreSQL
         run: |

@@ -23,7 +23,7 @@ comments that explain *why*, tests for logic, no secrets).
    [`docs/extras/mock/`](extras/mock/): it is a real export from the live database (2
    synthetic demo users, their 69 real matches, the 59 real crawled products, the real
    pipeline runs). Copy it into `web/public/mock/`.
-3. **CI must stay green.** `ruff`, `pytest` and `node --test n8n/code` must still pass. You
+3. **CI must stay green.** `ruff`, `pytest` and `node --test n8n/code/code.test.js` must still pass. You
    may **add** a `web` job to `.github/workflows/ci.yml` (install, lint, typecheck, test, build).
    Do not edit the existing steps.
 4. **No secrets, no tracking, no real personal data.** No API keys in the code. No analytics.

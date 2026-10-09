@@ -552,7 +552,7 @@ published criteria**, never an approval probability.
   - **12 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
     the real 10k CSV, and the Treasure Hunt in upload and **product** mode, each with its
     brute-force proof
-- **42 Node tests** for the n8n Code-node logic (`node --test n8n/code`); the same files are
+- **42 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
   what runs inside n8n.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push: ruff → Node
   tests → Python unit + integration tests (Postgres 17 container with TLS) → the committed
@@ -560,7 +560,7 @@ published criteria**, never an approval probability.
 - Structured JSON logs (AWS Lambda Powertools) carrying `job_id`.
 
 ```bash
-.venv/bin/ruff check . && .venv/bin/pytest && node --test n8n/code
+.venv/bin/ruff check . && .venv/bin/pytest && node --test n8n/code/code.test.js
 # DB integration tests (need Docker):
 docker run -d --rm --name pgtest -e POSTGRES_PASSWORD=localtest -e POSTGRES_DB=app -p 55432:5432 postgres:17 \
   -c ssl=on -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key

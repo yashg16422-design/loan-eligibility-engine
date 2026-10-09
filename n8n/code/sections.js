@@ -2,7 +2,7 @@
  * Workflow A, Code node "Isolate sections" (PLAN.md §10.2 step 3).
  *
  * Pure functions only. n8n/build_workflows.py pastes this file into the Code node and
- * appends the node's entry snippet; `node --test n8n/code` tests the same functions.
+ * appends the node's entry snippet; `node --test n8n/code/code.test.js` tests the same functions.
  * So the code that is tested is exactly the code that runs. No external modules.
  *
  * Input item:  { html, channel, lender_slug, url, ... }

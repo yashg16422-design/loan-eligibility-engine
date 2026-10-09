@@ -1,4 +1,4 @@
-// Unit tests for the n8n Code-node logic: `node --test n8n/code`
+// Unit tests for the n8n Code-node logic: `node --test n8n/code/code.test.js`
 // The SAME files are pasted into the n8n Code nodes, so what is tested is what runs.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
