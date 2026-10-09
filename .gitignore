@@ -32,3 +32,7 @@ node_modules/
 
 # --- Local n8n data (docker-compose "local" profile) ---
 n8n_data/
+
+# --- Built dashboard (dashboard/ -> npm run build) ---
+loan_engine/api/static/
+dashboard/node_modules/

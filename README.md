@@ -6,7 +6,8 @@ products they are likely eligible for, and emails each matched user their best o
 
 | | |
 |---|---|
-| **Live upload UI** | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/ |
+| **Live upload UI** (the required minimal UI) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/ |
+| **Borrower dashboard + engine console** (extra) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/ ([§14](#14-extra-borrower-dashboard-and-engine-console)) |
 | **Region** | `ap-southeast-2` (Sydney): the only region this AWS account's organization allows (see [Trade-offs](#11-trade-offs--production-next-steps)) |
 | **n8n** | self-hosted 2.42.5 on EC2, **not exposed to the internet**: reached through an SSM tunnel |
 | **LLM** | Amazon Bedrock · Nova Pro (temperature 0), via n8n with **no AWS access keys** |
@@ -34,6 +35,7 @@ then **0 calls** on every later run, and a brute-force check proves the optimize
 11. [Trade-offs & production next steps](#11-trade-offs--production-next-steps)
 12. [Code quality & tests](#12-code-quality--tests)
 13. [Repository layout](#13-repository-layout)
+14. [Extra: borrower dashboard and engine console](#14-extra-borrower-dashboard-and-engine-console)
 
 ---
 
@@ -582,6 +584,7 @@ n8n/workflows/              the workflow exports A, A1, B, B1, C, E, E1 (generat
 n8n/code/                   Code-node logic (tested with node --test)
 n8n/prompts/                versioned LLM prompts
 n8n/build_workflows.py      generates the workflow JSON from the tested sources
+dashboard/                  borrower dashboard + engine console (React, built into loan_engine/api/static/)
 renderer/                   optional headless renderer (Playwright, SSRF guard)
 scripts/                    tunnels, n8n import/run, crawl inventory/probe, extraction preview, psql, upload sample
 tests/                      unit + integration tests, fixtures
@@ -589,3 +592,34 @@ tests/                      unit + integration tests, fixtures
 docs/                       assignment text, crawl inventory, evidence, screenshots
 PLAN.md                     the build plan + decision log
 ```
+
+---
+
+## 14. Extra: borrower dashboard and engine console
+
+The required UI (§1) starts the pipeline. This extra shows what the pipeline produces, from
+the borrower's side and the operator's, at **`/app`** on the same API (no new hosting, no CORS).
+
+| Page | What it does | Backed by |
+|---|---|---|
+| **`/app/`** check my eligibility | Four numbers (income, score, age, employment), no email or phone | `POST /check` writes a **1-row CSV to `raw/`**, so the visitor takes the **same path as a bulk upload**: S3 → SQS → ingest → webhook → Workflow B → C. Measured live: **about 11 s** from submit to matches. Capped at 100 checks/day (SES sandbox quota). |
+| **`/app/dashboard`** | Plain-sentence summary; one row per lender with the **best platform** (direct vs BankBazaar vs Paisabazaar); expand for **why it fits** (the fit score broken into its published-rule parts), what else is needed, other platforms, verified source | `GET /me`, `/me/matches` (signed token) |
+| **What if** | Sliders for income, score, age, employment: lenders coming into / falling out of reach, plus the **exact** next threshold ("with an income of ₹20,000, Kotak Mahindra Bank comes into reach") | `GET /products` (with AI-compiled rules); [`eligibility.ts`](dashboard/src/lib/eligibility.ts) mirrors the SQL decision. A test asserts it reproduces **Workflow B's decision on all 59 live products** |
+| **Save, compare, hide, alerts** | Shortlist, top 3 side by side (EMI, total interest, how much cheaper), a merged document checklist, "tell me when a new lender matches" | `GET/PUT /me/preferences` → `user_preferences` (migration 004) |
+| **`/app/ops`** the engine, live | The latest big run as a **self-building pipeline** (pairs → classes → decisions → AI calls → matches → emails, with the brute-force proof); recent runs; crawl health by source; workflow errors; CSV upload with live stages | `GET /ops/runs`, `/ops/crawl`, `/ops/errors` (aggregates only, no personal data) |
+
+**Access without accounts:** `/check` returns an HMAC-SHA256 token (`user_id` + expiry, key in
+Secrets Manager, 24 h); it lives in `sessionStorage` only. Forged or expired tokens get 401
+(tested live). Instant-check users get a reserved `@example.invalid` address: no real email
+is ever collected, and Workflow C still mails only the test aliases.
+
+**Design:** Operate mode, documented in [`dashboard/DESIGN.md`](dashboard/DESIGN.md): graphite
+and one marigold accent, Geist with Geist Mono only for measurements, container-query rows,
+keyboard focus, reduced motion. References: daqconsulting.com (pinned pipeline narrative),
+weevolveit.com (proof strip), see [`docs/extras/REFERENCE_NOTES.md`](docs/extras/REFERENCE_NOTES.md).
+
+```bash
+cd dashboard && npm ci && npm test && npm run build   # build lands in loan_engine/api/static/
+npm run dev                                           # local UI against the deployed API
+```
+

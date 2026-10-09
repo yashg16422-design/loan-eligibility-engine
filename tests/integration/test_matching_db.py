@@ -234,3 +234,47 @@ def test_product_mode_rematches_only_scoped_products(db):
     assert result["matches_superseded"] > 0 and after < before
     assert others_after == others_before  # out-of-scope matches untouched
     assert run_sql(db, "brute_force_check.sql", run4, PROMPT_VERSION)["mismatches"] == 0
+
+
+def test_dashboard_queries_on_real_matches(db):
+    """The api Lambda's dashboard + ops SQL against the matched 10k users (migration 004)."""
+    from loan_engine.api import repository
+
+    user_id = db.execute(
+        "SELECT user_id FROM matches WHERE status = 'active' GROUP BY user_id "
+        "ORDER BY count(*) DESC LIMIT 1"
+    ).fetchone()[0]
+    me = repository.get_me(db, user_id)
+    matches = repository.get_matches(db, user_id)
+    assert me["matches"] == len(matches) > 0
+    assert me["eligible"] == sum(m["tier"] == "eligible" for m in matches)
+    assert me["lenders"] == len({m["lender_key"] for m in matches})
+    # Best first: every eligible match comes before every conditional one.
+    tiers = [m["tier"] for m in matches]
+    assert tiers == sorted(tiers, key=lambda t: t != "eligible")
+    assert repository.get_me(db, uuid.uuid4()) is None  # unknown user = "still loading"
+
+    products = repository.get_products(db, PROMPT_VERSION)
+    assert (
+        len(products)
+        == db.execute("SELECT count(*) FROM loan_products WHERE is_active").fetchone()[0]
+    )
+    assert any(p["compiled_rules"] for p in products)  # the compiled rules come along
+
+    # Preferences: defaults, then an upsert that is read back.
+    assert repository.get_preferences(db, user_id)["shortlist"] == []
+    pick = [m["product_id"] for m in matches[:3]]
+    saved = repository.save_preferences(
+        db, user_id, {"shortlist": pick, "top3": pick[:2], "hidden": [], "alerts": True}
+    )
+    assert saved["top3"] == pick[:2] and saved["alerts"] is True
+    again = repository.save_preferences(
+        db, user_id, {"shortlist": pick[:1], "top3": [], "hidden": pick[1:], "alerts": False}
+    )
+    assert repository.get_preferences(db, user_id)["hidden"] == again["hidden"] == pick[1:]
+
+    runs = repository.ops_runs(db)
+    assert runs and runs[0]["naive_pairs"] > 0 and "user_id" not in runs[0]
+    assert repository.ops_crawl(db)["products"]  # by channel
+    assert isinstance(repository.ops_errors(db), list)
+    assert repository.instant_checks_last_24h(db) == 0

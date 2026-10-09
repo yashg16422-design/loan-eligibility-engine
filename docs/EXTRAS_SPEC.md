@@ -5,6 +5,16 @@ The backend (AWS + n8n + the Treasure Hunt) is **built, deployed and verified li
 change it. Read `CLAUDE.md`, `README.md` and `PLAN.md` first: they explain what the system
 does, the measured numbers, and the house rules.
 
+> **Update (2026-10-09): the dashboard, check and ops pages are BUILT** (by the backend
+> session) in `dashboard/`, served live at `/app/` (`/app/` check, `/app/dashboard`,
+> `/app/ops`) by the api Lambda. **The landing agent builds only the landing page (§3)** in
+> `web/`. Its calls to action link to `/app/` ("Check my eligibility") and `/app/ops` ("See
+> the engine"). Do not rebuild §4–§6. The contract in §6 changed slightly:
+> `/me/shortlist` + `/me/preferences` became one `GET|PUT /me/preferences` with
+> `{shortlist, top3, hidden, alerts}`, and `GET /products` also returns `compiled_rules`.
+> Match the visual tokens in `dashboard/DESIGN.md` (graphite, marigold, Geist) so the
+> landing and the app feel like one product.
+
 **Creative freedom:** this brief sets the goals, the data and the boundaries. Inside them,
 use your own judgement for the best possible result: art direction, motion, copy, component
 design, information architecture. Propose better ideas than the ones written here when you

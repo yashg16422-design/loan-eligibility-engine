@@ -74,3 +74,25 @@ jobs:
           python n8n/build_workflows.py
           git diff --exit-code -- n8n/workflows/ \
             || { echo "::error::n8n/workflows/ is out of date: run python n8n/build_workflows.py and commit"; exit 1; }
+
+  dashboard:
+    # The borrower dashboard + ops console (dashboard/), served by the api Lambda under /app.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Logic tests (simulator == Workflow B on the live catalog, EMI, fit score)
+        run: npm test
+      - name: Production build
+        run: npx vite build

@@ -88,7 +88,7 @@ functions:
 
   api:
     handler: loan_engine/api/handler.handler
-    description: Upload UI + presigned POST tickets + job status (HTTP API)
+    description: Upload UI, presigned POST, job status, borrower dashboard API + app, ops view
     role: ApiRole
     timeout: 10
     memorySize: 256
@@ -102,11 +102,25 @@ functions:
       DB_HOST: !GetAtt Database.Endpoint.Address
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       DATA_BUCKET: ${self:custom.dataBucket}
+      TOKEN_SECRET_ARN: !Ref DashboardTokenSecret
+      COMPILE_PROMPT_VERSION: compile_v1 # = COMPILE_PROMPT_VERSION in n8n/build_workflows.py
+      VALIDATION_RULES: "" # keep equal to the ingest function's: one set of rules
       POWERTOOLS_LOG_LEVEL: INFO
     events:
       - httpApi: GET /
       - httpApi: POST /uploads
       - httpApi: GET /uploads/{job_id}
+      - httpApi: POST /check
+      - httpApi: GET /me
+      - httpApi: GET /me/matches
+      - httpApi: GET /me/preferences
+      - httpApi: PUT /me/preferences
+      - httpApi: GET /products
+      - httpApi: GET /ops/runs
+      - httpApi: GET /ops/crawl
+      - httpApi: GET /ops/errors
+      - httpApi: GET /app
+      - httpApi: GET /app/{proxy+}
 
 resources:
   Resources:
@@ -542,6 +556,16 @@ resources:
           PasswordLength: 48
           ExcludePunctuation: true
 
+    # HMAC key for the borrower dashboard's signed links (no accounts, no passwords).
+    DashboardTokenSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${sls:stage}/dashboard/token-key
+        Description: HMAC-SHA256 key that signs borrower dashboard tokens
+        GenerateSecretString:
+          PasswordLength: 64
+          ExcludePunctuation: true
+
     # ------------------------------------------------------------------
     # n8n host: EC2 in a public subnet for OUTBOUND traffic only (no inbound from the
     # internet, no SSH). Reached via SSM Session Manager port forwarding.
@@ -767,7 +791,9 @@ resources:
                 - Sid: OwnDbSecretOnly
                   Effect: Allow
                   Action: secretsmanager:GetSecretValue
-                  Resource: !Ref AppIngestDbSecret
+                  Resource:
+                    - !Ref AppIngestDbSecret
+                    - !Ref DashboardTokenSecret
 
   # Merge throttling into the HTTP API stage that Serverless generates:
   # the only public surface gets a rate limit (PLAN.md §4.3).
