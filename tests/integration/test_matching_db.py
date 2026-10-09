@@ -1,9 +1,10 @@
 """Integration tests for Workflow B's SQL (the Treasure Hunt) on a real Postgres.
 
-Runs with PG_TEST_PORT set (see test_ingest_db.py for the docker command). Uses the
-real 10k users.csv (through the production ingest code) and a snapshot of the live
-crawled products, then proves the optimized class-based pipeline gives EXACTLY the same
-matches as the naive per-user evaluation.
+Runs with PG_TEST_PORT set (see test_ingest_db.py for the docker command). Loads 10k users
+through the production ingest code (the real users.csv locally, its synthetic twin in CI:
+tests/synthetic_users.py) and a snapshot of the live crawled products, then proves the
+optimized class-based pipeline gives EXACTLY the same matches as the naive per-user
+evaluation.
 """
 
 from __future__ import annotations
@@ -21,12 +22,12 @@ from loan_engine.common.secrets import DbCredentials
 from loan_engine.common.validation import DEFAULT_RULES
 from loan_engine.ingest import handler as ingest
 from loan_engine.ingest.events import UploadRef
+from tests.synthetic_users import users_csv_bytes
 
 PORT = os.environ.get("PG_TEST_PORT")
 pytestmark = pytest.mark.skipif(not PORT, reason="set PG_TEST_PORT to run DB integration tests")
 
 ROOT = Path(__file__).resolve().parents[2]
-USERS_CSV = ROOT / "data" / "users.csv"
 PRODUCTS = ROOT / "tests" / "fixtures" / "products_snapshot.json"
 CREDS = DbCredentials("postgres", os.environ.get("PG_TEST_PASSWORD", "localtest"))
 PROMPT_VERSION = "test_v1"
@@ -47,8 +48,6 @@ def run_sql(db: psycopg.Connection, name: str, *params: object) -> dict:
 @pytest.fixture(scope="module")
 def db() -> psycopg.Connection:
     """Fresh schema (all numbered migrations), 10k real users, the live product snapshot."""
-    if not USERS_CSV.exists():
-        pytest.skip("data/users.csv absent")
     conn = psycopg.connect(
         host="localhost",
         port=int(PORT or 0),
@@ -71,7 +70,7 @@ def db() -> psycopg.Connection:
         def get_object(self, *, Bucket: str, Key: str) -> dict:  # noqa: N803
             import io
 
-            return {"Body": io.BytesIO(USERS_CSV.read_bytes())}
+            return {"Body": io.BytesIO(users_csv_bytes())}
 
     deps = ingest.Dependencies(
         "localhost", "x", int(PORT or 0), DEFAULT_RULES, ingest.NoopNotifier(), S3()

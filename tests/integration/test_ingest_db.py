@@ -29,6 +29,7 @@ from loan_engine.common.secrets import DbCredentials
 from loan_engine.common.validation import DEFAULT_RULES
 from loan_engine.ingest import handler as ingest
 from loan_engine.ingest.events import UploadRef
+from tests.synthetic_users import users_csv_bytes
 
 PORT = os.environ.get("PG_TEST_PORT")
 pytestmark = pytest.mark.skipif(not PORT, reason="set PG_TEST_PORT to run DB integration tests")
@@ -114,10 +115,10 @@ def job(db: psycopg.Connection, job_id: uuid.UUID) -> dict[str, Any]:
 # ---------------------------------------------------------------- tests
 
 
-@pytest.mark.skipif(not (ROOT / "data" / "users.csv").exists(), reason="data/users.csv absent")
-def test_real_users_csv_loads_10k_rows(db, env):
+def test_10k_users_csv_loads(db, env):
+    """The real file locally; its synthetic twin in CI (tests/synthetic_users.py)."""
     deps, s3, notifier = env
-    upload = new_job(db, s3, (ROOT / "data" / "users.csv").read_bytes())
+    upload = new_job(db, s3, users_csv_bytes())
 
     assert ingest.process_upload(upload, 1, deps) is ingest.Outcome.COMPLETED
 

@@ -550,7 +550,8 @@ published criteria**, never an approval probability.
     sub-workflow ids exist, webhooks are authenticated, credentials are references only,
     **no secrets** in the exports, and every Code node compiles
   - **12 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
-    the real 10k CSV, and the Treasure Hunt in upload and **product** mode, each with its
+    10k users (the real CSV locally; a deterministic synthetic twin in CI, since the real file
+    is never committed), and the Treasure Hunt in upload and **product** mode, each with its
     brute-force proof
 - **42 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
   what runs inside n8n.
