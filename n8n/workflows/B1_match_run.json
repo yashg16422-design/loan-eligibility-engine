@@ -1,0 +1,458 @@
+{
+  "id": "LoanEngineWfB101",
+  "name": "B1 · Match one run (Treasure Hunt)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## B1 · The Optimization Treasure Hunt\n**Stage 0** · Nova Pro compiles each product's free-text criteria ONCE into checkable rules (cached by text hash) → LLM cost scales with distinct criteria texts, not users.\n**Stage 1+2** · SQL equivalence classes: every threshold is a cut point, users with identical intervals form one class → decide class x product.\n**Stage 3** · expand to users, fit score, diff vs active matches (one transaction, advisory lock).\n**Proof** · naive per-user re-evaluation must give 0 mismatches.",
+        "width": 620,
+        "height": 320
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -420
+      ],
+      "id": "LoanEngineWfB101-00"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "name": "From B (run)",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "LoanEngineWfB101-01"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex') AS text_id,\n       p.other_criteria_text AS text\nFROM loan_products p\nWHERE p.is_active AND p.other_criteria_text IS NOT NULL\n  AND NOT EXISTS (SELECT 1 FROM criteria_rules r\n                  WHERE r.prompt_version = $1\n                    AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex'))\nORDER BY 1",
+        "options": {
+          "queryReplacement": "={{ [ 'compile_v1' ] }}"
+        }
+      },
+      "name": "Criteria to compile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "id": "LoanEngineWfB101-02",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// Cache misses only. 10 texts per Nova call; usually 0 after the first run.\nconst texts = $input.all().map((i) => i.json).filter((t) => t.text_id);\nconst batches = [];\nfor (let i = 0; i < texts.length; i += 10) batches.push({ texts: texts.slice(i, i + 10) });\nreturn batches.length ? batches.map((b) => ({ json: b })) : [{ json: { texts: [] } }];\n"
+      },
+      "name": "Batches of 10 texts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "LoanEngineWfB101-03"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.texts.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Anything to compile?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "LoanEngineWfB101-04"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Shared parser for the LLM's JSON answers (pure functions), used by llm.js and compile.js.\n *\n * Why text JSON and not a schema-forced tool call: tested live on 2026-10-09. With\n * toolChoice.tool, Nova Pro calls the tool ONCE and filled the batch array with only 1-2 of\n * 5 pages (text mode: 5/5, and 40/40 on the full crawl). Batching matters more, so the answer\n * stays a JSON array in text, parsed defensively here; the quote verification in\n * normalize.js / compile.js decides what is trusted.\n */\n\n// Placeholder strings mean \"not stated\": make them real nulls (or drop them from string\n// lists) so the normalizers never try to parse the word \"null\". Nova wrote the text \"null\"\n// in the tool-mode experiment; the prompt forbids it in text mode, this enforces it.\nconst PLACEHOLDER = /^\\s*(null|none|nil|n\\/?a|not (stated|mentioned|available|specified)|-+)?\\s*$/i;\n\nfunction sanitize(value) {\n  if (Array.isArray(value)) return value.map(sanitize).filter((v) => v !== null);\n  if (value && typeof value === 'object') {\n    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitize(v)]));\n  }\n  return typeof value === 'string' && PLACEHOLDER.test(value) ? null : value;\n}\n\n/**\n * The JSON array in the model's first text block, tolerating ``` fences and stray prose\n * around it. Throws with a readable reason (callers catch and record it, never crash).\n */\nfunction jsonList(response) {\n  const content = response?.output?.message?.content || [];\n  const raw = content.find((c) => typeof c?.text === 'string')?.text;\n  if (!raw) throw new Error(response?.message || response?.error?.message || 'empty model response');\n  const json = raw.trim().replace(/^```(?:json)?\\s*|\\s*```$/g, '');\n  const start = json.indexOf('[');\n  const end = json.lastIndexOf(']');\n  if (start < 0 || end < start) throw new Error('model did not return a JSON array');\n  const list = JSON.parse(json.slice(start, end + 1));\n  if (!Array.isArray(list)) throw new Error('model did not return a JSON array');\n  return sanitize(list);\n}\n\nif (typeof module !== 'undefined') module.exports = { PLACEHOLDER, sanitize, jsonList };\n\n\n/**\n * Workflow B, Stage 0: compile free-text criteria into checkable rules (pure functions).\n *\n * Depends on normalize.js (monthlyIncome, ageRange, minCreditScore) and structured.js\n * (jsonList): build_workflows.py pastes them into the Code node. Each text is compiled once and cached in\n * criteria_rules, so LLM cost scales with distinct criteria texts, not with users.\n */\n\nconst RULE_FIELDS = ['monthly_income', 'credit_score', 'age'];\nconst APPLIES_TO = ['any', 'salaried', 'self_employed', 'business'];\n// Notes our own pipeline appends to other_criteria_text: never rules or requirements.\nconst PIPELINE_NOTES = /could not be verified automatically|criteria not published/i;\n\nconst squashText = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9₹%]+/g, ' ').trim();\n\n/** Converse request for a batch of criteria texts: [{ text_id, text }]. */\nfunction buildCompileRequest(texts, prompt) {\n  const blocks = texts.map((t) => `=== TEXT ${t.text_id} ===\\n${String(t.text).slice(0, 3000)}`);\n  return {\n    system: [{ text: prompt.system }],\n    messages: [{ role: 'user', content: [{ text: `${prompt.head}\\n\\n${blocks.join('\\n\\n')}` }] }],\n    inferenceConfig: { temperature: 0, maxTokens: Math.min(400 * texts.length + 300, 5000) },\n  };\n}\n\n/** Number for a rule, computed by the tested normalizers (never by the LLM). */\nfunction ruleValue(field, op, valueText) {\n  if (field === 'monthly_income') return monthlyIncome(valueText);\n  if (field === 'credit_score') return minCreditScore(valueText);\n  if (field === 'age') {\n    const { min, max } = ageRange(valueText);\n    return op === '<=' ? (max ?? min) : (min ?? max);\n  }\n  return null;\n}\n\n/**\n * Validate one compiled text against its source: every rule must have a known field/op,\n * a parseable value, and a quote that appears in the text and contains the value's digits.\n * Anything that fails is demoted to a requirement (shown to the user), never dropped and\n * never used to reject anyone.\n */\nfunction validateCompiled(compiled, sourceText) {\n  const page = squashText(sourceText);\n  const rules = [];\n  const requirements = (compiled.requirements || [])\n    .map((r) => String(r).trim())\n    .filter((r) => r && !PIPELINE_NOTES.test(r));\n  for (const rule of compiled.rules || []) {\n    const quote = String(rule.quote || '');\n    const value = ruleValue(rule.field, rule.op, rule.value_text);\n    const digits = String(rule.value_text || '').match(/\\d[\\d,.]*/g) || [];\n    const ok = RULE_FIELDS.includes(rule.field) && ['>=', '<='].includes(rule.op)\n      && APPLIES_TO.includes(rule.applies_to) && value !== null && Number.isFinite(value)\n      && quote && page.includes(squashText(quote))\n      && digits.every((d) => squashText(quote).includes(squashText(d)));\n    if (ok) {\n      rules.push({ field: rule.field, op: rule.op, value, applies_to: rule.applies_to, quote });\n    } else if (quote && !PIPELINE_NOTES.test(quote)) {\n      requirements.push(quote);\n    }\n  }\n  return { rules, requirements: [...new Set(requirements)] };\n}\n\n/** Parse the model's answer for a batch; never throws. Returns { byId, ok, error, tokens }. */\nfunction parseCompileResponse(response, texts) {\n  const out = { byId: {}, ok: false, error: null, inputTokens: 0, outputTokens: 0 };\n  try {\n    out.inputTokens = response?.usage?.inputTokens ?? 0;\n    out.outputTokens = response?.usage?.outputTokens ?? 0;\n    const parsed = jsonList(response);\n    const sources = Object.fromEntries(texts.map((t) => [t.text_id, t.text]));\n    for (const item of parsed) {\n      if (item && item.text_id in sources) out.byId[item.text_id] = validateCompiled(item, sources[item.text_id]);\n    }\n    out.ok = Object.keys(out.byId).length > 0;\n    if (!out.ok) out.error = 'no text_id in the answer matched the request';\n  } catch (err) {\n    out.error = String(err.message || err).slice(0, 500);\n  }\n  return out;\n}\n\nif (typeof module !== 'undefined') module.exports = { buildCompileRequest, ruleValue, validateCompiled, parseCompileResponse };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst PROMPT_VERSION = \"compile_v1\";\nconst PROMPT = { system: \"You turn the free-text eligibility conditions of Indian personal-loan products into\\ncheckable rules. Our applicant data has ONLY these fields: monthly income (rupees per\\nmonth), credit score (CIBIL, 300-900), age (years), employment type (salaried,\\nself_employed, business).\\nRules:\\n1. Create a rule ONLY for a condition on monthly income, credit score, or age that applies\\n   unconditionally to an employment type. Use \\\"applies_to\\\": \\\"salaried\\\", \\\"self_employed\\\",\\n   \\\"business\\\", or \\\"any\\\".\\n2. If a condition depends on anything we do not know (city, employer category, loan amount,\\n   tenure, existing relationship, work experience, residence, documents), it is NOT a rule:\\n   put it in requirements, short and verbatim. Example: \\\"\\u20b930,000 for metro cities\\\" is a\\n   requirement, never a rule.\\n3. Preferences are not rules: \\\"750+ preferred\\\" or \\\"higher chances above 750\\\" go to\\n   requirements.\\n4. \\\"op\\\" is \\\">=\\\" for minimums (\\\"at least\\\", \\\"minimum\\\", \\\"above\\\") and \\\"<=\\\" for maximums\\n   (\\\"up to\\\", \\\"maximum\\\", \\\"not more than\\\", \\\"below\\\").\\n5. \\\"value_text\\\" is the value exactly as written (\\\"\\u20b925,000 per month\\\", \\\"750\\\", \\\"60 years\\\").\\n   Do not convert units or compute anything.\\n6. \\\"quote\\\" is the shortest verbatim excerpt of the given text that states the rule.\\n7. Ignore notes such as \\\"could not be verified automatically\\\" and \\\"not published\\\": they\\n   are already handled; do not turn them into rules or requirements.\\n8. Respond with ONLY a JSON array, no prose, no markdown fences.\", head: \"For each criteria text below, return one object:\\n{\\\"text_id\\\": string,\\n \\\"rules\\\": [{\\\"field\\\": \\\"monthly_income\\\" | \\\"credit_score\\\" | \\\"age\\\", \\\"op\\\": \\\">=\\\" | \\\"<=\\\",\\n            \\\"value_text\\\": string, \\\"applies_to\\\": \\\"any\\\" | \\\"salaried\\\" | \\\"self_employed\\\" | \\\"business\\\",\\n            \\\"quote\\\": string}],\\n \\\"requirements\\\": [string]}\" };\n\nreturn $input.all().map((i) => ({ json: { texts: i.json.texts, request: buildCompileRequest(i.json.texts, PROMPT) } }));\n"
+      },
+      "name": "Build compile request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        -160
+      ],
+      "id": "LoanEngineWfB101-05"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://bedrock-runtime.ap-southeast-2.amazonaws.com/model/amazon.nova-pro-v1:0/converse",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "awsAssumeRole",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 120000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "name": "Nova Pro · compile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        -160
+      ],
+      "id": "LoanEngineWfB101-06",
+      "credentials": {
+        "awsAssumeRole": {
+          "id": "fa286DA3YraErW57",
+          "name": "AWS n8n role (assume)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow A, Code node \"Verify + normalize\" (PLAN.md §10.2 steps 5-7).\n *\n * The LLM extracts raw strings; THIS code does the math, deterministically:\n *   \"₹3 lakh p.a.\" -> 25000 (monthly), \"21 to 60 years\" -> {21, 60}, \"10.99% onwards\" -> 10.99\n * and it verifies the LLM: every criteria entry must quote evidence that really appears\n * in the page and contains the numbers it claims. Unverifiable or ambiguous entries are\n * NOT used as hard filters: they become \"conditional: confirm with lender\" (fail safe).\n *\n * Pure functions; pasted into the Code node by n8n/build_workflows.py, tested by node --test.\n * Input item:  { channel, lender_slug, url, eligibility_text, rates_text, extraction }\n * Output: one item per product row (lender x channel x employment type).\n */\n\nconst LAKH = 100000;\nconst CRORE = 10000000;\n\n// Canonical lender keys: \"HDFC\", \"hdfc-bank\", \"HDFC Bank Ltd\" -> \"hdfc\".\nconst LENDER_ALIASES = {\n  hdfc: ['hdfc', 'hdfc-bank'], icici: ['icici', 'icici-bank'], axis: ['axis', 'axis-bank'],\n  sbi: ['sbi', 'sbi-bank', 'state-bank-of-india'], kotak: ['kotak', 'kotak-mahindra-bank', 'kotak-mahindra'],\n  idfc_first: ['idfc', 'idfc-bank', 'idfc-first', 'idfc-first-bank'], indusind: ['indusind', 'indusind-bank'],\n  tata_capital: ['tatacap', 'tata-capital'], rbl: ['rbl', 'rbl-bank'], yes_bank: ['yes', 'yes-bank'],\n  federal: ['federal', 'federal-bank'], hdb_financial: ['hdbfs', 'hdb-financial'], iifl: ['iifl', 'iifl-finance'],\n  pnb: ['pnb', 'punjab-national-bank'], bank_of_baroda: ['bank-of-baroda', 'bob'],\n  standard_chartered: ['standard-chartered', 'standard-chartered-bank'],\n};\nconst LENDER_NAMES = {\n  hdfc: 'HDFC Bank', icici: 'ICICI Bank', axis: 'Axis Bank', sbi: 'SBI', kotak: 'Kotak Mahindra Bank',\n  idfc_first: 'IDFC FIRST Bank', indusind: 'IndusInd Bank', tata_capital: 'Tata Capital', rbl: 'RBL Bank',\n  yes_bank: 'YES Bank', federal: 'Federal Bank', hdb_financial: 'HDB Financial Services', iifl: 'IIFL Finance',\n  pnb: 'Punjab National Bank', bank_of_baroda: 'Bank of Baroda', standard_chartered: 'Standard Chartered',\n};\nconst CHANNEL_LABELS = { direct: 'Direct', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\nconst EMPLOYMENT = { salaried: 'Salaried', self_employed: 'Self-employed', business: 'Business', any: 'All applicants' };\nconst EMPLOYMENT_WORDS = {\n  salaried: /\\bsalaried\\b/i, self_employed: /self[- ]?employed/i, business: /\\bbusiness\\b/i,\n};\n\nfunction lenderKey(slug) {\n  const s = String(slug || '').toLowerCase().trim().replace(/[\\s_]+/g, '-');\n  for (const [key, aliases] of Object.entries(LENDER_ALIASES)) if (aliases.includes(s)) return key;\n  return s.replace(/-/g, '_');\n}\n\nfunction lenderName(key) {\n  return LENDER_NAMES[key] || key.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');\n}\n\n/** \"50,00,000\" / \"25,000\" / \"3.5\" -> number (Indian digit grouping is just commas). */\nfunction num(s) { return Number(String(s).replace(/,/g, '')); }\n\n/** Every amount in a string, in rupees, honouring lakh/crore/k multipliers. */\nfunction amounts(raw) {\n  const out = [];\n  const re = /(\\d[\\d,]*(?:\\.\\d+)?)\\s*(lakhs?|lacs?|l\\b|crores?|cr\\b|k\\b|thousand)?/gi;\n  let m;\n  while ((m = re.exec(String(raw || ''))) !== null) {\n    let v = num(m[1]);\n    const unit = (m[2] || '').toLowerCase();\n    if (/^(lakh|lac|l$)/.test(unit)) v *= LAKH;\n    else if (/^(crore|cr)/.test(unit)) v *= CRORE;\n    else if (unit === 'k' || unit === 'thousand') v *= 1000;\n    if (Number.isFinite(v) && v > 0) out.push(v);\n  }\n  return out;\n}\n\n/**\n * Minimum income -> rupees PER MONTH. \"p.a.\"/\"annual\" values are divided by 12.\n * Several values (e.g. \"₹25,000; ₹30,000 in metro cities\") -> the MOST PERMISSIVE\n * (lowest) goes into the hard filter; the condition text is kept separately.\n */\n// Business-size criteria (turnover, ITR, audited financials, profit) are not a salary:\n// they cannot be compared with a user's monthly income, so they become conditions.\nconst NOT_INCOME = /turnover|itr|income tax return|audited|financials|profit|gross receipts/i;\nconst MAX_PLAUSIBLE_MONTHLY = 1000000; // ₹10 lakh/month: anything above is surely an annual figure\n\nfunction monthlyIncome(raw) {\n  if (!raw || NOT_INCOME.test(raw)) return null;\n  const values = amounts(raw).filter((v) => v >= 1000);\n  if (!values.length) return null;\n  const yearly = /p\\.?\\s?a\\b|per annum|annual|annually|yearly|a year|per year/i.test(raw);\n  const monthly = Math.min(...values) / (yearly ? 12 : 1);\n  return Math.round(monthly > MAX_PLAUSIBLE_MONTHLY ? monthly / 12 : monthly);\n}\n\n/** \"21 to 60 years\", \"Age at least 25 and less than 60\", \"Up to 76 years\" -> {min, max}. */\nfunction ageRange(raw) {\n  if (!raw) return { min: null, max: null };\n  const s = String(raw).toLowerCase();\n  const nums = (s.match(/\\d{2}/g) || []).map(Number).filter((n) => n >= 18 && n <= 100);\n  if (!nums.length) return { min: null, max: null };\n  // \"less than 60\" / \"below 60\" / \"under 60\" are exclusive upper bounds.\n  const exclusiveMax = /(less than|below|under)\\s*(\\d{2})/.exec(s);\n  const onlyMax = /^(?:\\D*)(up ?to|max(?:imum)?|not more than|less than|below|under)\\b/.test(s) && nums.length === 1;\n  const onlyMin = /(at least|minimum|min\\.?|above|over|\\+|and above|or above)/.test(s) && nums.length === 1;\n  // Several bands (\"25 (doctors) and 28 (others) to 65\") -> the most permissive range goes\n  // into the hard filter; toProducts keeps the full text as a condition.\n  let min = nums.length >= 2 ? Math.min(...nums) : null;\n  let max = nums.length >= 2 ? Math.max(...nums) : null;\n  if (nums.length === 1) { if (onlyMax) max = nums[0]; else if (onlyMin) min = nums[0]; else min = nums[0]; }\n  if (exclusiveMax && Number(exclusiveMax[2]) === max) max -= 1;\n  if (exclusiveMax && nums.length === 1) { min = null; max = Number(exclusiveMax[2]) - 1; }\n  return { min, max };\n}\n\n/** \"750 and above\", \"CIBIL 700+\", \"650-900\" -> minimum score (300..900), else null. */\nfunction minCreditScore(raw) {\n  if (!raw) return null;\n  const nums = (String(raw).match(/\\d{3}/g) || []).map(Number).filter((n) => n >= 300 && n <= 900);\n  return nums.length ? Math.min(...nums) : null;\n}\n\n/** \"10.99% - 24% p.a.\", \"10.99% onwards\", \"2.79% per month\" -> {min, max, type} in % p.a. */\nfunction rateRange(raw) {\n  if (!raw) return { min: null, max: null, type: 'unknown' };\n  const s = String(raw);\n  let rates = (s.match(/\\d{1,2}(?:\\.\\d{1,2})?(?=\\s*%)/g) || []).map(Number);\n  if (/per month|p\\.?\\s?m\\b|monthly/i.test(s)) rates = rates.map((r) => Math.round(r * 12 * 100) / 100);\n  rates = rates.filter((r) => r > 0 && r < 100);\n  const type = /flat/i.test(s) ? 'flat' : /reducing/i.test(s) ? 'reducing' : 'unknown';\n  if (!rates.length) return { min: null, max: null, type };\n  const onwards = /onwards|starting|from|min/i.test(s) && rates.length === 1;\n  return { min: Math.min(...rates), max: onwards ? null : Math.max(...rates), type };\n}\n\n/** \"Up to ₹50 lakh\", \"₹50,000 to ₹50,00,000\" -> {min, max} in rupees. */\nfunction loanAmountRange(raw) {\n  const v = amounts(raw).filter((x) => x >= 1000);\n  if (!v.length) return { min: null, max: null };\n  return v.length === 1 ? { min: null, max: v[0] } : { min: Math.min(...v), max: Math.max(...v) };\n}\n\n/** \"12 months to 84 months\", \"up to 5 years\" -> max tenure in months. */\nfunction tenureMaxMonths(raw) {\n  if (!raw) return null;\n  const s = String(raw).toLowerCase();\n  const months = (s.match(/(\\d{1,3})\\s*months?/g) || []).map((x) => parseInt(x, 10));\n  const years = (s.match(/(\\d{1,2})\\s*(?:years?|yrs)/g) || []).map((x) => parseInt(x, 10) * 12);\n  const all = [...months, ...years].filter((n) => n > 0 && n <= 360);\n  return all.length ? Math.max(...all) : null;\n}\n\nconst squash = (s) => String(s || '').toLowerCase().replace(/&#x27;|&#39;/g, \"'\").replace(/[^a-z0-9₹%]+/g, ' ').trim();\n\n/**\n * Check one LLM criteria entry against the page text.\n *   - every sentence fragment of the evidence quote must occur verbatim in the page\n *     sections (anti-hallucination; stitched multi-sentence quotes are fine);\n *   - every number in age/min_income/credit_score must occur in the evidence;\n *   - for a specific employment type, the evidence must name it and no OTHER type\n *     (a quote that mentions both cannot prove which band belongs to which).\n * Returns 'ok' | 'ambiguous' | 'unverified'.\n */\nfunction verifyEntry(entry, sectionText) {\n  const evidence = String(entry.evidence || '');\n  const page = squash(sectionText);\n  // Models often stitch several sentences into one quote. Accept that, but every\n  // fragment must still appear verbatim on the page: an invented fragment fails.\n  const fragments = evidence.split(/[.;\\n•|]+/).map(squash).filter((f) => f.length >= 8);\n  if (!fragments.length || !fragments.every((f) => page.includes(f))) return 'unverified';\n  for (const field of ['age', 'min_income', 'credit_score']) {\n    for (const n of String(entry[field] || '').match(/\\d[\\d,.]*/g) || []) {\n      if (!squash(evidence).includes(squash(n))) return 'unverified';\n    }\n  }\n  const type = entry.employment_type;\n  if (EMPLOYMENT_WORDS[type]) {\n    const mentionsOwn = EMPLOYMENT_WORDS[type].test(evidence);\n    const others = Object.entries(EMPLOYMENT_WORDS).filter(([t, re]) => t !== type && re.test(evidence));\n    // \"Salaried individuals: 21-60\" is ok; \"25-65 for self-employed, 23-60 for salaried\" is not provable.\n    if (others.length && !(mentionsOwn && others.every(([t]) => t === 'business' && type === 'self_employed'))) {\n      return 'ambiguous';\n    }\n  }\n  return 'ok';\n}\n\nconst UNVERIFIED_NOTE = 'Eligibility details could not be verified automatically: confirm with the lender';\n\n/** One extraction (one page) -> product rows ready for the loan_products upsert. */\nfunction toProducts(page) {\n  const x = page.extraction || {};\n  const key = lenderKey(page.lender_slug);\n  const name = lenderName(key);\n  const rate = rateRange(x.interest_rate);\n  const amount = loanAmountRange(x.loan_amount);\n  const entries = Array.isArray(x.criteria) && x.criteria.length ? x.criteria : [{ employment_type: 'any', other_conditions: [] }];\n  return entries.map((entry) => {\n    const type = EMPLOYMENT[entry.employment_type] ? entry.employment_type : 'any';\n    const check = verifyEntry(entry, `${page.eligibility_text || ''}\\n${page.rates_text || ''}`);\n    const trusted = check === 'ok';\n    const age = trusted ? ageRange(entry.age) : { min: null, max: null };\n    const conditions = [...(entry.other_conditions || [])];\n    if (!trusted) conditions.push(UNVERIFIED_NOTE);\n    // When the hard filter had to simplify, the exact wording still reaches the user.\n    if (trusted && entry.age && (String(entry.age).match(/\\d{2}/g) || []).length > 2) conditions.push(`Age: ${entry.age}`);\n    if (trusted && entry.min_income && NOT_INCOME.test(entry.min_income)) conditions.push(`Business criteria: ${entry.min_income}`);\n    // A lender that publishes NO criteria is never shown as plainly \"eligible\".\n    if (trusted && !entry.age && !entry.min_income && !entry.credit_score) {\n      conditions.push('Eligibility criteria not published: confirm with the lender');\n    }\n    return {\n      lender: name,\n      lender_key: key,\n      channel: page.channel,\n      source_url: page.url,\n      product_name: `${name} Personal Loan · ${CHANNEL_LABELS[page.channel] || page.channel} · ${EMPLOYMENT[type]}`,\n      product_url: page.url,\n      interest_rate_min: rate.min,\n      interest_rate_max: rate.max,\n      rate_type: rate.type,\n      min_monthly_income: trusted ? monthlyIncome(entry.min_income) : null,\n      min_credit_score: trusted ? minCreditScore(entry.credit_score) : null,\n      max_credit_score: null,\n      min_age: age.min,\n      max_age: age.max,\n      employment_types: type === 'any' ? null : [type],\n      loan_amount_min: amount.min,\n      loan_amount_max: amount.max,\n      tenure_months_max: tenureMaxMonths(x.tenure),\n      other_criteria_text: conditions.length ? conditions.join('; ') : null,\n      verification: check,\n      raw_extracted: { ...x, criteria: [entry] },\n    };\n  });\n}\n\n// Exported for `node --test`; inside n8n there is no `module`, so this is skipped.\n// Bump when this file's output changes for the same input: it is part of the page hash,\n// so every page is re-normalized once (Workflow A re-extracts changed-hash pages).\nconst NORMALIZER_VERSION = 2;\n\nif (typeof module !== 'undefined') module.exports = {\n  NORMALIZER_VERSION, lenderKey, lenderName, amounts, monthlyIncome, ageRange, minCreditScore, rateRange,\n  loanAmountRange, tenureMaxMonths, verifyEntry, toProducts,\n};\n\n\n/**\n * Shared parser for the LLM's JSON answers (pure functions), used by llm.js and compile.js.\n *\n * Why text JSON and not a schema-forced tool call: tested live on 2026-10-09. With\n * toolChoice.tool, Nova Pro calls the tool ONCE and filled the batch array with only 1-2 of\n * 5 pages (text mode: 5/5, and 40/40 on the full crawl). Batching matters more, so the answer\n * stays a JSON array in text, parsed defensively here; the quote verification in\n * normalize.js / compile.js decides what is trusted.\n */\n\n// Placeholder strings mean \"not stated\": make them real nulls (or drop them from string\n// lists) so the normalizers never try to parse the word \"null\". Nova wrote the text \"null\"\n// in the tool-mode experiment; the prompt forbids it in text mode, this enforces it.\nconst PLACEHOLDER = /^\\s*(null|none|nil|n\\/?a|not (stated|mentioned|available|specified)|-+)?\\s*$/i;\n\nfunction sanitize(value) {\n  if (Array.isArray(value)) return value.map(sanitize).filter((v) => v !== null);\n  if (value && typeof value === 'object') {\n    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitize(v)]));\n  }\n  return typeof value === 'string' && PLACEHOLDER.test(value) ? null : value;\n}\n\n/**\n * The JSON array in the model's first text block, tolerating ``` fences and stray prose\n * around it. Throws with a readable reason (callers catch and record it, never crash).\n */\nfunction jsonList(response) {\n  const content = response?.output?.message?.content || [];\n  const raw = content.find((c) => typeof c?.text === 'string')?.text;\n  if (!raw) throw new Error(response?.message || response?.error?.message || 'empty model response');\n  const json = raw.trim().replace(/^```(?:json)?\\s*|\\s*```$/g, '');\n  const start = json.indexOf('[');\n  const end = json.lastIndexOf(']');\n  if (start < 0 || end < start) throw new Error('model did not return a JSON array');\n  const list = JSON.parse(json.slice(start, end + 1));\n  if (!Array.isArray(list)) throw new Error('model did not return a JSON array');\n  return sanitize(list);\n}\n\nif (typeof module !== 'undefined') module.exports = { PLACEHOLDER, sanitize, jsonList };\n\n\n/**\n * Workflow B, Stage 0: compile free-text criteria into checkable rules (pure functions).\n *\n * Depends on normalize.js (monthlyIncome, ageRange, minCreditScore) and structured.js\n * (jsonList): build_workflows.py pastes them into the Code node. Each text is compiled once and cached in\n * criteria_rules, so LLM cost scales with distinct criteria texts, not with users.\n */\n\nconst RULE_FIELDS = ['monthly_income', 'credit_score', 'age'];\nconst APPLIES_TO = ['any', 'salaried', 'self_employed', 'business'];\n// Notes our own pipeline appends to other_criteria_text: never rules or requirements.\nconst PIPELINE_NOTES = /could not be verified automatically|criteria not published/i;\n\nconst squashText = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9₹%]+/g, ' ').trim();\n\n/** Converse request for a batch of criteria texts: [{ text_id, text }]. */\nfunction buildCompileRequest(texts, prompt) {\n  const blocks = texts.map((t) => `=== TEXT ${t.text_id} ===\\n${String(t.text).slice(0, 3000)}`);\n  return {\n    system: [{ text: prompt.system }],\n    messages: [{ role: 'user', content: [{ text: `${prompt.head}\\n\\n${blocks.join('\\n\\n')}` }] }],\n    inferenceConfig: { temperature: 0, maxTokens: Math.min(400 * texts.length + 300, 5000) },\n  };\n}\n\n/** Number for a rule, computed by the tested normalizers (never by the LLM). */\nfunction ruleValue(field, op, valueText) {\n  if (field === 'monthly_income') return monthlyIncome(valueText);\n  if (field === 'credit_score') return minCreditScore(valueText);\n  if (field === 'age') {\n    const { min, max } = ageRange(valueText);\n    return op === '<=' ? (max ?? min) : (min ?? max);\n  }\n  return null;\n}\n\n/**\n * Validate one compiled text against its source: every rule must have a known field/op,\n * a parseable value, and a quote that appears in the text and contains the value's digits.\n * Anything that fails is demoted to a requirement (shown to the user), never dropped and\n * never used to reject anyone.\n */\nfunction validateCompiled(compiled, sourceText) {\n  const page = squashText(sourceText);\n  const rules = [];\n  const requirements = (compiled.requirements || [])\n    .map((r) => String(r).trim())\n    .filter((r) => r && !PIPELINE_NOTES.test(r));\n  for (const rule of compiled.rules || []) {\n    const quote = String(rule.quote || '');\n    const value = ruleValue(rule.field, rule.op, rule.value_text);\n    const digits = String(rule.value_text || '').match(/\\d[\\d,.]*/g) || [];\n    const ok = RULE_FIELDS.includes(rule.field) && ['>=', '<='].includes(rule.op)\n      && APPLIES_TO.includes(rule.applies_to) && value !== null && Number.isFinite(value)\n      && quote && page.includes(squashText(quote))\n      && digits.every((d) => squashText(quote).includes(squashText(d)));\n    if (ok) {\n      rules.push({ field: rule.field, op: rule.op, value, applies_to: rule.applies_to, quote });\n    } else if (quote && !PIPELINE_NOTES.test(quote)) {\n      requirements.push(quote);\n    }\n  }\n  return { rules, requirements: [...new Set(requirements)] };\n}\n\n/** Parse the model's answer for a batch; never throws. Returns { byId, ok, error, tokens }. */\nfunction parseCompileResponse(response, texts) {\n  const out = { byId: {}, ok: false, error: null, inputTokens: 0, outputTokens: 0 };\n  try {\n    out.inputTokens = response?.usage?.inputTokens ?? 0;\n    out.outputTokens = response?.usage?.outputTokens ?? 0;\n    const parsed = jsonList(response);\n    const sources = Object.fromEntries(texts.map((t) => [t.text_id, t.text]));\n    for (const item of parsed) {\n      if (item && item.text_id in sources) out.byId[item.text_id] = validateCompiled(item, sources[item.text_id]);\n    }\n    out.ok = Object.keys(out.byId).length > 0;\n    if (!out.ok) out.error = 'no text_id in the answer matched the request';\n  } catch (err) {\n    out.error = String(err.message || err).slice(0, 500);\n  }\n  return out;\n}\n\nif (typeof module !== 'undefined') module.exports = { buildCompileRequest, ruleValue, validateCompiled, parseCompileResponse };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\n// Every rule is re-checked against its source text; failures become requirements.\nconst PROMPT_VERSION = \"compile_v1\";\nconst rows = [];\nlet inTok = 0, outTok = 0, calls = 0;\n$input.all().forEach((item, i) => {\n  const { texts } = $('Build compile request').itemMatching(i).json;\n  const res = item.json.error ? { message: item.json.error.message || 'request failed' } : item.json;\n  const parsed = parseCompileResponse(res, texts);\n  calls += 1; inTok += parsed.inputTokens; outTok += parsed.outputTokens;\n  for (const t of texts) {\n    const c = parsed.byId[t.text_id];\n    if (c) rows.push({ criteria_text_hash: t.text_id, prompt_version: PROMPT_VERSION, rules: c.rules,\n                       requirements: c.requirements, model_id: 'amazon.nova-pro-v1:0' });\n    // Not compiled (LLM failed): no row, so the product stays \"conditional\" and is retried next run.\n  }\n});\nconst cost = (inTok / 1000) * 0.0008 + (outTok / 1000) * 0.0032;\nreturn [{ json: { rows, calls, inTok, outTok, cost } }];\n"
+      },
+      "name": "Validate compiled rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -160
+      ],
+      "id": "LoanEngineWfB101-07"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO criteria_rules (criteria_text_hash, prompt_version, rules, requirements, model_id,\n                              llm_input_tokens, llm_output_tokens)\n  SELECT criteria_text_hash, prompt_version, rules, requirements, model_id, NULL, NULL\n  FROM jsonb_to_recordset($2::jsonb) AS r(criteria_text_hash text, prompt_version text, rules jsonb,\n                                          requirements jsonb, model_id text)\n  ON CONFLICT (criteria_text_hash, prompt_version) DO NOTHING\n  RETURNING 1\n)\nUPDATE pipeline_runs SET rules_compiled = (SELECT count(*) FROM ins), llm_calls = $3::int,\n       llm_input_tokens = $4::int, llm_output_tokens = $5::int, llm_cost_usd_est = $6::numeric\nWHERE run_id = $1::uuid\nRETURNING rules_compiled, llm_calls",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id, JSON.stringify($json.rows), $json.calls, $json.inTok, $json.outTok, $json.cost ] }}"
+        }
+      },
+      "name": "Save compiled rules",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1540,
+        -160
+      ],
+      "id": "LoanEngineWfB101-08",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow B · Stage 1 + 2: exact equivalence classes, then a decision per class x product.\n-- Params: $1 run_id (uuid text), $2 prompt_version of the compiled residual rules.\n--\n-- Idea: every threshold any in-scope product uses (its hard criteria AND the numbers in\n-- its LLM-compiled residual rules) is a CUT POINT. Two users whose income, credit score\n-- and age fall between the same consecutive cut points, with the same employment type,\n-- get identical answers to every rule, so they form one class. We decide once per\n-- class x product and expand to users later. Exact, not banded: no false positives.\n--\n-- Why floors are exact: for any cut c, value >= c  <=>  floor(value) >= c, where\n-- floor(value) = the largest cut <= value (or -1 below all cuts). So every comparison\n-- against a cut gives the same answer on the floor as on the real value.\nWITH run AS (\n    SELECT * FROM pipeline_runs WHERE run_id = $1::uuid\n), prods AS (\n    SELECT p.*, r.rules AS residual_rules, r.requirements AS residual_requirements\n    FROM loan_products p\n    LEFT JOIN criteria_rules r\n           ON r.prompt_version = $2\n          AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex')\n    WHERE p.is_active\n      AND ((SELECT mode FROM run) = 'upload' OR p.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[])))\n), usr AS (\n    SELECT u.* FROM users u\n    WHERE (SELECT mode FROM run) = 'products' OR u.upload_job_id = (SELECT job_id FROM run)\n), rule_values AS (  -- numbers inside the compiled residual rules are cut points too\n    SELECT x->>'field' AS field, x->>'op' AS op, (x->>'value')::numeric AS v\n    FROM prods, jsonb_array_elements(coalesce(residual_rules, '[]'::jsonb)) AS x\n), cuts AS (\n    -- \">= v\" splits at ceil(v); \"<= v\" splits at floor(v) + 1 (integer fields)\n    SELECT 'income' AS dim, min_monthly_income AS c FROM prods WHERE min_monthly_income IS NOT NULL\n    UNION SELECT 'income', ceil(v)::int FROM rule_values WHERE field = 'monthly_income' AND op = '>='\n    UNION SELECT 'income', floor(v)::int + 1 FROM rule_values WHERE field = 'monthly_income' AND op = '<='\n    UNION SELECT 'score', min_credit_score FROM prods WHERE min_credit_score IS NOT NULL\n    UNION SELECT 'score', max_credit_score + 1 FROM prods WHERE max_credit_score IS NOT NULL\n    UNION SELECT 'score', ceil(v)::int FROM rule_values WHERE field = 'credit_score' AND op = '>='\n    UNION SELECT 'score', floor(v)::int + 1 FROM rule_values WHERE field = 'credit_score' AND op = '<='\n    UNION SELECT 'age', min_age FROM prods WHERE min_age IS NOT NULL\n    UNION SELECT 'age', max_age + 1 FROM prods WHERE max_age IS NOT NULL\n    UNION SELECT 'age', ceil(v)::int FROM rule_values WHERE field = 'age' AND op = '>='\n    UNION SELECT 'age', floor(v)::int + 1 FROM rule_values WHERE field = 'age' AND op = '<='\n), user_floors AS (\n    SELECT u.user_id, u.employment_status,\n        coalesce((SELECT max(c) FROM cuts WHERE dim = 'income' AND c <= u.monthly_income), -1) AS income_floor,\n        coalesce((SELECT max(c) FROM cuts WHERE dim = 'score' AND c <= u.credit_score), -1) AS score_floor,\n        coalesce((SELECT max(c) FROM cuts WHERE dim = 'age' AND c <= u.age), -1) AS age_floor\n    FROM usr u\n), classes AS (\n    SELECT row_number() OVER (ORDER BY employment_status, income_floor, score_floor, age_floor)::int AS class_id,\n           income_floor, score_floor, age_floor, employment_status, count(*)::int AS users\n    FROM user_floors\n    GROUP BY employment_status, income_floor, score_floor, age_floor\n), pairs AS (  -- Stage 1: hard criteria (NULL = \"lender states no limit\" = passes)\n    SELECT c.class_id, c.users, c.income_floor, c.score_floor, c.age_floor, c.employment_status,\n           p.product_id, p.other_criteria_text, p.verification, p.residual_rules, p.residual_requirements\n    FROM classes c\n    JOIN prods p ON\n         (p.min_monthly_income IS NULL OR c.income_floor >= p.min_monthly_income)\n     AND (p.min_credit_score   IS NULL OR c.score_floor  >= p.min_credit_score)\n     AND (p.max_credit_score   IS NULL OR c.score_floor  <  p.max_credit_score + 1)\n     AND (p.min_age            IS NULL OR c.age_floor    >= p.min_age)\n     AND (p.max_age            IS NULL OR c.age_floor    <  p.max_age + 1)\n     AND (p.employment_types   IS NULL OR c.employment_status = ANY (p.employment_types))\n), judged AS (  -- Stage 2: the compiled residual rules, evaluated on the class floors\n    SELECT pr.*,\n        (SELECT coalesce(bool_and(CASE\n                    WHEN x->>'field' = 'monthly_income' AND x->>'op' = '>=' THEN pr.income_floor >= ceil((x->>'value')::numeric)\n                    WHEN x->>'field' = 'monthly_income' AND x->>'op' = '<=' THEN pr.income_floor <  floor((x->>'value')::numeric) + 1\n                    WHEN x->>'field' = 'credit_score'   AND x->>'op' = '>=' THEN pr.score_floor  >= ceil((x->>'value')::numeric)\n                    WHEN x->>'field' = 'credit_score'   AND x->>'op' = '<=' THEN pr.score_floor  <  floor((x->>'value')::numeric) + 1\n                    WHEN x->>'field' = 'age'            AND x->>'op' = '>=' THEN pr.age_floor    >= ceil((x->>'value')::numeric)\n                    WHEN x->>'field' = 'age'            AND x->>'op' = '<=' THEN pr.age_floor    <  floor((x->>'value')::numeric) + 1\n                    ELSE true END), true)\n         FROM jsonb_array_elements(coalesce(pr.residual_rules, '[]'::jsonb)) AS x\n         WHERE x->>'applies_to' IN ('any', pr.employment_status)) AS rules_pass\n    FROM pairs pr\n), decided AS (\n    SELECT class_id, users, product_id,\n        CASE\n            WHEN other_criteria_text IS NULL                  THEN 'eligible'     -- nothing left to check\n            WHEN residual_rules IS NULL                       THEN 'conditional'  -- not compiled / unverified: never a rejection\n            WHEN NOT rules_pass                               THEN 'not_eligible'\n            WHEN jsonb_array_length(residual_requirements) > 0 THEN 'conditional'\n            ELSE 'eligible' END AS tier,\n        CASE\n            WHEN other_criteria_text IS NULL THEN 'sql'\n            WHEN residual_rules IS NULL      THEN 'rules'\n            ELSE 'llm_rules' END AS stage,\n        CASE\n            WHEN other_criteria_text IS NULL THEN NULL\n            WHEN residual_rules IS NULL      THEN other_criteria_text\n            ELSE nullif(array_to_string(ARRAY(SELECT jsonb_array_elements_text(residual_requirements)), '; '), '')\n        END AS requirements\n    FROM judged\n), ins_classes AS (\n    INSERT INTO match_classes (run_id, class_id, income_floor, score_floor, age_floor, employment_status, users)\n    SELECT $1::uuid, class_id, income_floor, score_floor, age_floor, employment_status, users FROM classes\n    RETURNING 1\n), ins_pairs AS (\n    INSERT INTO match_pairs (run_id, class_id, product_id, tier, stage, requirements)\n    SELECT $1::uuid, class_id, product_id, tier, stage, requirements FROM decided\n    RETURNING 1\n)\nUPDATE pipeline_runs SET\n    users_in            = (SELECT count(*) FROM usr),\n    products_in         = (SELECT count(*) FROM prods),\n    naive_pairs         = (SELECT count(*) FROM usr) * (SELECT count(*) FROM prods),\n    classes             = (SELECT count(*) FROM classes),\n    class_product_pairs = (SELECT count(*) FROM classes) * (SELECT count(*) FROM prods),\n    pairs_after_sql     = (SELECT coalesce(sum(users), 0) FROM pairs),\n    rule_decided        = (SELECT count(*) FROM decided WHERE stage IN ('sql', 'rules')),\n    llm_candidates      = (SELECT count(*) FROM decided WHERE stage = 'llm_rules'),\n    not_eligible_pairs  = (SELECT count(*) FROM decided WHERE tier = 'not_eligible'),\n    residual_texts      = (SELECT count(DISTINCT other_criteria_text) FROM prods),\n    -- coalesce: a dimension with no thresholds (e.g. a product-mode run whose product has no\n    -- age rule) must be stored as [] - jsonb_agg of zero rows is NULL -> JSON null, and Stage 3\n    -- cannot iterate a scalar (found by the product-mode integration test).\n    cuts = jsonb_build_object(\n        'income', coalesce((SELECT jsonb_agg(c ORDER BY c) FROM cuts WHERE dim = 'income'), '[]'::jsonb),\n        'score',  coalesce((SELECT jsonb_agg(c ORDER BY c) FROM cuts WHERE dim = 'score'), '[]'::jsonb),\n        'age',    coalesce((SELECT jsonb_agg(c ORDER BY c) FROM cuts WHERE dim = 'age'), '[]'::jsonb)),\n    -- Reference the data-modifying CTEs so they are part of this statement.\n    error = CASE WHEN (SELECT count(*) FROM ins_classes) >= 0 AND (SELECT count(*) FROM ins_pairs) >= 0\n                 THEN NULL END\nWHERE run_id = $1::uuid\nRETURNING run_id, mode, users_in, products_in, naive_pairs, classes, class_product_pairs,\n          pairs_after_sql, rule_decided, llm_candidates, not_eligible_pairs, residual_texts, cuts;",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id, 'compile_v1' ] }}"
+        }
+      },
+      "name": "Stage 1+2 · classes & decisions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "LoanEngineWfB101-09",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow B · between Stage 1 and Stage 3: refresh planner statistics.\n-- Stage 1 just bulk-wrote match_classes/match_pairs and earlier runs wrote matches; with\n-- stale statistics Postgres estimated ~26 rows instead of ~272,000 and picked nested-loop\n-- joins (a 7-minute Stage 3 in testing). ANALYZE takes about a second and fixes the plan.\n-- Allowed for n8n_workflows by GRANT MAINTAIN (PostgreSQL 17) on exactly these tables.\nANALYZE match_classes, match_pairs, matches;",
+        "options": {}
+      },
+      "name": "Refresh planner stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1980,
+        0
+      ],
+      "id": "LoanEngineWfB101-10",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow B · Stage 3: expand class decisions to users, score fit, diff against active\n-- matches. ONE statement = one transaction, serialized by an advisory lock so an\n-- upload-mode run and a product-mode run can never create duplicate active pairs.\n-- Params: $1 run_id.\n--\n-- Fit score (0-100, transparent, every term traceable to a published lender rule):\n--   tier            eligible 60 | conditional 35\n--   income headroom up to 15  (user income / lender minimum: 1x -> 0, 3x or more -> 15)\n--   credit margin   up to 10  (points above the lender minimum, capped at +100)\n--   interest rate   up to 15  (lower starting rate is better; 0% -> 15, 30%+ -> 0)\n--   unknown criterion -> half credit (neither rewarded nor punished)\nWITH lck AS (\n    SELECT pg_advisory_xact_lock(424242) AS locked\n), run AS (\n    SELECT r.* FROM pipeline_runs r, lck WHERE r.run_id = $1::uuid\n), usr AS (\n    SELECT u.* FROM users u\n    WHERE (SELECT mode FROM run) = 'products' OR u.upload_job_id = (SELECT job_id FROM run)\n), user_class AS (  -- the same floors Stage 1 used (cuts stored on the run)\n    SELECT u.user_id, u.monthly_income, u.credit_score, mc.class_id\n    FROM usr u\n    CROSS JOIN LATERAL (\n        SELECT coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'income' FROM run)) c WHERE c::int <= u.monthly_income), -1) AS fi,\n               coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'score' FROM run)) c WHERE c::int <= u.credit_score), -1) AS fs,\n               coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'age' FROM run)) c WHERE c::int <= u.age), -1) AS fa\n    ) f\n    JOIN match_classes mc ON mc.run_id = $1::uuid AND mc.income_floor = f.fi AND mc.score_floor = f.fs\n                         AND mc.age_floor = f.fa AND mc.employment_status = u.employment_status\n), scored AS (\n    SELECT uc.user_id, mp.product_id, mp.tier, mp.requirements,\n        CASE mp.stage WHEN 'llm_rules' THEN 'llm' ELSE mp.stage END AS stage_decided,\n        round(\n              CASE mp.tier WHEN 'eligible' THEN 60 ELSE 35 END\n            + 15 * CASE WHEN p.min_monthly_income IS NULL THEN 0.5\n                        ELSE least(greatest(uc.monthly_income::numeric / p.min_monthly_income - 1, 0), 2) / 2 END\n            + 10 * CASE WHEN p.min_credit_score IS NULL THEN 0.5\n                        ELSE least(greatest(uc.credit_score - p.min_credit_score, 0), 100) / 100.0 END\n            + 15 * CASE WHEN p.interest_rate_min IS NULL THEN 0.5\n                        ELSE greatest(30 - least(p.interest_rate_min, 30), 0) / 30.0 END\n        , 1) AS fit_score,\n        jsonb_strip_nulls(jsonb_build_object(\n            'income_multiple', round(uc.monthly_income::numeric / nullif(p.min_monthly_income, 0), 1),\n            'credit_margin',   uc.credit_score - p.min_credit_score,\n            'rate_from',       p.interest_rate_min,\n            'has_conditions',  mp.requirements IS NOT NULL)) AS fit_reasons\n    FROM user_class uc\n    JOIN match_pairs mp ON mp.run_id = $1::uuid AND mp.class_id = uc.class_id\n                       AND mp.tier IN ('eligible', 'conditional')\n    JOIN loan_products p ON p.product_id = mp.product_id\n), current_active AS (  -- active matches inside this run's scope\n    SELECT m.match_id, m.user_id, m.product_id\n    FROM matches m\n    WHERE m.status = 'active'\n      AND (((SELECT mode FROM run) = 'upload' AND m.user_id IN (SELECT user_id FROM usr))\n        OR ((SELECT mode FROM run) = 'products' AND m.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[]))))\n), ins AS (\n    INSERT INTO matches (user_id, product_id, job_id, match_run_id, tier, requirements,\n                         stage_decided, fit_score, fit_reasons)\n    SELECT s.user_id, s.product_id, (SELECT job_id FROM run), $1::uuid, s.tier, s.requirements,\n           s.stage_decided, s.fit_score, s.fit_reasons\n    FROM scored s\n    WHERE NOT EXISTS (SELECT 1 FROM current_active c WHERE c.user_id = s.user_id AND c.product_id = s.product_id)\n    ON CONFLICT (user_id, product_id) WHERE status = 'active' DO NOTHING\n    RETURNING 1\n), upd AS (  -- tier/requirements changed on a pair the user already had: update in place, no new email\n    UPDATE matches m SET tier = s.tier, requirements = s.requirements, fit_score = s.fit_score,\n                         fit_reasons = s.fit_reasons, stage_decided = s.stage_decided\n    FROM scored s\n    WHERE m.status = 'active' AND m.user_id = s.user_id AND m.product_id = s.product_id\n      AND (m.tier, m.requirements) IS DISTINCT FROM (s.tier, s.requirements)\n    RETURNING 1\n), sup AS (  -- no longer eligible: keep the history, mark superseded (no email)\n    UPDATE matches m SET status = 'superseded', superseded_at = now()\n    FROM current_active c\n    WHERE m.match_id = c.match_id\n      AND NOT EXISTS (SELECT 1 FROM scored s WHERE s.user_id = c.user_id AND s.product_id = c.product_id)\n    RETURNING 1\n), job AS (\n    UPDATE upload_jobs SET match_status = 'DONE', matched_at = now()\n    WHERE job_id = (SELECT job_id FROM run)\n    RETURNING 1\n)\nUPDATE pipeline_runs SET\n    matches_new        = (SELECT count(*) FROM ins),\n    matches_superseded = (SELECT count(*) FROM sup),\n    matches_unchanged  = (SELECT count(*) FROM scored) - (SELECT count(*) FROM ins) - (SELECT count(*) FROM upd),\n    finished_at        = now(),\n    error = CASE WHEN (SELECT count(*) FROM job) >= 0 THEN error END\nWHERE run_id = $1::uuid\nRETURNING run_id, mode, job_id, matches_new, matches_superseded, matches_unchanged,\n          (SELECT count(*) FROM upd) AS matches_updated, (SELECT count(*) FROM scored) AS matched_pairs;",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id ] }}"
+        }
+      },
+      "name": "Stage 3 · expand, score, diff",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "LoanEngineWfB101-11",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Correctness proof for the Treasure Hunt (PLAN.md §11.9).\n-- Params: $1 run_id, $2 prompt_version.\n--\n-- Re-decides EVERY user x product pair the naive way: real values, no classes, no floors,\n-- one row per pair. Then compares with what the optimized pipeline produced (class\n-- decisions expanded to users). The optimization is correct iff the two sets are identical.\nWITH run AS (\n    SELECT * FROM pipeline_runs WHERE run_id = $1::uuid\n), prods AS (\n    SELECT p.*, r.rules AS residual_rules, r.requirements AS residual_requirements\n    FROM loan_products p\n    LEFT JOIN criteria_rules r\n           ON r.prompt_version = $2\n          AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex')\n    WHERE p.is_active\n      AND ((SELECT mode FROM run) = 'upload' OR p.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[])))\n), usr AS (\n    SELECT u.* FROM users u\n    WHERE (SELECT mode FROM run) = 'products' OR u.upload_job_id = (SELECT job_id FROM run)\n), naive AS (  -- every user x every product, decided on the user's REAL values\n    SELECT u.user_id, p.product_id,\n        CASE\n            WHEN NOT ((p.min_monthly_income IS NULL OR u.monthly_income >= p.min_monthly_income)\n                  AND (p.min_credit_score   IS NULL OR u.credit_score  >= p.min_credit_score)\n                  AND (p.max_credit_score   IS NULL OR u.credit_score  <= p.max_credit_score)\n                  AND (p.min_age            IS NULL OR u.age           >= p.min_age)\n                  AND (p.max_age            IS NULL OR u.age           <= p.max_age)\n                  AND (p.employment_types   IS NULL OR u.employment_status = ANY (p.employment_types)))\n                THEN 'fails_hard_criteria'\n            WHEN p.other_criteria_text IS NULL THEN 'eligible'\n            WHEN p.residual_rules IS NULL THEN 'conditional'\n            WHEN NOT (SELECT coalesce(bool_and(CASE\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '>=' THEN u.monthly_income >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '<=' THEN u.monthly_income <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '>=' THEN u.credit_score  >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '<=' THEN u.credit_score  <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '>=' THEN u.age           >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '<=' THEN u.age           <= (x->>'value')::numeric\n                        ELSE true END), true)\n                      FROM jsonb_array_elements(coalesce(p.residual_rules, '[]'::jsonb)) AS x\n                      WHERE x->>'applies_to' IN ('any', u.employment_status))\n                THEN 'not_eligible'\n            WHEN jsonb_array_length(p.residual_requirements) > 0 THEN 'conditional'\n            ELSE 'eligible' END AS tier\n    FROM usr u CROSS JOIN prods p\n), naive_kept AS (\n    SELECT user_id, product_id, tier FROM naive WHERE tier IN ('eligible', 'conditional')\n), optimized AS (  -- what the pipeline stored for this run\n    SELECT m.user_id, m.product_id, m.tier\n    FROM matches m\n    WHERE m.status = 'active' AND m.user_id IN (SELECT user_id FROM usr)\n      AND m.product_id IN (SELECT product_id FROM prods)\n), diff AS (\n    (SELECT * FROM naive_kept EXCEPT SELECT * FROM optimized)\n    UNION ALL\n    (SELECT * FROM optimized EXCEPT SELECT * FROM naive_kept)\n)\nUPDATE pipeline_runs SET correctness_ok = ((SELECT count(*) FROM diff) = 0)\nWHERE run_id = $1::uuid\nRETURNING run_id,\n    (SELECT count(*) FROM naive) AS naive_pairs_evaluated,\n    (SELECT count(*) FROM naive_kept) AS naive_matches,\n    (SELECT count(*) FROM optimized) AS optimized_matches,\n    (SELECT count(*) FROM diff) AS mismatches,\n    correctness_ok;",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id, 'compile_v1' ] }}"
+        }
+      },
+      "name": "Correctness proof",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2420,
+        0
+      ],
+      "id": "LoanEngineWfB101-12",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE pipeline_runs SET status = 'done', finished_at = now(),\n       rules_compiled = coalesce(rules_compiled, 0), llm_calls = coalesce(llm_calls, 0),\n       llm_cache_hits = residual_texts - coalesce(rules_compiled, 0),\n       llm_input_tokens = coalesce(llm_input_tokens, 0), llm_output_tokens = coalesce(llm_output_tokens, 0),\n       llm_cost_usd_est = coalesce(llm_cost_usd_est, 0)\nWHERE run_id = $1::uuid\nRETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, classes,\n          class_product_pairs, pairs_after_sql, rule_decided, llm_candidates, not_eligible_pairs,\n          residual_texts, rules_compiled, llm_cache_hits, llm_calls, llm_input_tokens, llm_output_tokens,\n          llm_cost_usd_est, matches_new, matches_superseded, matches_unchanged, correctness_ok",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id ] }}"
+        }
+      },
+      "name": "Finish run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        0
+      ],
+      "id": "LoanEngineWfB101-13",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "From B (run)": {
+      "main": [
+        [
+          {
+            "node": "Criteria to compile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Criteria to compile": {
+      "main": [
+        [
+          {
+            "node": "Batches of 10 texts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batches of 10 texts": {
+      "main": [
+        [
+          {
+            "node": "Anything to compile?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build compile request": {
+      "main": [
+        [
+          {
+            "node": "Nova Pro · compile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nova Pro · compile": {
+      "main": [
+        [
+          {
+            "node": "Validate compiled rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate compiled rules": {
+      "main": [
+        [
+          {
+            "node": "Save compiled rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save compiled rules": {
+      "main": [
+        [
+          {
+            "node": "Stage 1+2 · classes & decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage 1+2 · classes & decisions": {
+      "main": [
+        [
+          {
+            "node": "Refresh planner stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh planner stats": {
+      "main": [
+        [
+          {
+            "node": "Stage 3 · expand, score, diff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stage 3 · expand, score, diff": {
+      "main": [
+        [
+          {
+            "node": "Correctness proof",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Correctness proof": {
+      "main": [
+        [
+          {
+            "node": "Finish run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to compile?": {
+      "main": [
+        [
+          {
+            "node": "Build compile request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stage 1+2 · classes & decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "Stage 0 compile criteria (LLM, cached) → Stage 1+2 SQL classes → stats → Stage 3 expand/score/diff → proof."
+  },
+  "pinData": {}
+}

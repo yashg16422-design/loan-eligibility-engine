@@ -1,0 +1,65 @@
+# Self-hosted n8n (PLAN.md §6.1).
+#
+# On AWS (EC2): deploy/n8n/boot.sh writes .env from Secrets Manager and runs
+#   docker compose up -d            -> n8n only; its data lives in RDS (database `n8n`)
+#
+# Locally, with no AWS (e.g. a reviewer importing the workflow JSONs):
+#   cp .env.example .env && docker compose --profile local up -d
+#   -> adds a Postgres container and n8n uses it instead of RDS.
+name: n8n
+
+services:
+  n8n:
+    # Pinned: n8n 2.x renamed `latest` to `stable`, and a floating tag could change
+    # behaviour between the demo and the review. 2.42.5 = stable on 2026-10-08.
+    image: docker.n8n.io/n8nio/n8n:2.42.5
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5678:5678" # reachable only via the SSM tunnel and from the Lambda security group
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./certs:/certs:ro # RDS CA bundle, so n8n verifies the database's TLS certificate
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false # only exists under the `local` profile
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # OPTIONAL headless-Chromium renderer (off by default). The default crawler is plain
+  # HTML + embedded JSON (ld+json/FAQ) over HTTP. Enable only for sites that ALLOW plain
+  # HTTP but load data client-side: `docker compose --profile renderer up -d`.
+  # Never used to get past a 403/bot wall. No `ports:`: only n8n reaches it.
+  renderer:
+    profiles: [renderer]
+    build: ./renderer
+    image: loan-renderer:1.63.0
+    restart: unless-stopped
+    shm_size: 512m # Chromium needs more than Docker's 64 MB default /dev/shm
+    mem_limit: 900m
+    init: true # reap orphaned browser processes
+
+  postgres:
+    profiles: [local]
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_POSTGRESDB_USER}
+      POSTGRES_PASSWORD: ${DB_POSTGRESDB_PASSWORD}
+      POSTGRES_DB: ${DB_POSTGRESDB_DATABASE}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  n8n_data:
+  pg_data:

@@ -1,0 +1,344 @@
+{
+  "id": "LoanEngineWfC001",
+  "name": "C · Notify matched users (SES)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## C · User notification\nRuns after **B**. For each user with NEW matches: one email with the **best pick + top picks** (top 5, one per lender, best platform shown), why each fits, and what else they'd need.\n\n- Sent with the **AWS SES node** (Assume Role credential, no keys), 1 email/second (SES sandbox).\n- **Only to test aliases**: never the CSV address (guarded in code).\n- Demo cap: first 5 users get real mail; the rest are recorded as `skipped_demo`.",
+        "width": 620,
+        "height": 300
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -400
+      ],
+      "id": "LoanEngineWfC001-00"
+    },
+    {
+      "parameters": {},
+      "name": "Run now (latest run)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -80
+      ],
+      "id": "LoanEngineWfC001-01"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT run_id::text FROM pipeline_runs\nWHERE status = 'done' AND matches_new > 0\nORDER BY finished_at DESC LIMIT 1",
+        "options": {}
+      },
+      "name": "Latest run with new matches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        -80
+      ],
+      "id": "LoanEngineWfC001-02",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "name": "From B (run)",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        100
+      ],
+      "id": "LoanEngineWfC001-03"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- New, un-notified active matches of this run. The demo-capped first N users get their\n-- top picks: best offer PER LENDER (best platform), ranked by tier, fit score, rate.\nWITH new_m AS (\n  SELECT m.user_id, m.tier, m.requirements, m.fit_score, m.fit_reasons,\n         p.lender, p.lender_key, p.channel, p.product_url, p.product_name,\n         p.interest_rate_min, p.interest_rate_max, p.loan_amount_max\n  FROM matches m JOIN loan_products p USING (product_id)\n  WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL\n), per_user AS (\n  SELECT user_id, count(*)::int AS matches_total, count(DISTINCT lender_key)::int AS lenders_total\n  FROM new_m GROUP BY user_id\n), chosen AS (\n  SELECT user_id FROM per_user ORDER BY user_id LIMIT $2::int\n), best_per_lender AS (\n  SELECT DISTINCT ON (n.user_id, n.lender_key) n.*\n  FROM new_m n JOIN chosen USING (user_id)\n  ORDER BY n.user_id, n.lender_key, (n.tier = 'eligible') DESC, n.fit_score DESC,\n           n.interest_rate_min NULLS LAST, n.product_name\n), ranked AS (\n  SELECT b.*, row_number() OVER (PARTITION BY b.user_id ORDER BY (b.tier = 'eligible') DESC,\n         b.fit_score DESC, b.interest_rate_min NULLS LAST, b.product_name) AS rnk\n  FROM best_per_lender b\n)\nSELECT $1::text AS run_id, u.user_id::text, u.name, u.monthly_income, u.credit_score, u.employment_status, u.age,\n       pu.matches_total, pu.lenders_total,\n       json_agg(json_build_object(\n         'lender', r.lender, 'channel', r.channel, 'tier', r.tier, 'requirements', r.requirements,\n         'interest_rate_min', r.interest_rate_min, 'interest_rate_max', r.interest_rate_max,\n         'loan_amount_max', r.loan_amount_max, 'product_url', r.product_url,\n         'fit_score', r.fit_score, 'fit_reasons', r.fit_reasons) ORDER BY r.rnk)\n         FILTER (WHERE r.rnk <= 5) AS picks\nFROM ranked r JOIN users u USING (user_id) JOIN per_user pu USING (user_id)\nGROUP BY u.user_id, pu.matches_total, pu.lenders_total\nORDER BY u.user_id",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, 5 ] }}"
+        }
+      },
+      "name": "Users to email",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        0
+      ],
+      "id": "LoanEngineWfC001-04",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked. */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst ALIASES = [\"yashg16422+one@gmail.com\", \"yashg16422+two@gmail.com\", \"yashg16422+three@gmail.com\"];\nconst FROM = \"yashg16422@gmail.com\";\nreturn $input.all().map((item) => {\n  const user = item.json;\n  // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.\n  const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);\n  return { json: { user_id: user.user_id, to, from: FROM, ...composeEmail(user) } };\n});\n"
+      },
+      "name": "Compose emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "LoanEngineWfC001-05"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "One email at a time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        880,
+        0
+      ],
+      "id": "LoanEngineWfC001-06"
+    },
+    {
+      "parameters": {
+        "authentication": "assumeRole",
+        "resource": "email",
+        "operation": "send",
+        "isBodyHtml": true,
+        "fromEmail": "={{ $json.from }}",
+        "toAddresses": [
+          "={{ $json.to }}"
+        ],
+        "subject": "={{ $json.subject }}",
+        "body": "={{ $json.html }}",
+        "additionalFields": {}
+      },
+      "name": "Send via AWS SES",
+      "type": "n8n-nodes-base.awsSes",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        100
+      ],
+      "id": "LoanEngineWfC001-07",
+      "credentials": {
+        "awsAssumeRole": {
+          "id": "fa286DA3YraErW57",
+          "name": "AWS n8n role (assume)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst email = $('One email at a time').first().json;\nconst r = $input.first().json;\nconst id = r.MessageId || r.messageId || r?.SendEmailResponse?.SendEmailResult?.MessageId || null;\nreturn [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error || !id ? 'failed' : 'sent',\n  ses_message_id: id, error: r.error ? String(r.error.message || JSON.stringify(r.error)).slice(0, 500) : (id ? null : 'no MessageId') } }];\n"
+      },
+      "name": "Delivery result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        100
+      ],
+      "id": "LoanEngineWfC001-08"
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 1.1,
+        "unit": "seconds"
+      },
+      "name": "1 email / second (SES sandbox)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        100
+      ],
+      "id": "LoanEngineWfC001-09"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nreturn [{ json: { run_id: $('Users to email').first().json.run_id, results: $input.all().map((i) => i.json) } }];\n"
+      },
+      "name": "All results -> one item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -120
+      ],
+      "id": "LoanEngineWfC001-10"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Sent/failed rows for the emailed users; every OTHER user with new matches is recorded as\n-- skipped_demo (production would email them). notified_at is set for sent + skipped users so\n-- they are never emailed twice; failed sends stay un-notified for a later retry.\nWITH sent AS (\n  SELECT * FROM jsonb_to_recordset($2::jsonb)\n         AS s(user_id text, alias_email text, status text, ses_message_id text, error text)\n), run AS (\n  SELECT job_id FROM pipeline_runs WHERE run_id = $1::uuid\n), ins_sent AS (\n  INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error)\n  SELECT user_id::uuid, alias_email, (SELECT job_id FROM run), $1::uuid, status, ses_message_id, error FROM sent\n  RETURNING 1\n), rest AS (\n  SELECT DISTINCT m.user_id FROM matches m\n  WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL\n    AND m.user_id NOT IN (SELECT user_id::uuid FROM sent)\n), ins_skip AS (\n  INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, error)\n  SELECT user_id, '(demo cap: not sent)', (SELECT job_id FROM run), $1::uuid, 'skipped_demo',\n         'demo cap reached: production would email this user'\n  FROM rest\n  RETURNING 1\n), mark AS (\n  UPDATE matches SET notified_at = now()\n  WHERE match_run_id = $1::uuid AND status = 'active' AND notified_at IS NULL\n    AND (user_id IN (SELECT user_id::uuid FROM sent WHERE status = 'sent') OR user_id IN (SELECT user_id FROM rest))\n  RETURNING 1\n)\nUPDATE pipeline_runs SET\n  emails_sent = (SELECT count(*) FROM sent WHERE status = 'sent'),\n  emails_failed = (SELECT count(*) FROM sent WHERE status = 'failed'),\n  emails_skipped_demo = (SELECT count(*) FROM rest)\nWHERE run_id = $1::uuid\nRETURNING emails_sent, emails_failed, emails_skipped_demo,\n          (SELECT count(*) FROM mark) AS matches_marked_notified,\n          (SELECT count(*) FROM ins_sent) + (SELECT count(*) FROM ins_skip) AS notification_rows",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, JSON.stringify($json.results) ] }}"
+        }
+      },
+      "name": "Record notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        -120
+      ],
+      "id": "LoanEngineWfC001-11",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Run now (latest run)": {
+      "main": [
+        [
+          {
+            "node": "Latest run with new matches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Latest run with new matches": {
+      "main": [
+        [
+          {
+            "node": "Users to email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "From B (run)": {
+      "main": [
+        [
+          {
+            "node": "Users to email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Users to email": {
+      "main": [
+        [
+          {
+            "node": "Compose emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose emails": {
+      "main": [
+        [
+          {
+            "node": "One email at a time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send via AWS SES": {
+      "main": [
+        [
+          {
+            "node": "Delivery result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delivery result": {
+      "main": [
+        [
+          {
+            "node": "1 email / second (SES sandbox)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "1 email / second (SES sandbox)": {
+      "main": [
+        [
+          {
+            "node": "One email at a time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One email at a time": {
+      "main": [
+        [
+          {
+            "node": "All results -> one item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send via AWS SES",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All results -> one item": {
+      "main": [
+        [
+          {
+            "node": "Record notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "One personalized email per user with new matches: best pick + top picks, sent via the AWS SES node."
+  },
+  "pinData": {}
+}

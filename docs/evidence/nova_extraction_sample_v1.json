@@ -1,0 +1,80 @@
+[
+ {
+  "page_id": "bankbazaar:iifl",
+  "lender": null,
+  "product_name": null,
+  "interest_rate": "12.75% p.a. - 44% p.a.",
+  "loan_amount": "Up to Rs.5 lakh",
+  "tenure": null,
+  "processing_fee": "2% - 9% of the loan amount plus GST",
+  "criteria": [
+   {
+    "employment_type": "salaried",
+    "age": "25 years to 65 years",
+    "min_income": "₹25,000",
+    "credit_score": null,
+    "other_conditions": [
+     "Sourcable Location will Mumbai, Delhi, Pune, Banglore, Hyderabad & Chennai."
+    ]
+   },
+   {
+    "employment_type": "self_employed",
+    "age": "23 years to 60 or retirement age (whichever earlier)",
+    "min_income": null,
+    "credit_score": null,
+    "other_conditions": []
+   }
+  ]
+ },
+ {
+  "page_id": "paisabazaar:hdfc-bank",
+  "lender": null,
+  "product_name": null,
+  "interest_rate": null,
+  "loan_amount": null,
+  "tenure": null,
+  "processing_fee": null,
+  "criteria": [
+   {
+    "employment_type": "salaried",
+    "age": "21 years to 60 years",
+    "min_income": "₹25,000",
+    "credit_score": null,
+    "other_conditions": [
+     "Minimum 2 years of work experience with at least 1 year in the current organisation."
+    ]
+   }
+  ]
+ },
+ {
+  "page_id": "direct:icici",
+  "lender": null,
+  "product_name": null,
+  "interest_rate": null,
+  "loan_amount": "₹50,000 up to ₹50,00,000",
+  "tenure": "12 months to 84 months",
+  "processing_fee": null,
+  "criteria": [
+   {
+    "employment_type": "salaried",
+    "age": "20–58 years",
+    "min_income": "₹30,000 or month",
+    "credit_score": null,
+    "other_conditions": [
+     "Work Experience: 2 years"
+    ]
+   },
+   {
+    "employment_type": "self_employed",
+    "age": "23–65 years",
+    "min_income": null,
+    "credit_score": null,
+    "other_conditions": [
+     "Loan limit: Up to ₹ 50 lakh",
+     "Duration (Age) of Business: 2 years",
+     "Overall Experience: 3 years"
+    ]
+   }
+  ]
+ }
+]

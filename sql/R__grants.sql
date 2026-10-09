@@ -21,6 +21,12 @@ GRANT SELECT ON pipeline_runs, notifications TO app_ingest;
 GRANT SELECT ON users, upload_jobs TO n8n_workflows;
 GRANT UPDATE (match_status, match_started_at, matched_at) ON upload_jobs TO n8n_workflows;
 GRANT SELECT, INSERT, UPDATE
-    ON loan_products, crawl_runs, matches, llm_decisions,
+    ON loan_products, crawl_runs, matches, criteria_rules, match_classes, match_pairs,
        pipeline_runs, notifications, workflow_errors
     TO n8n_workflows;
+-- The crawler's config is read-only for n8n: sources are changed by a migration or a DBA.
+GRANT SELECT ON crawl_sources TO n8n_workflows;
+
+-- PostgreSQL 17 MAINTAIN: lets Workflow B ANALYZE the tables it bulk-writes (fresh planner
+-- statistics between Stage 1 and Stage 3), without owning them or being an admin.
+GRANT MAINTAIN ON match_classes, match_pairs, matches TO n8n_workflows;

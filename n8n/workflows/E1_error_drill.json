@@ -1,0 +1,79 @@
+{
+  "id": "LoanEngineWfE101",
+  "name": "E1 · Error drill (fails on purpose)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## E1 · Error drill\n`scripts/n8n-workflows.sh drill` publishes it for one scheduled run; it **fails on purpose**. Because its error workflow is **E**, n8n starts E with the real failure payload -> a `workflow_errors` row + an alert email. Proves the same path every production workflow (A, A1, B, B1, C) uses.",
+        "width": 520,
+        "height": 220
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -320
+      ],
+      "id": "LoanEngineWfE101-00"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Run drill",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "LoanEngineWfE101-01"
+    },
+    {
+      "parameters": {
+        "jsCode": "throw new Error('E1 drill: deliberate failure to prove the error workflow');\n"
+      },
+      "name": "Fail on purpose",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "id": "LoanEngineWfE101-02"
+    }
+  ],
+  "connections": {
+    "Run drill": {
+      "main": [
+        [
+          {
+            "node": "Fail on purpose",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "Fails on purpose so the real error path (Error Trigger -> workflow_errors -> alert) can be shown."
+  },
+  "pinData": {}
+}

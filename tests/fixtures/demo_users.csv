@@ -1,0 +1,8 @@
+user_id,name,email,monthly_income,credit_score,employment_status,age
+33f22eb9-6487-4c15-8e43-5ff59be31a9b,Aarav Sharma,aarav.sharma@example.com,48000,742,Salaried,29
+a81929ca-97f8-479e-ae39-58d447603233,Meera Nair,meera.nair@example.com,135000,790,Self-Employed,41
+a42f4e37-90d5-4987-ac79-dd08a6a93c9d,Kabir Singh,kabir.singh@example.com,26000,668,Salaried,23
+49a3bb94-7449-485e-b0bd-1c293a4a488d,Ananya Rao,ananya.rao@example.com,88000,760,Business,35
+ca9974b3-c2c7-4f0b-87e4-0b0758e41f05,Rohan Gupta,rohan.gupta@example.com,61000,705,Salaried,47
+551c0503-1e64-4724-91d1-ccea08ebb213,Isha Kapoor,isha.kapoor@example.com,105000,781,Salaried,33
+2225c913-97c7-4964-bd94-8bf4812bf442,Bad Row,bad.row@example.com,50000,950,Salaried,30

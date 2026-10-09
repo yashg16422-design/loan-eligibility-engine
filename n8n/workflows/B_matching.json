@@ -1,0 +1,392 @@
+{
+  "id": "LoanEngineWfB001",
+  "name": "B · User-loan matching",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## B · User-loan matching\n**Triggers**\n- **Webhook** `POST /webhook/ingest-complete` (header secret, private network) right after a CSV is ingested.\n- **Sweeper** every 10 min: recovers jobs whose webhook was missed (n8n down, network blip).\n- **From A** (product mode): re-match all users against new/changed products.\n\n**Claim** = atomic lock on the job, so duplicates and concurrent triggers never double-match. Then **B1** runs the Treasure Hunt.",
+        "width": 600,
+        "height": 320
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -440
+      ],
+      "id": "LoanEngineWfB001-00"
+    },
+    {
+      "parameters": {},
+      "name": "Run now (demo)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "id": "LoanEngineWfB001-01"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingest-complete",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Ingest complete (webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -120
+      ],
+      "id": "LoanEngineWfB001-02",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "qaXP0OsyRtnbitga",
+          "name": "Ingest webhook secret"
+        }
+      },
+      "webhookId": "6f1c0b2e-6b53-4c1e-9a7d-6f3c2a1b0e01"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "name": "Sweeper every 10 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        60
+      ],
+      "id": "LoanEngineWfB001-03"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "name": "From A (product mode)",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        360
+      ],
+      "id": "LoanEngineWfB001-04"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// The header secret proves WHO called; still validate WHAT they sent before it reaches SQL.\nconst body = $input.first().json.body || {};\nconst jobId = String(body.job_id || '').trim().toLowerCase();\nconst UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;\nreturn UUID.test(jobId) ? [{ json: { mode: 'upload', job_id: jobId, product_ids: '' } }] : [];\n"
+      },
+      "name": "Webhook → request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -120
+      ],
+      "id": "LoanEngineWfB001-05"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Janitor first: a run still 'running' after 30 min is dead (n8n's hard timeout is 10 min),\n-- e.g. n8n restarted mid-run. Close it so the funnel table never shows ghost runs.\nWITH dead AS (\n  UPDATE pipeline_runs SET status = 'failed', finished_at = now(),\n         error = 'abandoned: still running after 30 min (n8n restart or timeout)'\n  WHERE status = 'running' AND started_at < now() - interval '30 minutes'\n  RETURNING 1\n)\n-- Completed uploads never matched, or whose matching run died (> 15 min old lock).\nSELECT 'upload' AS mode, job_id::text AS job_id, '' AS product_ids\nFROM upload_jobs\nWHERE status = 'COMPLETED'\n  AND (match_status IS NULL OR (match_status = 'RUNNING' AND match_started_at < now() - interval '15 minutes'))\nORDER BY completed_at\nLIMIT 5",
+        "options": {}
+      },
+      "name": "Jobs waiting for matching",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        130
+      ],
+      "id": "LoanEngineWfB001-06",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst ids = $input.first().json.product_ids || [];\nreturn ids.length ? [{ json: { mode: 'products', job_id: '', product_ids: JSON.stringify(ids) } }] : [];\n"
+      },
+      "name": "Products → request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        360
+      ],
+      "id": "LoanEngineWfB001-07"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Atomic claim: only ONE run per job, even with a duplicate webhook + the sweeper racing.\n-- 0 rows returned = nothing to do (already matched / running / unknown job) -> stop here.\nWITH req AS (\n  SELECT $1::text AS mode, nullif($2, '')::uuid AS job_id, nullif($3, '')::jsonb AS product_ids\n), locked AS (\n  UPDATE upload_jobs j SET match_status = 'RUNNING', match_started_at = now()\n  FROM req\n  WHERE req.mode = 'upload' AND j.job_id = req.job_id AND j.status = 'COMPLETED'\n    AND (j.match_status IS NULL OR (j.match_status = 'RUNNING' AND j.match_started_at < now() - interval '15 minutes'))\n  RETURNING j.job_id\n), abandoned AS (  -- a re-claimed job's previous run died: close it (data-modifying CTEs always run)\n  UPDATE pipeline_runs SET status = 'failed', finished_at = now(),\n         error = 'abandoned: job re-claimed after a stale lock'\n  WHERE status = 'running' AND job_id = (SELECT job_id FROM locked)\n  RETURNING 1\n)\nINSERT INTO pipeline_runs (mode, job_id, scope_product_ids)\nSELECT req.mode, (SELECT job_id FROM locked),\n       CASE WHEN req.mode = 'products'\n            THEN ARRAY(SELECT jsonb_array_elements_text(req.product_ids))::uuid[] END\nFROM req\nWHERE req.mode = 'products' OR EXISTS (SELECT 1 FROM locked)\nRETURNING run_id::text, mode, job_id::text",
+        "options": {
+          "queryReplacement": "={{ [ $json.mode, $json.job_id, $json.product_ids ] }}"
+        }
+      },
+      "name": "Claim job + start run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        120
+      ],
+      "id": "LoanEngineWfB001-08",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfB101",
+          "mode": "id"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Match (B1)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        660,
+        120
+      ],
+      "id": "LoanEngineWfB001-09",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Matching failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        120
+      ],
+      "id": "LoanEngineWfB001-10"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH run AS (\n  UPDATE pipeline_runs SET status = 'failed', finished_at = now(), error = left($2, 2000)\n  WHERE run_id = $1::uuid RETURNING job_id\n)\nUPDATE upload_jobs SET match_status = 'FAILED'\nWHERE job_id = (SELECT job_id FROM run)\nRETURNING job_id::text",
+        "options": {
+          "queryReplacement": "={{ [ $('Claim job + start run').itemMatching($itemIndex).json.run_id, JSON.stringify($json.error) ] }}"
+        }
+      },
+      "name": "Mark job failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        220
+      ],
+      "id": "LoanEngineWfB001-11",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfC001",
+          "mode": "id"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Notify users (C)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        20
+      ],
+      "id": "LoanEngineWfB001-12",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Ingest complete (webhook)": {
+      "main": [
+        [
+          {
+            "node": "Webhook → request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook → request": {
+      "main": [
+        [
+          {
+            "node": "Claim job + start run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sweeper every 10 min": {
+      "main": [
+        [
+          {
+            "node": "Jobs waiting for matching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now (demo)": {
+      "main": [
+        [
+          {
+            "node": "Jobs waiting for matching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jobs waiting for matching": {
+      "main": [
+        [
+          {
+            "node": "Claim job + start run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "From A (product mode)": {
+      "main": [
+        [
+          {
+            "node": "Products → request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Products → request": {
+      "main": [
+        [
+          {
+            "node": "Claim job + start run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim job + start run": {
+      "main": [
+        [
+          {
+            "node": "Match (B1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match (B1)": {
+      "main": [
+        [
+          {
+            "node": "Matching failed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matching failed?": {
+      "main": [
+        [
+          {
+            "node": "Mark job failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify users (C)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "Triggered by the ingest webhook (primary), a 10-min sweeper (recovery), or Workflow A (product mode)."
+  },
+  "pinData": {}
+}

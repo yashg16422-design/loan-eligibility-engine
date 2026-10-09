@@ -1,0 +1,240 @@
+{
+  "id": "LoanEngineWfE001",
+  "name": "E · Error handler",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## E · Error handler\nSet as the **error workflow** of A, A1, B, B1 and C: any failed production execution (schedule, webhook, sub-workflow) lands here.\n\n- Every failure is stored in `workflow_errors` (workflow, node, message, execution id).\n- One **alert email** to the test alias, at most once per workflow every 30 min (a failing schedule must not drain the SES quota).\n- **Drill**: the manual trigger replays a sample error to prove the path end to end.",
+        "width": 620,
+        "height": 300
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -420
+      ],
+      "id": "LoanEngineWfE001-00"
+    },
+    {
+      "parameters": {},
+      "name": "Drill: simulate an error",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ],
+      "id": "LoanEngineWfE001-01"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// Same shape n8n's Error Trigger emits for a failed execution.\nreturn [{ json: {\n  execution: { id: 'drill-' + Date.now(), mode: 'drill', lastNodeExecuted: 'Claim job + start run',\n               error: { message: 'Drill: simulated failure to test the error path end to end' } },\n  workflow: { id: 'drill', name: 'E · drill (simulated)' },\n} }];\n"
+      },
+      "name": "Sample error payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        160
+      ],
+      "id": "LoanEngineWfE001-02"
+    },
+    {
+      "parameters": {},
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -40
+      ],
+      "id": "LoanEngineWfE001-03"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow E: error handler (pure functions).\n *\n * n8n calls the error workflow with one of two payload shapes:\n *   - execution failed:  { execution: { id, url, retryOf, error: {message, stack}, lastNodeExecuted, mode }, workflow: { id, name } }\n *   - trigger failed:    { trigger: { error: {message, node?}, mode }, workflow: { id, name } }\n * summarizeError() turns either (or garbage) into one flat record, so the rest of the\n * workflow never has to care which shape arrived and can never crash on a missing field.\n */\n\nconst MAX_MESSAGE = 2000; // workflow_errors.message: enough for a stack head, bounded for the alert\nconst ALERT_EVERY_MINUTES = 30; // per workflow: a failing schedule must not drain the SES quota\n\nconst clip = (s, n) => {\n  const t = String(s ?? '').trim();\n  return t.length > n ? `${t.slice(0, n - 1)}…` : t;\n};\n\nfunction summarizeError(payload) {\n  const p = payload && typeof payload === 'object' ? payload : {};\n  const exec = p.execution || {};\n  const trig = p.trigger || {};\n  const err = exec.error || trig.error || {};\n  const node = exec.lastNodeExecuted || err.node?.name || (p.trigger ? 'trigger' : null);\n  const message = clip(err.message || err.description || 'unknown error (empty error payload)', MAX_MESSAGE);\n  return {\n    workflow: clip(p.workflow?.name || p.workflow?.id || 'unknown workflow', 200),\n    workflow_id: p.workflow?.id ? String(p.workflow.id) : null,\n    node: node ? clip(node, 200) : null,\n    message,\n    execution_id: exec.id != null ? String(exec.id) : null,\n    execution_url: /^https?:\\/\\//i.test(exec.url || '') ? exec.url : null,\n    mode: exec.mode || trig.mode || null,\n    retry_of: exec.retryOf != null ? String(exec.retryOf) : null,\n  };\n}\n\nfunction escapeText(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Alert email for one error record. Error text can contain crawled HTML: always escaped. */\nfunction composeAlert(rec) {\n  const subject = clip(`[loan-engine] ${rec.workflow} failed${rec.node ? ` at \"${rec.node}\"` : ''}`, 180);\n  const rows = [\n    ['Workflow', rec.workflow],\n    ['Node', rec.node || '-'],\n    ['Execution', rec.execution_id || '-'],\n    ['Mode', rec.mode || '-'],\n    ['Retry of', rec.retry_of || '-'],\n  ];\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px\">\n  <h3 style=\"color:#b00020;margin-bottom:6px\">Workflow failure</h3>\n  <table style=\"border-collapse:collapse;font-size:14px\">${rows.map(([k, v]) => `<tr><td style=\"padding:2px 12px 2px 0;color:#555\">${k}</td><td>${escapeText(v)}</td></tr>`).join('')}</table>\n  <pre style=\"background:#f6f6f6;padding:10px;white-space:pre-wrap;font-size:12px\">${escapeText(rec.message)}</pre>\n  ${rec.execution_url ? `<p><a href=\"${escapeText(rec.execution_url)}\">Open the execution</a> (private n8n: use the SSM tunnel)</p>` : ''}\n  <p style=\"color:#888;font-size:12px\">Also stored in the workflow_errors table. Further failures of this workflow are recorded but not emailed for ${ALERT_EVERY_MINUTES} minutes.</p>\n</body></html>`;\n  return { subject, html };\n}\n\nif (typeof module !== 'undefined') module.exports = { MAX_MESSAGE, ALERT_EVERY_MINUTES, summarizeError, composeAlert };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst rec = summarizeError($input.first().json);\nreturn [{ json: { ...rec, ...composeAlert(rec) } }];\n"
+      },
+      "name": "Summarize error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        40
+      ],
+      "id": "LoanEngineWfE001-04"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Store the failure; alert only if this workflow had no error in the last\n-- 30 minutes (prev is read from the snapshot BEFORE this insert).\nWITH prev AS (\n  SELECT max(created_at) AS last_at FROM workflow_errors WHERE workflow = $1\n), ins AS (\n  INSERT INTO workflow_errors (workflow, node, message, execution_id)\n  VALUES ($1, nullif($2, ''), $3, nullif($4, ''))\n  RETURNING id\n)\nSELECT (SELECT id FROM ins) AS error_id,\n       coalesce((SELECT last_at FROM prev) < now() - interval '30 minutes', true) AS should_alert",
+        "options": {
+          "queryReplacement": "={{ [ $json.workflow, $json.node || '', $json.message, $json.execution_id || '' ] }}"
+        }
+      },
+      "name": "Record error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        660,
+        40
+      ],
+      "id": "LoanEngineWfE001-05",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.should_alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Alert due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        40
+      ],
+      "id": "LoanEngineWfE001-06"
+    },
+    {
+      "parameters": {
+        "authentication": "assumeRole",
+        "resource": "email",
+        "operation": "send",
+        "isBodyHtml": true,
+        "fromEmail": "yashg16422@gmail.com",
+        "toAddresses": [
+          "yashg16422+one@gmail.com"
+        ],
+        "subject": "={{ $('Summarize error').first().json.subject }}",
+        "body": "={{ $('Summarize error').first().json.html }}",
+        "additionalFields": {}
+      },
+      "name": "Email alert (SES)",
+      "type": "n8n-nodes-base.awsSes",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "LoanEngineWfE001-07",
+      "credentials": {
+        "awsAssumeRole": {
+          "id": "fa286DA3YraErW57",
+          "name": "AWS n8n role (assume)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Drill: simulate an error": {
+      "main": [
+        [
+          {
+            "node": "Sample error payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample error payload": {
+      "main": [
+        [
+          {
+            "node": "Summarize error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Summarize error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize error": {
+      "main": [
+        [
+          {
+            "node": "Record error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record error": {
+      "main": [
+        [
+          {
+            "node": "Alert due?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert due?": {
+      "main": [
+        [
+          {
+            "node": "Email alert (SES)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "meta": {
+    "description": "Error workflow of A, A1, B, B1 and C: records every failure in workflow_errors and emails an alert."
+  },
+  "pinData": {}
+}

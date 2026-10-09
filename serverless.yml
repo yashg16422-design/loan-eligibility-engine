@@ -75,8 +75,10 @@ functions:
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       # Pluggable seams: change behaviour by config, not code.
       VALIDATION_RULES: "" # JSON overrides, e.g. '{"age_min": 21}'; empty = PLAN.md §9 defaults
-      N8N_WEBHOOK_URL: "" # empty = NoopNotifier until n8n exists (the sweeper recovers jobs)
-      N8N_WEBHOOK_SECRET_ARN: ""
+      # Private network only: Lambda SG -> n8n SG on 5678. If the call fails, Workflow B's
+      # 10-minute sweeper still picks the job up (the webhook is an accelerator, not a dependency).
+      N8N_WEBHOOK_URL: !Sub http://${N8nInstance.PrivateIp}:5678/webhook/ingest-complete
+      N8N_WEBHOOK_SECRET_ARN: !Ref N8nWebhookSecret
       POWERTOOLS_LOG_LEVEL: INFO
     events:
       - sqs:
@@ -324,7 +326,7 @@ resources:
           - !Ref EndpointSG
 
     # ------------------------------------------------------------------
-    # RDS PostgreSQL 16: private, encrypted, SSL forced (PG ≥15 default
+    # RDS PostgreSQL 17: private, encrypted, SSL forced (PG ≥15 default
     # rds.force_ssl=1, verified in ap-southeast-2), password owned by RDS.
     # ------------------------------------------------------------------
     DBSubnetGroup:
@@ -345,7 +347,10 @@ resources:
       Properties:
         DBInstanceIdentifier: ${self:service}-${sls:stage}
         Engine: postgres
-        EngineVersion: "16.15"
+        # 17: n8n 2.x gives PG 16 "compatibility support only" (seen in its logs, 2026-10-09).
+        # Upgraded in place from 16.15 (same endpoint, data kept; RDS snapshots before).
+        EngineVersion: "17.11"
+        AllowMajorVersionUpgrade: true
         AutoMinorVersionUpgrade: false # no surprise maintenance restart during the demo
         DBInstanceClass: db.t4g.micro
         AllocatedStorage: 20
@@ -512,6 +517,165 @@ resources:
           PasswordLength: 32
           ExcludePunctuation: true
 
+    # n8n's credential-encryption key. Retained even if the stack is deleted: without
+    # the same key, n8n can never decrypt the credentials it stored in RDS again.
+    N8nEncryptionKeySecret:
+      Type: AWS::SecretsManager::Secret
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        Name: ${self:service}/${sls:stage}/n8n/encryption-key
+        Description: N8N_ENCRYPTION_KEY for the self-hosted n8n
+        GenerateSecretString:
+          SecretStringTemplate: "{}"
+          GenerateStringKey: key
+          PasswordLength: 48
+          ExcludePunctuation: true
+
+    # Shared secret between the ingest Lambda and n8n's webhook (Header Auth credential).
+    N8nWebhookSecret:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: ${self:service}/${sls:stage}/n8n/webhook-token
+        Description: X-Webhook-Secret header value for the ingest-complete webhook
+        GenerateSecretString:
+          PasswordLength: 48
+          ExcludePunctuation: true
+
+    # ------------------------------------------------------------------
+    # n8n host: EC2 in a public subnet for OUTBOUND traffic only (no inbound from the
+    # internet, no SSH). Reached via SSM Session Manager port forwarding.
+    # ------------------------------------------------------------------
+    N8nInstanceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: ec2.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # SSM tunnel + Run Command
+        Policies:
+          - PolicyName: n8n-host
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: BootSecretsOnly
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource:
+                    - !Ref N8nMetaDbSecret
+                    - !Ref N8nEncryptionKeySecret
+                - Sid: ConfigAndFixturesOnly
+                  Effect: Allow
+                  Action: s3:GetObject
+                  Resource:
+                    - arn:aws:s3:::${self:custom.dataBucket}/config/*
+                    - arn:aws:s3:::${self:custom.dataBucket}/fixtures/*
+                - Sid: ListConfigAndFixturesOnly # `aws s3 sync` needs to list; prefixes only
+                  Effect: Allow
+                  Action: s3:ListBucket
+                  Resource: arn:aws:s3:::${self:custom.dataBucket}
+                  Condition:
+                    StringLike:
+                      s3:prefix:
+                        - config/*
+                        - fixtures/*
+                - Sid: BecomeTheN8nAwsRole # used by n8n's "AWS (Assume Role)" credential
+                  Effect: Allow
+                  Action: sts:AssumeRole
+                  Resource: !GetAtt N8nAwsRole.Arn
+
+    # What n8n workflows may do in AWS: send email and call Nova Pro. Nothing else.
+    N8nAwsRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${sls:stage}-n8n-aws
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+              Action: sts:AssumeRole
+              # Only the n8n instance role may assume it (checked by ARN pattern, which
+              # avoids a circular reference between the two roles).
+              Condition:
+                ArnLike:
+                  aws:PrincipalArn: !Sub arn:aws:iam::${AWS::AccountId}:role/${self:service}-${sls:stage}-N8nInstanceRole-*
+                # n8n's "AWS (Assume Role)" credential requires an External ID; we require
+                # it here too (an identifier per AWS docs, not a secret).
+                StringEquals:
+                  sts:ExternalId: ${self:service}-${sls:stage}-n8n
+        Policies:
+          - PolicyName: ses-and-bedrock
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: SendEmail # SES sandbox: verified identities only (our +aliases)
+                  Effect: Allow
+                  Action:
+                    - ses:SendEmail
+                    - ses:SendRawEmail
+                  Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*
+                - Sid: NovaProOnly
+                  Effect: Allow
+                  Action: bedrock:InvokeModel
+                  Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/amazon.nova-pro-v1:0
+                - Sid: ReadCrawlerFixturesOnly # Workflow A's fallback when a live fetch fails
+                  Effect: Allow
+                  Action: s3:GetObject
+                  Resource: arn:aws:s3:::${self:custom.dataBucket}/fixtures/*
+
+    N8nInstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - !Ref N8nInstanceRole
+
+    N8nInstance:
+      Type: AWS::EC2::Instance
+      Properties:
+        # Pinned AMI (AL2023 arm64, 2026-09-29). Resolving "latest" from SSM would let a
+        # future deploy swap the AMI, replacing the instance and changing its private IP.
+        ImageId: ami-05dbf6439e0906761
+        InstanceType: t4g.small
+        SubnetId: !Ref PublicSubnetA
+        SecurityGroupIds:
+          - !Ref N8nSG
+        IamInstanceProfile: !Ref N8nInstanceProfile
+        MetadataOptions:
+          HttpTokens: required # IMDSv2 only
+          # 2 hops so the n8n *container* (behind Docker's bridge) can reach the instance role.
+          HttpPutResponseHopLimit: 2
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+        Tags:
+          - { Key: Name, Value: "${self:service}-${sls:stage}-n8n" }
+        # No secrets here: only names and ARNs. boot.sh reads secrets via the instance role.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euxo pipefail
+            mkdir -p /etc/n8n
+            cat > /etc/n8n/boot.env <<'ENV'
+            BUCKET=${self:custom.dataBucket}
+            REGION=${AWS::Region}
+            DB_HOST=${Database.Endpoint.Address}
+            META_SECRET_ARN=${N8nMetaDbSecret}
+            ENC_KEY_SECRET_ARN=${N8nEncryptionKeySecret}
+            ENV
+            # Wait for scripts/n8n-sync.sh push to have uploaded the boot script.
+            until aws s3 cp --region ${AWS::Region} s3://${self:custom.dataBucket}/config/boot.sh /root/n8n-boot.sh; do sleep 15; done
+            bash /root/n8n-boot.sh
+
     # ------------------------------------------------------------------
     # IAM: one role per function, scoped to exact ARNs (least privilege).
     # ------------------------------------------------------------------
@@ -562,10 +726,12 @@ resources:
                   Effect: Allow
                   Action: s3:GetObject
                   Resource: arn:aws:s3:::${self:custom.dataBucket}/raw/*
-                - Sid: OwnDbSecretOnly
+                - Sid: OwnSecretsOnly # its DB login + the webhook header secret
                   Effect: Allow
                   Action: secretsmanager:GetSecretValue
-                  Resource: !Ref AppIngestDbSecret
+                  Resource:
+                    - !Ref AppIngestDbSecret
+                    - !Ref N8nWebhookSecret
                 - Sid: ConsumeIngestQueue # used by the Lambda event source mapping
                   Effect: Allow
                   Action:
@@ -613,6 +779,14 @@ resources:
           ThrottlingBurstLimit: 20
 
   Outputs:
+    N8nInstanceId:
+      Value: !Ref N8nInstance
+    N8nPrivateIp:
+      Value: !GetAtt N8nInstance.PrivateIp
+    N8nAwsRoleArn:
+      Value: !GetAtt N8nAwsRole.Arn
+    N8nAwsRoleExternalId:
+      Value: ${self:service}-${sls:stage}-n8n
     UploadUiUrl:
       Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
     DataBucketName:

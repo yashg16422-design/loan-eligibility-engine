@@ -37,14 +37,14 @@ Source of truth: the assignment text (`docs/ASSIGNMENT.md`) > this plan > the ag
 
 ## 3. Hard requirements checklist (each must be visibly satisfied)
 
-- [ ] Python; AWS Lambda; RDS PostgreSQL; SES. API Gateway optional → we use an HTTP API.
-- [ ] Self-hosted n8n in Docker (`docker-compose.yml`). All core business logic orchestrated in n8n.
-- [ ] LLM API used for specific AI tasks (Bedrock Nova Pro).
-- [ ] `serverless.yml` deploys all required AWS resources.
+- [x] Python; AWS Lambda; RDS PostgreSQL; SES. API Gateway optional → we use an HTTP API.
+- [x] Self-hosted n8n in Docker (`docker-compose.yml`). All core business logic orchestrated in n8n.
+- [x] LLM API used for specific AI tasks (Bedrock Nova Pro).
+- [x] `serverless.yml` deploys all required AWS resources.
 - [x] FR1: scalable, event-driven bulk CSV upload avoiding API Gateway/Lambda size and timeout limits; parsed and stored in a dedicated RDS table.
-- [ ] Workflow A: schedule trigger (daily); crawl 2–3 public lender sites; extract `product_name`, `interest_rate`, eligibility criteria; store in `loan_products`.
-- [ ] Workflow B: webhook trigger after a CSV is processed; fetch new users; fetch all products; matching logic in n8n; store in `matches` (`user_id` ↔ `product_id`); multi-stage optimized pipeline (Treasure Hunt).
-- [ ] Workflow C: runs after B completes; personalized email per user with new matches; sent with the n8n **AWS SES node**; only to my Gmail `+aliases`, never to CSV addresses.
+- [x] Workflow A: schedule trigger (daily); crawl 2–3 public lender sites; extract `product_name`, `interest_rate`, eligibility criteria; store in `loan_products`. (2026-10-09: 3 channels, 40 pages, 59 products, 26 lenders; daily schedule published)
+- [x] Workflow B: webhook trigger after a CSV is processed; fetch new users; fetch all products; matching logic in n8n; store in `matches` (`user_id` ↔ `product_id`); multi-stage optimized pipeline (Treasure Hunt).
+- [x] Workflow C: runs after B completes; personalized email per user with new matches; sent with the n8n **AWS SES node**; only to my Gmail `+aliases`, never to CSV addresses.
 - [x] Minimal UI for CSV upload (pipeline entry point). (2026-10-09: live; 10k rows COMPLETED in ~10 s)
 - [ ] Private GitHub repo; collaborators invited: `ujjwalkala-clickpe`, `HarshSrivastav-Dailype`, `ManishBiswal-clickpe`, `tushar-clickpe`.
 - [ ] Repo contains `serverless.yml`, `docker-compose.yml`, and a JSON export of every n8n workflow.
@@ -269,49 +269,35 @@ Before coding, run a quick profile of the full file (duplicates, ranges, distinc
 
 ---
 
-## 10. Workflow A — Loan Product Discovery (crawler)
+## 10. Workflow A: Loan Product Discovery (crawler), v2 (2026-10-09)
 
 **Triggers:** Schedule (daily 06:00 IST) + Manual trigger (for the demo).
 
-**Source selection (Day 1, before building A):** test candidate lender pages **from an AWS IP** (CloudShell in `ap-southeast-2`, or the EC2 instance once it's up), not only from the laptop. Pick 2–3 pages that:
-- render eligibility criteria in server-side HTML,
-- are allowed by `robots.txt`,
-- show numeric criteria.
+### 10.1 Channels and discovery (verified 2026-10-09 from the EC2's Sydney IP; same results as an Indian IP)
+| Channel | Discovery | Lenders | Fetch |
+|---|---|---|---|
+| Direct lender sites | each bank's `sitemap.xml` (banks moved to `*.bank.in`) | ICICI, IDFC FIRST, Tata Capital, IndusInd, SBI (static); Bank of Baroda, Axis (rendered) | static / rendered |
+| BankBazaar | hub `personal-loan.html` → links `<lender>-personal-loan.html` | 26 (per-employment age, min income, work experience, city lists) | static |
+| Paisabazaar | hub `/personal-loan/` → links `/<lender>/personal-loan/` | ~18 (rates, CIBIL guidance) | static |
 
-Never bypass CAPTCHAs or bot protection. Save an HTML snapshot of each to `s3://<bucket>/fixtures/` as the fallback.
+Excluded, with reasons logged in `crawl_runs`: HDFC and Kotak direct (robots.txt disallow, respected); Federal (renders empty in a headless browser, treated as a bot wall and not bypassed); Bajaj's details page (no eligibility content); Policybazaar (no personal-loan products; that group's loans are on Paisabazaar).
 
-**Per source** (Loop Over Items):
-1. HTTP Request: browser-like User-Agent, 20 s timeout, 3 retries.
-   - On failure → load the S3 fixture, `crawl_runs.status = fixture`.
-   - If the fixture is also missing → `failed`.
-2. HTML node: CSS selectors (per-source config) → product blocks + criteria text.
-3. Code node: whitespace-normalize the extracted criteria text → `criteria_hash` per product (**never hash the whole page**).
-4. Postgres: compare with the stored `criteria_hash`. Unchanged → only touch `last_seen_at` (zero LLM calls).
-5. New/changed → Bedrock Nova Pro (temperature 0, versioned prompt in `n8n/prompts/`). It extracts **raw strings** per field into a strict JSON schema.
-   - **Rule: the LLM extracts, the code does the math.**
-   - `null` means "not stated", never 0.
-6. Code node — validate the schema + deterministic normalizer (unit-tested in Python, with an identical JS port in the Code node):
-   - Income → monthly rupees:
-     - "₹X lakh p.a." → X×100000/12
-     - "₹X per annum" → X/12
-     - "₹X/month" → X
-     - "₹Xk" → X×1000
-     - Commas stripped; round to integer.
-   - Interest → min/max % p.a., plus `rate_type` if stated.
-   - Condition-dependent thresholds (e.g. "₹25k, ₹30k in metro cities") → the **most permissive** value goes into the hard filter; the condition text goes into `other_criteria_text` (feeds the "conditional" tier).
-   - NULL criterion = "lender stated no limit" → passes.
-   - Keep the original strings in `raw_extracted` for audit.
-7. Postgres: upsert `loan_products`; write `crawl_runs`.
+### 10.2 Pipeline (per page, streamed)
+1. **robots.txt gate** for every URL (skip if disallowed).
+2. **Fetch** per the source's `fetch` flag: `static` = n8n HTTP Request (browser UA, 20 s timeout, 3 retries); `rendered` = POST `http://renderer:3000/render` (headless Chromium, §10.4). On failure → S3 fixture → `crawl_runs.status = fixture`.
+3. **Isolate the eligibility section**: score every "eligib…" window by the criteria signals that follow it (ages, ₹, years, income, CIBIL) and take the best, so navigation menus are never chosen. If none scores → whole cleaned text (layout-change resilience). Pure function, tested in Python, identical JS in the Code node.
+4. **Hash** the isolated text → unchanged = touch `last_seen_at` only (zero LLM calls).
+5. **Extract (batched)**: changed sections go to Nova Pro, ~5 per call, strict JSON array keyed by page id, **per employment type**, raw strings only. Schema failure → retry that item alone.
+6. **Normalize** (Code node + Python tests): money → monthly ₹, age bands, rates; NULL = not stated; condition text → `other_criteria_text`.
+7. **Upsert** one product per **lender × channel × employment type**; per-field provenance in `raw_extracted`.
+8. Channels run **in parallel** (Execute Workflow, wait = off); pages are sequential within a site (polite ~1 req / 2 s). Each page writes its products as soon as it is processed (streaming), and each page gets its own `crawl_runs` row.
+9. At the end: deactivate only for channels with status ok; then Execute Workflow B (product mode) once, with the new/changed product ids.
 
-**After all sources:**
-- Deactivate products not seen in this run **only for sources with `status = ok`**.
-- A source returning 0 products when it previously had >0 is treated as `failed` (likely a layout change) → nothing deactivated.
-- Active matches of deactivated products → `superseded` (no email).
-- If any product is new, changed, or deactivated → Execute Workflow B with `{mode: "products", product_ids: [...]}`.
+### 10.3 Lender normalization
+`HDFC` = `HDFC Bank` = `hdfc-bank` → canonical lender key (alias map, pure + tested). Used for "best offer per lender" in emails.
 
-**Where the LLM runs here:** once per new/changed product, not per user. This moves the LLM upstream and is the first lever of the Treasure Hunt.
-
----
+### 10.4 Renderer (the `fetch: rendered` crawler)
+`renderer/`: python:3.12-slim + playwright 1.63.0 + headless Chromium shell only (1.28 GB image). Built on the EC2 by `boot.sh`, no published port (only n8n reaches it), `mem_limit` 900m, 2 GB swap on the host. A fresh browser context per request, images/fonts/media blocked, scroll + settle for lazy content, hidden accordion text included. **SSRF guard** (`url_safety.py`, unit-tested): only public http(s); every navigation hop is re-checked, so 169.254.169.254, private and loopback addresses are refused. Bot challenges are reported (`challenge: true`) and never bypassed.
 
 ## 11. Workflow B — Matching + Optimization Treasure Hunt
 
@@ -596,3 +582,27 @@ Use a small CSV for the live run so it finishes on camera.
 | 2026-10-09 | **Pluggable seams** (Aloo's request): validation rules = `ValidationRules`, overridable via the `VALIDATION_RULES` env JSON (bounded by the DB CHECKs); next-stage trigger = `Notifier` protocol (`N8nWebhookNotifier` / `NoopNotifier`, picked by `N8N_WEBHOOK_URL`); all ingest SQL in `loan_engine/ingest/repository.py` | Business logic can change after real-world feedback without touching the infrastructure; each seam has its own tests | §5, §9 |
 | 2026-10-09 | A file-level problem (missing column, **not UTF-8**) fails the job immediately without SQS retries; only other errors are retried | Retrying can't fix a bad file; it would only delay the user's FAILED status by 3×720 s | §5.3 |
 | 2026-10-09 | Deploy with the full `serverless deploy`, not `serverless deploy function` | With custom per-function roles, `deploy function` uploads the code but then errors ("Role resource missing RoleName property") on the config step | §20 |
+| 2026-10-09 | RDS PostgreSQL **16.15 → 17.11** (in-place major upgrade, approved by Aloo) | n8n 2.42.5 logs "Postgres 16 is outside the supported range and receives compatibility support only. Upgrade to Postgres 17 or newer." Done on Day 1 while the data is re-uploadable and before n8n stores anything | §2, §7 |
+| 2026-10-09 | n8n pinned to **2.42.5** (stable on 2026-10-08); EC2 **t4g.small arm64** with a pinned AMI; Docker Compose v5.5.1 installed with a SHA-256 check; IMDS hop limit 2 | 2.x renamed `latest`→`stable`; arm64 is cheaper and matches the Mac, where the same image was smoke-tested; a pinned AMI prevents silent instance replacement; hop limit 2 lets the container use the instance role | §6 |
+| 2026-10-09 | n8n's AWS access = **"AWS (Assume Role)" credential with System Credentials** → assumes `N8nAwsRole` (SES send + Nova Pro invoke only); needs `N8N_AWS_SYSTEM_CREDENTIALS_ACCESS_ENABLED=true`. **Unverified for the SES node**; fallback = scoped IAM user (§6.3) | The plain "AWS (IAM)" credential only takes access keys; Assume Role avoids long-lived keys | §6.3 |
+| 2026-10-09 | n8n verifies the RDS certificate (`DB_POSTGRESDB_SSL_CA_FILE` = the AWS regional trust bundle) instead of `REJECT_UNAUTHORIZED=false` | Real TLS verification at little extra cost | §6.2 |
+| 2026-10-09 | `N8nAwsRole` trust policy also requires `sts:ExternalId = loan-engine-dev-n8n` | n8n's AWS (Assume Role) form makes External ID mandatory; enforcing it in the trust policy adds AWS's confused-deputy check on top of the principal-ARN condition | §6.3 |
+| 2026-10-09 | **Crawler v2**: 3 channels (direct banks via sitemaps, BankBazaar, Paisabazaar), products = lender × channel × employment type, streamed per page, channels in parallel, batched LLM extraction | Aloo: more vendors and "different platforms show different benefits"; a richer product set (~80) makes the Treasure Hunt classes meaningful. Policybazaar has no PL products → dropped | §10 |
+| 2026-10-09 | **Both fetchers**: static HTTP + a headless renderer service (Playwright 1.63.0) behind a per-source `fetch` flag | Unlocks JS-rendered banks (Bank of Baroda 0 KB → 30 KB of text). Isolated container, SSRF-guarded, no public port, no bot-wall bypassing | §10.4, §15 |
+| 2026-10-09 | Renderer image built with plain `docker build` on the EC2 | Compose v5 `build` needs buildx ≥ 0.17; AL2023 ships 0.12 | §6 |
+| 2026-10-09 | Emails show **Best pick + Top picks (≤1 per lender) + Conditional** via a deterministic, tested ranking (tier → rate → fewest conditions → max amount), not the LLM | Explainable and reproducible; the LLM stays only where judgement is needed | §12 |
+| 2026-10-09 | Workflow A's Code-node logic lives in `n8n/code/*.js`: the same file is pasted into n8n and unit-tested with `node --test` (the bottom block runs only when `$input` exists) | One source of truth, so there is no Python→JS port to drift; what is tested is what runs | §10, §16, §17 |
+| 2026-10-09 | Prompt **v2** + **evidence verification**: every criteria entry quotes evidence; each sentence fragment must appear verbatim on the page and contain the extracted numbers, and the quote must not name another employment type. Failing entries become *conditional* (never a hard filter) | Live test: v1 swapped IIFL's age bands. v2 + verification catches model errors (IIFL) while accepting stitched-but-genuine quotes (HDFC); 5/8 entries verified on a 5-page sample; the rest fail safe | §10.2, §11.6 |
+| 2026-10-09 | Renderer **off by default** (compose profile `renderer`, `ENABLE_RENDERER=true` to opt in). Hard rule: 403/429/challenge = skip, never retry with a browser. Bank of Baroda dropped (WAF 403) | Aloo prefers not to depend on a headless browser; embedded ld+json covers most JS-heavy pages; the 403 rule keeps us out of bot-wall territory | §10.4 |
+| 2026-10-09 | Measured inventory: **40 usable pages / 45** (BankBazaar 25, Paisabazaar 10, direct 5), ~28 lenders, ~80 products. Fixtures in `s3://…/fixtures/` | Replaces estimates with measured numbers (`docs/crawl_inventory.json`) | §10.1 |
+| 2026-10-09 | Workflow JSON is **generated** by `n8n/build_workflows.py` from the tested `n8n/code/*.js` + the prompt `.md`, imported with `scripts/n8n-workflows.sh import` (n8n CLI over SSM), then reviewed node by node in the UI | Keeps the running workflow identical to the tested code; a hand-built 38-node workflow would drift. Deviation from "build in the UI" in CLAUDE.md, agreed with Aloo for speed + consistency | §16, CLAUDE.md |
+| 2026-10-09 | A = parent (discovery, robots, batching) + **A1 sub-workflow** (one batch of ≤5 pages). Both must be **published** (n8n 2.x: called sub-workflows must be published; publishing A also arms its daily schedule) | Linear loop in the parent, free branching in the child; n8n 2.x requirement found live ("Workflow is not active") | §10.2 |
+| 2026-10-09 | Page hash = SHA-256(`prompt=v2;normalizer=2` + sections). Bumping either version re-processes every page once | Measured: run 2 (normalizer fix) re-processed 40/40 pages; run 3 (no change) 0 LLM tokens, 35 s vs 87 s | §10.2 |
+| 2026-10-09 | Normalizer v2: several age bands → most permissive + full text kept as a condition; turnover/ITR/profit are never a monthly-income filter (become conditions); a "monthly" value > ₹10 lakh is treated as annual | Live data: ICICI self-employed was stored as age 25–28 and ₹15 lakh/month; the LLM's extraction was correct, the parser was wrong | §10.2 |
+| 2026-10-09 | No `URL` global in Code nodes (n8n 2.x task-runner sandbox) → regex helpers + a test that runs every module with `URL` removed | Found live: "URL is not defined" | §10 |
+| 2026-10-09 | Treasure Hunt v2: the LLM **compiles** each product's free-text criteria into checkable rules once (cached by text hash + prompt version) instead of judging (class × product) pairs; rule thresholds become class cut points; `ANALYZE` between Stage 1 and Stage 3 (PG17 `GRANT MAINTAIN`) | Pair-level judging would need ~180 calls (~15 min > n8n's 10-min limit). Measured on RDS: 590,000 naive pairs → 164 classes → 5 LLM calls once ($0.024), then 0; brute-force proof 0 mismatches; 40 s. Stale stats made Stage 3 take 7+ min in testing | §11 |
+| 2026-10-09 | C emails the top 5 per user (best offer per lender), demo cap of 5 real emails per run, rest `skipped_demo`; all loop results are collapsed to ONE item before the summary query | Live bug: a Postgres node runs once per input item, so the summary ran 5× (duplicated rows); fixed and the data cleaned once with the admin role | §12 |
+| 2026-10-09 | **Error workflow E** (Error Trigger → `errors.js` → `workflow_errors` → SES alert, rate-limited to 1/workflow/30 min) set as `settings.errorWorkflow` of A, A1, B, B1, C; **E1 drill** (schedule that fails on purpose, published only during `scripts/n8n-workflows.sh drill`) | Found live: an `n8n execute` (CLI) failure does NOT start the error workflow (short-lived process), so the drill uses a real scheduled execution inside the server. Verified: E1 execution 89 → `workflow_errors` row + alert | §16, §17 |
+| 2026-10-09 | **CI** (GitHub Actions): ruff, `node --test`, pytest incl. integration on a Postgres 17 container with TLS, and "committed workflow JSON == generator output" (`DATA_BUCKET` env lets the generator run without AWS). Plus a **workflow lint** test (connections, orphans, errorWorkflow, sub-workflow ids, webhook auth, credential refs, secret patterns, Code-node syntax), mutation-checked | Evidence of quality on every push; a reviewer (human or LLM) can trust the exports without importing them | §18 |
+| 2026-10-09 | B hardening: webhook `job_id` validated as UUID; re-claim closes the abandoned run; sweeper closes runs `running` > 30 min. A → B **product mode** wired (changed product ids after each crawl). Stage 1 stores an empty cut list as `[]`, not JSON `null` | The new product-mode integration test failed on the `null` cut list ("cannot extract elements from a scalar"): it would have broken the first live A → B call | §11, §16 |
+| 2026-10-09 | **Tried and reverted: schema-forced LLM output** (Converse `toolChoice.tool` + JSON Schema, supported by Nova per the user guide). Kept: a shared defensive parser (`structured.js`: fences/prose tolerated, placeholder strings such as "null" normalized to null) and a fix for the compile prompt's head (it included the `{{#each texts}}` template) | Measured: single page = identical values (input tokens 667 → 1,352); but a forced tool is called ONCE and Nova put only 1–2 of 5 pages in the batch array (reproduced locally; live crawl: 19 of 25 pages failed safe, kept their old products). Text mode: 5/5, 40/40 on the full crawl. Batched completeness beats a shape guarantee; the quote verification stays the truth check | §10.2, §11 |

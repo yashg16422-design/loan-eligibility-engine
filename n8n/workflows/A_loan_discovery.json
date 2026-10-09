@@ -1,0 +1,612 @@
+{
+  "id": "LoanEngineWfA001",
+  "name": "A · Loan product discovery (crawler)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## A · Loan product discovery\n**Schedule:** daily 06:00 IST (+ manual run for demos).\n\n1. Sources come from the `crawl_sources` table (config, not code).\n2. robots.txt is fetched per site and obeyed.\n3. Hubs are crawled for lender links; pages are interleaved across sites (polite).\n4. Pages go in batches of 5 to **A1**, which writes results as it goes.\n5. Finish: deactivate products that vanished from pages crawled OK; report.",
+        "width": 560,
+        "height": 300
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -380
+      ],
+      "id": "LoanEngineWfA001-00"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Every day 06:00 IST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -80
+      ],
+      "id": "LoanEngineWfA001-01"
+    },
+    {
+      "parameters": {},
+      "name": "Run now (demo)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        80
+      ],
+      "id": "LoanEngineWfA001-02"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT gen_random_uuid()::text AS run_id, now() AS started_at,\n       COALESCE((SELECT json_agg(s ORDER BY s.source_id) FROM crawl_sources s WHERE s.enabled), '[]'::json) AS sources",
+        "options": {}
+      },
+      "name": "Start run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "id": "LoanEngineWfA001-03",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst { sources } = $input.first().json;\nconst origins = [...new Set(sources.map((s) => s.url.match(/^https?:\\/\\/[^/]+/i)[0]))];\nreturn origins.map((origin) => ({ json: { origin, robots_url: `${origin}/robots.txt` } }));\n"
+      },
+      "name": "Origins to check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "LoanEngineWfA001-04"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.robots_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36 LoanEligibilityEngine-assignment/1.0"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,*/*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "name": "Fetch robots.txt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "id": "LoanEngineWfA001-05",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// One map origin -> {status, body}. An unreachable robots.txt (status 0) means \"disallow all\".\nconst robots = {};\n$input.all().forEach((item, i) => {\n  const { origin } = $('Origins to check').itemMatching(i).json;\n  const r = item.json;\n  robots[origin] = { status: Number(r.statusCode || 0), body: typeof r.body === 'string' ? r.body : (r.data || '') };\n});\nreturn [{ json: { robots } }];\n"
+      },
+      "name": "Robots rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "id": "LoanEngineWfA001-06"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * robots.txt rules for the crawler (RFC 9309), pure functions.\n *\n * - Our crawler identifies as \"LoanEligibilityEngine\"; we obey the group for that token,\n *   else the \"*\" group.\n * - Longest matching rule wins; on a tie, Allow wins. `*` and `$` wildcards supported.\n * - robots.txt status: 200 -> parse; 401/403 -> treat as \"disallow all\" (conservative:\n *   the site is refusing bots); other 4xx -> no rules (RFC 9309: allowed);\n *   5xx / unreachable -> \"disallow all\" (RFC 9309: assume complete disallow).\n */\n\nconst CRAWLER_TOKEN = 'loaneligibilityengine';\n\n/** Parse robots.txt into groups: [{ agents: [..], rules: [{ allow, pattern }] }]. */\nfunction parseRobots(text) {\n  const groups = [];\n  let current = null;\n  let lastWasAgent = false;\n  for (const rawLine of String(text || '').split(/\\r?\\n/)) {\n    const line = rawLine.replace(/#.*$/, '').trim();\n    const m = /^([A-Za-z-]+)\\s*:\\s*(.*)$/.exec(line);\n    if (!m) continue;\n    const field = m[1].toLowerCase();\n    const value = m[2].trim();\n    if (field === 'user-agent') {\n      if (!current || !lastWasAgent) { current = { agents: [], rules: [] }; groups.push(current); }\n      current.agents.push(value.toLowerCase());\n      lastWasAgent = true;\n    } else if ((field === 'allow' || field === 'disallow') && current) {\n      lastWasAgent = false;\n      if (value) current.rules.push({ allow: field === 'allow', pattern: value });\n    } else {\n      lastWasAgent = false;\n    }\n  }\n  return groups;\n}\n\n/** Rules of the group that applies to us (our token, else \"*\"). */\nfunction rulesFor(groups, token = CRAWLER_TOKEN) {\n  const own = groups.filter((g) => g.agents.some((a) => a !== '*' && token.includes(a)));\n  const chosen = own.length ? own : groups.filter((g) => g.agents.includes('*'));\n  return chosen.flatMap((g) => g.rules);\n}\n\nfunction patternToRegex(pattern) {\n  const anchored = pattern.endsWith('$');\n  const body = (anchored ? pattern.slice(0, -1) : pattern)\n    .split('*')\n    .map((part) => part.replace(/[.+?^${}()|[\\]\\\\]/g, '\\\\$&'))\n    .join('.*');\n  return new RegExp(`^${body}${anchored ? '$' : ''}`);\n}\n\n/**\n * Path + query of an absolute URL, without the `URL` global: n8n 2.x runs Code nodes\n * in a sandbox where `URL` is not defined.\n */\nfunction pathOf(url) {\n  const m = /^https?:\\/\\/[^/?#]+([^#]*)/i.exec(String(url));\n  const rest = m ? m[1] : '';\n  return rest.startsWith('/') ? rest : `/${rest}`;\n}\n\n/** Is `url` allowed, given the robots.txt fetch result for its origin? */\nfunction isAllowed(url, robots) {\n  const status = robots ? Number(robots.status) : 0;\n  if (status === 401 || status === 403) return false;\n  if (status >= 400 && status < 500) return true;\n  if (status !== 200) return false;\n  const path = pathOf(url);\n  let best = null;\n  for (const rule of rulesFor(parseRobots(robots.body))) {\n    if (!patternToRegex(rule.pattern).test(path)) continue;\n    const len = rule.pattern.replace(/\\*|\\$$/g, '').length;\n    if (!best || len > best.len || (len === best.len && rule.allow)) best = { len, allow: rule.allow };\n  }\n  return best ? best.allow : true;\n}\n\nif (typeof module !== 'undefined') module.exports = { parseRobots, rulesFor, isAllowed, pathOf, CRAWLER_TOKEN };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst { sources } = $('Start run').first().json;\nconst { robots } = $input.first().json;\nconst origin = (u) => u.match(/^https?:\\/\\/[^/]+/i)[0];\nreturn sources.filter((s) => s.discovery === 'hub' && isAllowed(s.url, robots[origin(s.url)])).map((s) => ({ json: s }));\n"
+      },
+      "name": "Hub sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "id": "LoanEngineWfA001-07",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36 LoanEligibilityEngine-assignment/1.0"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,*/*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          }
+        }
+      },
+      "name": "Fetch hub pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        0
+      ],
+      "id": "LoanEngineWfA001-08",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * robots.txt rules for the crawler (RFC 9309), pure functions.\n *\n * - Our crawler identifies as \"LoanEligibilityEngine\"; we obey the group for that token,\n *   else the \"*\" group.\n * - Longest matching rule wins; on a tie, Allow wins. `*` and `$` wildcards supported.\n * - robots.txt status: 200 -> parse; 401/403 -> treat as \"disallow all\" (conservative:\n *   the site is refusing bots); other 4xx -> no rules (RFC 9309: allowed);\n *   5xx / unreachable -> \"disallow all\" (RFC 9309: assume complete disallow).\n */\n\nconst CRAWLER_TOKEN = 'loaneligibilityengine';\n\n/** Parse robots.txt into groups: [{ agents: [..], rules: [{ allow, pattern }] }]. */\nfunction parseRobots(text) {\n  const groups = [];\n  let current = null;\n  let lastWasAgent = false;\n  for (const rawLine of String(text || '').split(/\\r?\\n/)) {\n    const line = rawLine.replace(/#.*$/, '').trim();\n    const m = /^([A-Za-z-]+)\\s*:\\s*(.*)$/.exec(line);\n    if (!m) continue;\n    const field = m[1].toLowerCase();\n    const value = m[2].trim();\n    if (field === 'user-agent') {\n      if (!current || !lastWasAgent) { current = { agents: [], rules: [] }; groups.push(current); }\n      current.agents.push(value.toLowerCase());\n      lastWasAgent = true;\n    } else if ((field === 'allow' || field === 'disallow') && current) {\n      lastWasAgent = false;\n      if (value) current.rules.push({ allow: field === 'allow', pattern: value });\n    } else {\n      lastWasAgent = false;\n    }\n  }\n  return groups;\n}\n\n/** Rules of the group that applies to us (our token, else \"*\"). */\nfunction rulesFor(groups, token = CRAWLER_TOKEN) {\n  const own = groups.filter((g) => g.agents.some((a) => a !== '*' && token.includes(a)));\n  const chosen = own.length ? own : groups.filter((g) => g.agents.includes('*'));\n  return chosen.flatMap((g) => g.rules);\n}\n\nfunction patternToRegex(pattern) {\n  const anchored = pattern.endsWith('$');\n  const body = (anchored ? pattern.slice(0, -1) : pattern)\n    .split('*')\n    .map((part) => part.replace(/[.+?^${}()|[\\]\\\\]/g, '\\\\$&'))\n    .join('.*');\n  return new RegExp(`^${body}${anchored ? '$' : ''}`);\n}\n\n/**\n * Path + query of an absolute URL, without the `URL` global: n8n 2.x runs Code nodes\n * in a sandbox where `URL` is not defined.\n */\nfunction pathOf(url) {\n  const m = /^https?:\\/\\/[^/?#]+([^#]*)/i.exec(String(url));\n  const rest = m ? m[1] : '';\n  return rest.startsWith('/') ? rest : `/${rest}`;\n}\n\n/** Is `url` allowed, given the robots.txt fetch result for its origin? */\nfunction isAllowed(url, robots) {\n  const status = robots ? Number(robots.status) : 0;\n  if (status === 401 || status === 403) return false;\n  if (status >= 400 && status < 500) return true;\n  if (status !== 200) return false;\n  const path = pathOf(url);\n  let best = null;\n  for (const rule of rulesFor(parseRobots(robots.body))) {\n    if (!patternToRegex(rule.pattern).test(path)) continue;\n    const len = rule.pattern.replace(/\\*|\\$$/g, '').length;\n    if (!best || len > best.len || (len === best.len && rule.allow)) best = { len, allow: rule.allow };\n  }\n  return best ? best.allow : true;\n}\n\nif (typeof module !== 'undefined') module.exports = { parseRobots, rulesFor, isAllowed, pathOf, CRAWLER_TOKEN };\n\n\n/**\n * Page discovery for Workflow A (PLAN.md §10.1), pure functions.\n *\n * - hub sources: follow links on the hub page that match the source's `link_pattern`\n *   (capture group 1 = lender slug); drop slugs that are site sections, not lenders.\n * - fixed sources: the configured product page (found earlier via the bank's sitemap.xml).\n * - Pages are interleaved round-robin across channels, so consecutive requests go to\n *   different sites (politeness without long sleeps).\n */\n\n// Slugs that match a lender-URL shape but are tools, articles or site sections.\nconst NOT_A_LENDER = /(^|-)(how|track|apply|instant|online|best|top|for|calculator|status|customer|care|preclosure|interest|emi|eligibility|documents|pre-approved|bad|cibil|apps?|loan|category|reviews?|hindi|tamil|telugu|marathi|blog|news)(-|$)/;\n\n/** Absolute URL for an href on `base` (no URL-resolution edge cases needed for these hubs). */\nfunction absolute(href, base) {\n  if (/^https?:\\/\\//i.test(href)) return href;\n  const origin = base.match(/^https?:\\/\\/[^/]+/i)[0];\n  return href.startsWith('/') ? origin + href : null;\n}\n\n/** Lender pages linked from a hub page: [{ lender_slug, url }], deduplicated by slug. */\nfunction linksFromHub(html, hubUrl, linkPattern) {\n  const pattern = new RegExp(linkPattern);\n  const bySlug = new Map();\n  const hrefs = String(html || '').match(/href=\"([^\"#?]+)\"/g) || [];\n  for (const attr of hrefs) {\n    const url = absolute(attr.slice(6, -1), hubUrl);\n    if (!url) continue;\n    const m = pattern.exec(url);\n    if (!m || NOT_A_LENDER.test(m[1])) continue;\n    // Paisabazaar redirects to the trailing-slash form: request that directly.\n    const canonical = url.includes('paisabazaar.com') && !url.endsWith('/') ? `${url}/` : url;\n    if (!bySlug.has(m[1])) bySlug.set(m[1], canonical);\n  }\n  return [...bySlug.entries()].sort().map(([lender_slug, url]) => ({ lender_slug, url }));\n}\n\n/** Interleave pages across channels: a,b,c,a,b,c,... (stable within each channel). */\nfunction roundRobin(pages) {\n  const queues = new Map();\n  for (const p of pages) {\n    if (!queues.has(p.channel)) queues.set(p.channel, []);\n    queues.get(p.channel).push(p);\n  }\n  const out = [];\n  const lists = [...queues.values()];\n  for (let i = 0; out.length < pages.length; i += 1) {\n    for (const list of lists) if (i < list.length) out.push(list[i]);\n  }\n  return out;\n}\n\n/**\n * All pages for this run. `hubHtml` maps source_id -> hub HTML (absent if the hub\n * failed). Each page: { source_id, channel, lender_slug, url, fetch_mode }.\n */\nfunction planPages(sources, hubHtml) {\n  const pages = [];\n  for (const s of sources) {\n    if (s.discovery === 'fixed') {\n      pages.push({ source_id: s.source_id, channel: s.channel, lender_slug: s.lender_slug, url: s.url, fetch_mode: s.fetch_mode });\n    } else if (hubHtml[s.source_id]) {\n      for (const link of linksFromHub(hubHtml[s.source_id], s.url, s.link_pattern)) {\n        pages.push({ source_id: s.source_id, channel: s.channel, fetch_mode: s.fetch_mode, ...link });\n      }\n    }\n  }\n  return roundRobin(pages);\n}\n\nif (typeof module !== 'undefined') module.exports = { NOT_A_LENDER, linksFromHub, roundRobin, planPages };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst run = $('Start run').first().json;\nconst { robots } = $('Robots rules').first().json;\nconst hubHtml = {};\n$input.all().forEach((item, i) => {\n  const hub = $('Hub sources').itemMatching(i).json;\n  const r = item.json;\n  if (hub && hub.source_id && Number(r.statusCode) === 200) hubHtml[hub.source_id] = r.body ?? r.data ?? '';\n});\nconst origin = (u) => u.match(/^https?:\\/\\/[^/]+/i)[0];\nreturn planPages(run.sources, hubHtml).map((p, seq) => ({ json: {\n  ...p, run_id: run.run_id, seq, page_id: `${p.channel}:${p.lender_slug}`,\n  robots_allowed: isAllowed(p.url, robots[origin(p.url)]),\n} }));\n"
+      },
+      "name": "Discover pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "LoanEngineWfA001-09"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.robots_allowed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "robots.txt allows?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "LoanEngineWfA001-10"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO crawl_runs (run_id, source_url, channel, lender_slug, status, error, finished_at)\nVALUES ($1::uuid, $2, $3, $4, 'robots_disallowed', 'robots.txt disallows this URL: never fetched', now())\nON CONFLICT (run_id, source_url) DO NOTHING",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, $json.url, $json.channel, $json.lender_slug ] }}"
+        }
+      },
+      "name": "Log robots-disallowed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1980,
+        200
+      ],
+      "id": "LoanEngineWfA001-11",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {}
+      },
+      "name": "Every 5 pages",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1980,
+        -40
+      ],
+      "id": "LoanEngineWfA001-12"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst pages = $input.all().map((i) => i.json);\nreturn [{ json: { run_id: pages[0].run_id, pages } }];\n"
+      },
+      "name": "Batch → one item",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        80
+      ],
+      "id": "LoanEngineWfA001-13"
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfA101",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Process batch (A1)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2420,
+        80
+      ],
+      "id": "LoanEngineWfA001-14"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nreturn [{ json: { run_id: $('Start run').first().json.run_id, started_at: $('Start run').first().json.started_at } }];\n"
+      },
+      "name": "Run summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -200
+      ],
+      "id": "LoanEngineWfA001-15"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH crawled AS (\n  SELECT DISTINCT source_url FROM crawl_runs\n  WHERE run_id = $1::uuid AND status IN ('ok', 'unchanged')\n), deactivated AS (\n  -- Only for pages crawled OK this run: a product that vanished from a healthy page is gone.\n  -- Pages that failed/blocked keep their products (a bad crawl never wipes data).\n  UPDATE loan_products p SET is_active = false\n  WHERE p.is_active AND p.source_url IN (SELECT source_url FROM crawled)\n    AND p.last_seen_at < $2::timestamptz\n  RETURNING p.product_id\n), superseded AS (\n  UPDATE matches m SET status = 'superseded', superseded_at = now()\n  WHERE m.status = 'active' AND m.product_id IN (SELECT product_id FROM deactivated)\n  RETURNING 1\n)\nSELECT $1::text AS run_id,\n  (SELECT count(*) FROM crawl_runs WHERE run_id = $1::uuid) AS pages,\n  (SELECT json_object_agg(status, n) FROM (SELECT status, count(*) AS n FROM crawl_runs\n     WHERE run_id = $1::uuid GROUP BY status) s) AS pages_by_status,\n  (SELECT count(*) FROM loan_products WHERE is_active) AS active_products,\n  (SELECT count(*) FROM loan_products WHERE last_changed_at >= $2::timestamptz) AS products_new_or_changed,\n  -- Workflow B re-matches every user against exactly these products (product mode).\n  (SELECT coalesce(json_agg(product_id), '[]'::json) FROM loan_products\n     WHERE is_active AND last_changed_at >= $2::timestamptz) AS product_ids,\n  (SELECT count(*) FROM deactivated) AS products_deactivated,\n  (SELECT count(*) FROM superseded) AS matches_superseded,\n  (SELECT coalesce(sum(llm_input_tokens), 0) FROM crawl_runs WHERE run_id = $1::uuid) AS llm_input_tokens,\n  (SELECT coalesce(sum(llm_output_tokens), 0) FROM crawl_runs WHERE run_id = $1::uuid) AS llm_output_tokens",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, $json.started_at ] }}"
+        }
+      },
+      "name": "Finish run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2420,
+        -200
+      ],
+      "id": "LoanEngineWfA001-16",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.product_ids.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Products changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        -200
+      ],
+      "id": "LoanEngineWfA001-17"
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfB001",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Re-match changed products (B)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2860,
+        -280
+      ],
+      "id": "LoanEngineWfA001-18",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Finish run": {
+      "main": [
+        [
+          {
+            "node": "Products changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every day 06:00 IST": {
+      "main": [
+        [
+          {
+            "node": "Start run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now (demo)": {
+      "main": [
+        [
+          {
+            "node": "Start run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start run": {
+      "main": [
+        [
+          {
+            "node": "Origins to check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Origins to check": {
+      "main": [
+        [
+          {
+            "node": "Fetch robots.txt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch robots.txt": {
+      "main": [
+        [
+          {
+            "node": "Robots rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Robots rules": {
+      "main": [
+        [
+          {
+            "node": "Hub sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hub sources": {
+      "main": [
+        [
+          {
+            "node": "Fetch hub pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch hub pages": {
+      "main": [
+        [
+          {
+            "node": "Discover pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discover pages": {
+      "main": [
+        [
+          {
+            "node": "robots.txt allows?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch → one item": {
+      "main": [
+        [
+          {
+            "node": "Process batch (A1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process batch (A1)": {
+      "main": [
+        [
+          {
+            "node": "Every 5 pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run summary": {
+      "main": [
+        [
+          {
+            "node": "Finish run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "robots.txt allows?": {
+      "main": [
+        [
+          {
+            "node": "Every 5 pages",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log robots-disallowed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 5 pages": {
+      "main": [
+        [
+          {
+            "node": "Run summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Batch → one item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Products changed?": {
+      "main": [
+        [
+          {
+            "node": "Re-match changed products (B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "Daily crawl of lender pages (direct banks + BankBazaar + Paisabazaar) into loan_products."
+  },
+  "pinData": {}
+}

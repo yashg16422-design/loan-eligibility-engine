@@ -16,6 +16,9 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "ANN", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # Tests don't need return-type annotations on every test function.
 "tests/**" = ["ANN"]
+# The workflow generator embeds SQL/JS/Markdown verbatim (long lines are content, not
+# code) and its tiny node builder forwards arbitrary n8n node settings via **extra.
+"n8n/build_workflows.py" = ["E501", "ANN401"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

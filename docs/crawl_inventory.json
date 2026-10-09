@@ -1,0 +1,448 @@
+[
+ {
+  "channel": "bankbazaar",
+  "lender": "axis",
+  "url": "https://www.bankbazaar.com/axis-personal-loan.html",
+  "status": 200,
+  "text_kb": 13,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "bank-of-baroda",
+  "url": "https://www.bankbazaar.com/bank-of-baroda-personal-loan.html",
+  "status": 200,
+  "text_kb": 19,
+  "embedded_kb": 2,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "bank-of-india",
+  "url": "https://www.bankbazaar.com/bank-of-india-personal-loan.html",
+  "status": 200,
+  "text_kb": 18,
+  "embedded_kb": 3,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "bank-of-maharashtra",
+  "url": "https://www.bankbazaar.com/bank-of-maharashtra-personal-loan.html",
+  "status": 200,
+  "text_kb": 19,
+  "embedded_kb": 3,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "canara-bank",
+  "url": "https://www.bankbazaar.com/canara-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 14,
+  "embedded_kb": 2,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "central-bank-of-india",
+  "url": "https://www.bankbazaar.com/central-bank-of-india-personal-loan.html",
+  "status": 200,
+  "text_kb": 13,
+  "embedded_kb": 1,
+  "score": 6,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "hdbfs",
+  "url": "https://www.bankbazaar.com/hdbfs-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 2,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "hdfc",
+  "url": "https://www.bankbazaar.com/hdfc-personal-loan.html",
+  "status": 200,
+  "text_kb": 17,
+  "embedded_kb": 1,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "icici",
+  "url": "https://www.bankbazaar.com/icici-personal-loan.html",
+  "status": 200,
+  "text_kb": 17,
+  "embedded_kb": 2,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "idbi",
+  "url": "https://www.bankbazaar.com/idbi-personal-loan.html",
+  "status": 200,
+  "text_kb": 17,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "idfc-bank",
+  "url": "https://www.bankbazaar.com/idfc-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 17,
+  "embedded_kb": 3,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "iifl",
+  "url": "https://www.bankbazaar.com/iifl-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 1,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "indian-bank",
+  "url": "https://www.bankbazaar.com/indian-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 1,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "indusind",
+  "url": "https://www.bankbazaar.com/indusind-personal-loan.html",
+  "status": 200,
+  "text_kb": 18,
+  "embedded_kb": 2,
+  "score": 7,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "iob",
+  "url": "https://www.bankbazaar.com/iob-personal-loan.html",
+  "status": 200,
+  "text_kb": 13,
+  "embedded_kb": 1,
+  "score": 4,
+  "verdict": "no_criteria_found"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "kotak",
+  "url": "https://www.bankbazaar.com/kotak-personal-loan.html",
+  "status": 200,
+  "text_kb": 16,
+  "embedded_kb": 1,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "punjab-and-sind-bank",
+  "url": "https://www.bankbazaar.com/punjab-and-sind-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 14,
+  "embedded_kb": 1,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "punjab-national-bank",
+  "url": "https://www.bankbazaar.com/punjab-national-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 0,
+  "score": 7,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "rbl-bank",
+  "url": "https://www.bankbazaar.com/rbl-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 14,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "sbi",
+  "url": "https://www.bankbazaar.com/sbi-personal-loan.html",
+  "status": 200,
+  "text_kb": 20,
+  "embedded_kb": 4,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "standard-chartered",
+  "url": "https://www.bankbazaar.com/standard-chartered-personal-loan.html",
+  "status": 200,
+  "text_kb": 10,
+  "embedded_kb": 2,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "tatacap",
+  "url": "https://www.bankbazaar.com/tatacap-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "uco",
+  "url": "https://www.bankbazaar.com/uco-personal-loan.html",
+  "status": 200,
+  "text_kb": 18,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "ujjivan",
+  "url": "https://www.bankbazaar.com/ujjivan-personal-loan.html",
+  "status": 200,
+  "text_kb": 16,
+  "embedded_kb": 2,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "union-bank",
+  "url": "https://www.bankbazaar.com/union-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 1,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "bankbazaar",
+  "lender": "yes-bank",
+  "url": "https://www.bankbazaar.com/yes-bank-personal-loan.html",
+  "status": 200,
+  "text_kb": 15,
+  "embedded_kb": 1,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "axis-bank",
+  "url": "https://www.paisabazaar.com/axis-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 25,
+  "embedded_kb": 2,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "federal-bank",
+  "url": "https://www.paisabazaar.com/federal-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 16,
+  "embedded_kb": 0,
+  "score": 7,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "hdfc-bank",
+  "url": "https://www.paisabazaar.com/hdfc-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 23,
+  "embedded_kb": 1,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "icici-bank",
+  "url": "https://www.paisabazaar.com/icici-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 23,
+  "embedded_kb": 2,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "idfc-bank",
+  "url": "https://www.paisabazaar.com/idfc-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 24,
+  "embedded_kb": 2,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "indusind-bank",
+  "url": "https://www.paisabazaar.com/indusind-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 23,
+  "embedded_kb": 3,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "kotak-mahindra-bank",
+  "url": "https://www.paisabazaar.com/kotak-mahindra-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 21,
+  "embedded_kb": 2,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "rbl-bank",
+  "url": "https://www.paisabazaar.com/rbl-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 16,
+  "embedded_kb": 1,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "sbi-bank",
+  "url": "https://www.paisabazaar.com/sbi-bank/personal-loan/",
+  "status": 200,
+  "text_kb": 30,
+  "embedded_kb": 6,
+  "score": 11,
+  "verdict": "usable"
+ },
+ {
+  "channel": "paisabazaar",
+  "lender": "tata-capital",
+  "url": "https://www.paisabazaar.com/tata-capital/personal-loan/",
+  "status": 200,
+  "text_kb": 25,
+  "embedded_kb": 2,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "icici",
+  "url": "https://www.icici.bank.in/personal-banking/loans/personal-loan",
+  "status": 200,
+  "text_kb": 43,
+  "embedded_kb": 1,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "idfc-first",
+  "url": "https://www.idfcfirst.bank.in/personal-banking/loans/personal-loan",
+  "status": 200,
+  "text_kb": 74,
+  "embedded_kb": 3,
+  "score": 9,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "tata-capital",
+  "url": "https://www.tatacapital.com/personal-loan.html",
+  "status": 200,
+  "text_kb": 55,
+  "embedded_kb": 9,
+  "score": 8,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "indusind",
+  "url": "https://www.indusind.bank.in/in/en/personal/loans/personal-loan.html",
+  "status": 200,
+  "text_kb": 50,
+  "embedded_kb": 13,
+  "score": 12,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "sbi",
+  "url": "https://sbi.bank.in/web/personal-banking/loans/personal-loans/sbi-personal-loan",
+  "status": 200,
+  "text_kb": 28,
+  "embedded_kb": 0,
+  "score": 10,
+  "verdict": "usable"
+ },
+ {
+  "channel": "direct",
+  "lender": "federal",
+  "url": "https://www.federal.bank.in/personal-loans",
+  "status": 200,
+  "text_kb": 0,
+  "embedded_kb": 0,
+  "score": 0,
+  "verdict": "no_criteria_found"
+ },
+ {
+  "channel": "direct",
+  "lender": "bajaj-finserv",
+  "url": "https://www.bajajfinserv.in/personal-loan-details",
+  "status": 200,
+  "text_kb": 28,
+  "embedded_kb": 5,
+  "score": 2,
+  "verdict": "no_criteria_found"
+ },
+ {
+  "channel": "direct",
+  "lender": "axis",
+  "url": "https://www.axisbank.com/retail/loans/personal-loan/eligibility",
+  "status": 200,
+  "text_kb": 70,
+  "embedded_kb": 0,
+  "score": 3,
+  "verdict": "no_criteria_found"
+ },
+ {
+  "channel": "direct",
+  "lender": "bank-of-baroda",
+  "url": "https://bankofbaroda.bank.in/loans/personal-loan/baroda-personal-loan",
+  "verdict": "robots_disallowed"
+ }
+]
