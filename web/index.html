@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en-IN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="ClickPar Match checks every lender's published rules against your four numbers, so you know which personal loans fit, and why, before you apply." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>ClickPar Match: know your yes before you apply</title>
+    <script>
+      // Decide the motion mode before first paint, so nothing flashes: reduced motion gets the
+      // static page; everyone else sees the intro once per browser session.
+      (function () {
+        var r = document.documentElement;
+        var seen = null;
+        try { seen = sessionStorage.getItem("cpm-intro"); } catch (e) {}
+        if (matchMedia("(prefers-reduced-motion: reduce)").matches) r.classList.add("static");
+        else if (!seen) {
+          r.dataset.intro = "play";
+          // never leave the curtain up if the script fails to load
+          setTimeout(function () { if (r.dataset.intro === "play" && !r.dataset.ready) r.dataset.intro = "done"; }, 3500);
+        }
+        try { var acc = localStorage.getItem("cpm-acc"); if (acc && acc !== "mint") r.dataset.acc = acc; } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="curtain" aria-hidden="true"><div class="word"><span>ClickPar</span><span class="mint">Match</span></div><div class="bar"></div><button type="button" id="skip">Skip intro</button></div>
+    <canvas id="gl" aria-hidden="true"></canvas>
+
+    <nav class="rn" id="rn" aria-label="Sections" data-open="false">
+      <button class="rn-toggle" type="button" aria-expanded="false" aria-controls="rn-list"><span id="rn-count">01 / 09</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2"/></svg><span class="visually-hidden">Show sections</span></button>
+      <ol id="rn-list">
+        <li><a href="#hero"><i></i><span>Home</span></a></li>
+        <li><a href="#statement"><i></i><span>The problem</span></a></li>
+        <li><a href="#globe-beat"><i></i><span>Surat</span></a></li>
+        <li><a href="#ask"><i></i><span>Your question</span></a></li>
+        <li><a href="#comic"><i></i><span>Our story</span></a></li>
+        <li><a href="#journey"><i></i><span>How it works</span></a></li>
+        <li><a href="#engine"><i></i><span>The engine</span></a></li>
+        <li><a href="#proof"><i></i><span>Proof</span></a></li>
+        <li><a href="#invite"><i></i><span>Get started</span></a></li>
+      </ol>
+      <div class="rn-theme"><span>Colour</span><div class="sw" role="group" aria-label="Accent colour">
+        <button type="button" data-acc="mint" aria-label="Mint and white" aria-pressed="true" style="--a:#4BE3A0; --b:#F2F2F2"></button>
+        <button type="button" data-acc="glacier" aria-label="Glacier blue and frost" aria-pressed="false" style="--a:#9CC3FF; --b:#DCE7F7"></button>
+        <button type="button" data-acc="marigold" aria-label="Marigold, the app's colour" aria-pressed="false" style="--a:#F2A93B; --b:#E9ECEE"></button>
+        <button type="button" data-acc="volt" aria-label="Volt and graphite" aria-pressed="false" style="--a:#D7FF3B; --b:#A7ADB4"></button>
+        <button type="button" data-acc="rose" aria-label="Rose and lilac" aria-pressed="false" style="--a:#FF7AA8; --b:#C9B8FF"></button>
+        <button type="button" data-acc="mono" aria-label="White and steel" aria-pressed="false" style="--a:#FFFFFF; --b:#8FA3B8"></button>
+      </div></div>
+      <button class="rn-acc" type="button" aria-label="Change colours"></button>
+    </nav>
+    <nav class="nav" aria-label="Main">
+      <a class="brand" href="#hero" aria-label="ClickPar Match, back to top"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 30 16 16 30 2 16Z" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M16 8 24 16 16 24 8 16Z" fill="var(--acc)"/></svg><span><b>CLICKPAR</b><small>MATCH</small></span></a>
+      <ul>
+        <li><a href="#comic">Story</a></li>
+        <li><a href="#journey">How it works</a></li>
+        <li><a href="#engine">Engine</a></li>
+        <li><a href="#proof">Proof</a></li>
+      </ul>
+      <a class="btn btn-primary" href="%APP_URL%">Check my eligibility<svg class="arr" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></a>
+    </nav>
+
+    <main>
+      <!-- 1. hero over the globe -->
+      <section id="hero">
+        <div class="wrap">
+          <h1><span class="h-thin">Know your <em>yes</em></span><span class="h-bold">before you apply.</span></h1>
+          <p class="sub">Every lender's published rules, checked against <b>your four numbers</b>. See which personal loans fit, and why.</p>
+          <div class="ctas">
+            <a class="btn btn-primary" href="%APP_URL%">Check my eligibility<svg class="arr" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></a>
+            <a class="btn btn-ghost btn-mono" href="%APP_URL%ops">See the engine<svg class="arr" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></a>
+          </div>
+          <div class="stats" aria-label="Measured on the live engine">
+            <div class="stat" style="--c: var(--coral)"><b>590,000</b><span>user and loan pairs to check</span></div>
+            <div class="stat" style="--c: var(--peri)"><b>164</b><span>classes that answer them all</span></div>
+            <div class="stat" style="--c: var(--amber)"><b>5</b><span>AI calls, about $0.02</span></div>
+            <div class="stat"><b>0</b><span>mismatches against brute force</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. statement -->
+      <section id="statement" aria-label="The problem">
+        <div class="sticky">
+          <p class="statement" id="statement-text" data-text="Most people learn a lender's rules by getting [rejected]. And every rejection can cost [credit score] points they spent years earning.">Most people learn a lender's rules by getting rejected. And every rejection can cost credit score points they spent years earning.</p>
+        </div>
+      </section>
+
+      <!-- 2. globe: India, then Surat -->
+      <section id="globe-beat">
+        <div class="sticky">
+          <div class="beat-cap" id="cap-india">
+            <span class="label amber">India</span>
+            <h2>Every lender writes its own rules.</h2>
+            <p>Income floors, score cut-offs, age limits, who counts as salaried. Spread across bank sites and comparison sites, and changed without notice.</p>
+          </div>
+          <div class="beat-cap center" id="cap-surat">
+            <span class="label mint">21.20° N, 72.84° E</span>
+            <h2>Surat, Gujarat.</h2>
+            <p>ClickPar is from here. So is this story.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3b. the borrower's questions -->
+      <section id="ask" aria-labelledby="ask-h">
+        <div class="floaters" id="floaters" aria-hidden="true"></div>
+        <div class="ask-core">
+          <h2 id="ask-h">What's stopping your loan?</h2>
+          <p class="ask-sub">You ask. We check every lender's real rules.<br>See what happens next.</p>
+          <p class="ask-live"><span class="dotlive" aria-hidden="true"></span><b>READ DAILY</b><span>26 lenders, 59 products, 06:00 IST</span></p>
+          <form class="ask-form" id="ask-form" autocomplete="off">
+            <label class="visually-hidden" for="ask-in">Ask about your loan</label>
+            <input id="ask-in" name="q" type="text" maxlength="120" placeholder="does checking hurt my CIBIL?">
+            <button type="submit" aria-label="Ask"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.8"/></svg></button>
+          </form>
+          <div class="ask-answer" id="ask-answer" aria-live="polite" hidden></div>
+        </div>
+      </section>
+
+      <!-- 4. the story, as a two-frame comic -->
+      <section id="comic" aria-label="How ClickPar Match started, as a two-frame comic">
+      <div class="sticky">
+        <div class="cbg" id="cbg" aria-hidden="true"></div>
+        <div class="page" id="page">
+          <!-- Frame 2: the pitch and the yes -->
+          <div class="fr" id="f2" style="--tone: var(--amber)">
+            <div class="fcap">ClickPar, Surat. Two engineers walk in with an idea.</div>
+            <span class="fnum">1 / 2</span>
+            <div class="wb" id="f2board" style="left:4%; top:6%; width:46%">
+              <div class="h">Check first. Apply once.</div>
+              <div>4 numbers → every lender → why you qualify</div>
+              <div class="row"><span>590,000</span>→<span>164</span>→<span>5 AI calls</span></div>
+            </div>
+            <div class="av" id="f2a" style="left:2%" data-k="A" data-s="point"></div>
+            <div class="av" id="f2b" style="left:24%; height:58cqh" data-k="B" data-s="idea"></div>
+            <div class="av flip" id="f2f2" style="right:24%; height:60cqh" data-k="F2" data-s="idle,yes"></div>
+            <div class="av flip" id="f2f1" style="right:2%" data-k="F1" data-s="idle,yes"></div>
+            <div class="bub bl" id="f2s1" style="left:40%; top:10%; max-width:30cqw">Every lender, every site, matched to four numbers. <b>Before</b> anyone applies.</div>
+            <div class="dots3" id="f2dots" style="right:14%; top:30%"><i></i><i></i><i></i></div>
+            <div class="burst" id="f2burst" style="right:26%; top:2%"><svg viewBox="0 0 100 100" aria-hidden="true"><polygon class="burstpoly" stroke="#111" stroke-width="2.5" stroke-linejoin="round"/></svg><b>YES!</b></div>
+            <div class="bub br" id="f2s2" style="right:3%; top:12%; --to: 80% 120%">Let's build it!</div>
+          </div>
+
+          <!-- Frame 3: everyone gathers, then launch -->
+          <div class="fr" id="f3" style="--tone: var(--mint)">
+            <div class="fcap">Then everyone pulled up a chair.</div>
+            <span class="fnum">2 / 2</span>
+            <div class="note" style="left:4%; top:18%; background:var(--amber); transform:rotate(-5deg)">crawl 40 lender pages</div>
+            <div class="note" style="left:13%; top:44%; background:var(--peri); transform:rotate(4deg)">AI quotes its evidence</div>
+            <div class="note" style="right:13%; top:16%; background:var(--peri); transform:rotate(6deg)">590,000 → 164 classes</div>
+            <div class="note" style="right:4%; top:42%; background:var(--mint); transform:rotate(-4deg)">prove it: 0 mismatches</div>
+            <div class="av sm g" style="left:17%" data-k="T1" data-s="idle"></div>
+            <div class="av sm g" style="left:27%" data-k="A" data-s="idle"></div>
+            <div class="av sm g" style="left:37%" data-k="F1" data-s="yes"></div>
+            <div class="av sm g flip" style="left:47%" data-k="F2" data-s="yes"></div>
+            <div class="av sm g flip" style="left:57%" data-k="B" data-s="idea"></div>
+            <div class="av sm g flip" style="left:67%" data-k="T2" data-s="idle"></div>
+            <div class="tbl"></div>
+            <div class="big-lap" id="lap"><div class="scr" id="screen"><span><i></i>ClickPar Match</span></div><div class="kb"></div></div>
+            <div class="bub bc" id="f3s1" style="left:calc(50% - 8cqw); top:14%; --to: 50% 120%">Ship it!</div>
+          </div>
+        </div>
+
+        <div class="launch" id="launch">
+          <div class="confetti" id="confetti" aria-hidden="true"></div>
+          <div class="lock">
+            <div class="mark" aria-hidden="true"></div>
+            <h2>ClickPar <span>Match</span></h2>
+            <div class="ltag">Know your yes before you apply.</div>
+            <div class="catch"><b>Pehle check. Phir apply.</b><span>Check first. Apply once.</span></div>
+            <a class="btn btn-primary" href="%APP_URL%">Check my eligibility</a>
+            <div class="small">Built in Surat. Indicative eligibility, not a loan offer.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+      <!-- 5. borrower journey rail -->
+      <section id="journey" aria-label="How it works for a borrower">
+        <div class="rail">
+          <div class="rail-head"><h2>How Aarav checks his loans</h2><span class="label">Real demo profile from the live database</span></div>
+          <div class="track" id="track">
+            <article class="slide" style="--c:var(--mint)">
+              <span class="num" aria-hidden="true">01</span>
+              <div class="copy"><span class="label">Step 1</span><h3>Enter four numbers.</h3><p>Monthly income, credit score, age and how you earn. Nothing is sent to a credit bureau.</p><ul><li>Takes under a minute</li><li>No documents, no phone number</li><li>Your score is never pulled</li></ul></div>
+              <div class="ui"><div class="ui-top"><span>/check</span><span>ClickPar Match</span></div>
+                <div class="ui-body">
+                  <div class="grid2">
+                    <div class="field"><label>Monthly income</label><div class="in">₹48,000</div></div>
+                    <div class="field"><label>Credit score</label><div class="in">742</div></div>
+                  </div>
+                  <div class="field"><label>Age</label><div class="in">29</div></div>
+                  <div class="field"><label>How you earn</label><div class="seg"><span class="on">Salaried</span><span>Self-employed</span><span>Business</span></div></div>
+                  <span class="btn btn-primary" style="width:100%">Check my eligibility</span>
+                </div></div>
+            </article>
+            <article class="slide" style="--c:var(--amber)">
+              <span class="num" aria-hidden="true">02</span>
+              <div class="copy"><span class="label">Step 2</span><h3>See every match, ranked.</h3><p>Every lender and every platform, scored against your numbers in seconds.</p><ul><li>39 matches across 26 lenders</li><li>9 meet every published rule</li><li>Best rate first when the fit is equal</li></ul></div>
+              <div class="ui"><div class="ui-top"><span>/dashboard</span><span>Aarav S.</span></div>
+                <div class="ui-body">
+                  <div class="sum"><div><b>39</b><span>matches</span></div><div><b class="mint">9</b><span>eligible</span></div><div><b>9.5%</b><span>best rate</span></div></div>
+                  <div id="rank"></div>
+                </div></div>
+            </article>
+            <article class="slide" style="--c:var(--peri)">
+              <span class="num" aria-hidden="true">03</span>
+              <div class="copy"><span class="label">Step 3</span><h3>Know why you qualify.</h3><p>A fit score you can add up yourself. Every point traces back to a rule the lender published.</p><ul><li>Income headroom over the minimum</li><li>Margin above the score cut-off</li><li>Lower starting rate scores higher</li></ul></div>
+              <div class="ui"><div class="ui-top"><span>Axis Bank via BankBazaar</span><span class="tag ok">verified quote</span></div>
+                <div class="ui-body why"><ul>
+                  <li><span>Meets every published rule</span><b>+60</b></li>
+                  <li><span>Income is 3.2× the ₹15,000 minimum</span><b>+15</b></li>
+                  <li><span>No minimum score published</span><b>+5</b></li>
+                  <li><span>Rate from 9.5% a year</span><b>+10.2</b></li>
+                  <li class="total"><span>Fit score</span><b>90.2</b></li>
+                </ul><p class="fine">Indicative eligibility from published criteria. Not a loan offer or approval.</p></div></div>
+            </article>
+            <article class="slide" style="--c:var(--coral)">
+              <span class="num" aria-hidden="true">04</span>
+              <div class="copy"><span class="label">Step 4</span><h3>Shortlist three. Compare.</h3><p>Rate, monthly EMI and total interest side by side, so the cheapest loan is obvious.</p><ul><li>Best platform per lender</li><li>Requirements you'll still need</li><li>Hide what doesn't fit</li></ul></div>
+              <div class="ui"><div class="ui-top"><span>Compare</span><span>₹5,00,000 over 3 years</span></div>
+                <div class="ui-body"><table class="cmp" id="cmp"><thead><tr><th>Lender</th><th>Rate from</th><th>EMI</th><th>Total interest</th></tr></thead><tbody></tbody></table>
+                <p class="fine">Example at each lender's starting rate. Your actual rate is set by the lender.</p></div></div>
+            </article>
+            <article class="slide" style="--c:var(--mint)">
+              <span class="num" aria-hidden="true">05</span>
+              <div class="copy"><span class="label">Step 5</span><h3>Get it by email.</h3><p>Your best pick and the reasons, a few seconds after you check. New lenders that match? We tell you.</p><ul><li>Watch alerts when a rate drops</li><li>Only to the address you give us</li><li>One click back to your dashboard</li></ul></div>
+              <div class="ui"><div class="ui-top"><span>Inbox</span><span>just now</span></div>
+                <div class="ui-body">
+                  <div class="mail-h"><span>ClickPar Match</span><b>Aarav, 9 loans fit your numbers</b></div>
+                  <div class="mail-pick"><small>best pick</small><b>Axis Bank via BankBazaar</b><span>From 9.5% a year. Your income is 3.2× the minimum.</span></div>
+                  <div class="mrow"><div><div class="n">IndusInd Bank</div><div class="v">via Paisabazaar</div></div><div class="r">10.5%</div><div class="f">82.3</div></div>
+                  <div class="mrow"><div><div class="n">YES Bank</div><div class="v">via BankBazaar</div></div><div class="r">10.85%</div><div class="f">81.3</div></div>
+                  <span class="btn btn-ghost" style="width:100%">View all 39 matches</span>
+                </div></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. engine diagram -->
+      <section id="engine" aria-label="How the engine works">
+        <div class="sticky">
+          <div class="eng-head">
+            <h2>How it decides, in one pass.</h2>
+            <div class="legend" aria-hidden="true"><span style="--c:var(--amber)"><i></i>lenders and rules</span><span style="--c:var(--peri)"><i></i>AI and engine</span><span style="--c:var(--coral)"><i></i>naive work</span><span style="--c:var(--mint)"><i></i>results</span></div>
+          </div>
+          <div class="dia" id="dia"></div>
+          <div class="eng-cap"><span class="label" id="eng-step">01 / 09</span><p id="eng-text"></p></div>
+        </div>
+      </section>
+
+      <!-- 8. proof -->
+      <section id="proof">
+        <div class="wrap">
+          <h2>Read from the source. <span class="mint">Quoted, then checked.</span></h2>
+        </div>
+        <div class="ticker" aria-label="26 lenders read daily across bank sites, BankBazaar and Paisabazaar">
+          <span class="tk-label"><i aria-hidden="true"></i>Read daily, 06:00 IST</span>
+          <div class="tk-view"><div class="tk-track" id="lenders"></div></div>
+        </div>
+        <div class="wrap">
+          <div class="proof-grid">
+            <div>
+              <p class="label" style="margin-bottom:14px">26 lenders, across bank sites, BankBazaar and Paisabazaar</p>
+              <p class="read-how">Every rule our AI takes from a lender's page must <b>quote the sentence it came from</b>. Code checks the quote against the page. If it can't, that rule never rules anyone out.</p>
+            </div>
+            <div class="quotes">
+              <div class="quote"><q>Work Experience: 2 years</q><span><span class="tag ok">verified</span>ICICI Bank, icici.bank.in</span></div>
+              <div class="quote"><q>Total 3 years of experience, 1 year in current employment</q><span><span class="tag ok">verified</span>RBL Bank, via paisabazaar.com</span></div>
+              <div class="quote"><q>Work experience: Minimum 1 year</q><span><span class="tag ok">verified</span>Tata Capital, via paisabazaar.com</span></div>
+            </div>
+          </div>
+          <div class="trust">
+            <div><b>robots.txt, always</b><p>If a site says no, or shows a CAPTCHA, we skip it. HDFC and Kotak's own sites are read through aggregators instead.</p></div>
+            <div><b>No quote, no rejection</b><p>A rule the AI can't quote from the page never rules anyone out. It becomes "may qualify".</p></div>
+            <div><b>Only your inbox</b><p>Emails go only to the address you give us. Never to a list.</p></div>
+            <div><b>Indicative, not an offer</b><p>We show eligibility from published criteria. The lender makes the decision.</p></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <section id="invite">
+        <div class="wrap">
+          <h2>Four numbers. <span class="mint">Every lender.</span> Your answer in seconds.</h2>
+          <div class="ctas"><a class="btn btn-primary" href="%APP_URL%">Check my eligibility</a><a class="btn btn-ghost" href="%APP_URL%ops">See the engine</a></div>
+        </div>
+      </section>
+      <div class="wrap">
+        <div class="foot">
+          <div><h4>ClickPar Match</h4><p>A ClickPar product, built in Surat. Indicative eligibility from each lender's published criteria. Not a loan offer or approval.</p></div>
+          <div><h4>Product</h4><ul><li><a href="%APP_URL%">Check my eligibility</a></li><li><a href="#journey">How it works</a></li><li><a href="%APP_URL%ops">Engine console</a></li></ul></div>
+          <div><h4>Credits</h4><ul><li>Map data: <a href="https://www.naturalearthdata.com/">Natural Earth</a>, public domain</li><li>Illustrations: <a href="https://www.openpeeps.com/">Open Peeps</a> by Pablo Stanley, CC0</li><li>Figures: measured on the live engine</li></ul></div>
+        </div>
+      </div>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

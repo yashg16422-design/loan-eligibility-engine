@@ -36,3 +36,7 @@ n8n_data/
 # --- Built dashboard (dashboard/ -> npm run build) ---
 loan_engine/api/static/
 dashboard/node_modules/
+
+# --- Landing page (web/ -> npm run build) ---
+web/node_modules/
+web/dist/
