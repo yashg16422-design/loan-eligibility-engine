@@ -209,6 +209,7 @@ Open the upload URL from `serverless info` (output `UploadUiUrl`) and upload a C
 ```bash
 scripts/upload-sample.sh "$(scripts/stack-output.sh UploadUiUrl)" tests/fixtures/demo_users.csv
 ```
+![Upload UI after a run](docs/screenshots/01-upload-ui.png)
 
 ### 4.7 Run n8n locally without AWS (for reviewers)
 ```bash
@@ -237,7 +238,7 @@ scripts/tunnel-n8n.sh          # keep running; then open http://localhost:5678
 Prerequisites: AWS CLI v2 + the Session Manager plugin. On first visit n8n asks you to
 create the owner account.
 
-![n8n home](docs/screenshots/02-n8n-empty-canvas.png)
+![n8n workflows](docs/screenshots/02-n8n-workflows.png)
 
 ### 5.1 Postgres: the engine database (`app`) as the least-privilege role
 
@@ -314,6 +315,8 @@ All five workflows are in [`n8n/workflows/`](n8n/workflows/). Each opens with a 
 that explains it inside the editor.
 
 ### A · Loan product discovery (crawler), daily 06:00 IST + manual run
+![Workflow A](docs/screenshots/07-workflow-A.png)
+
 | Node | What it does |
 |---|---|
 | **Every day 06:00 IST** / **Run now (demo)** | Schedule trigger (the assignment's trigger) and a manual trigger for demos. |
@@ -325,6 +328,8 @@ that explains it inside the editor.
 | **Run summary → Finish run** | Deactivates products that disappeared from pages crawled OK (failed pages keep their data), supersedes their matches, reports per-status counts and tokens. |
 
 ### A1 · Process page batch (sub-workflow)
+![Workflow A1](docs/screenshots/08-workflow-A1.png)
+
 | Node | What it does |
 |---|---|
 | **Fetch page (1 req/s)** | Plain HTTP GET (browser UA, timeout, retries). Pages flagged `rendered` would go to the optional headless renderer instead (off by default). |
@@ -339,6 +344,8 @@ that explains it inside the editor.
 | **Unchanged → bookkeeping → Touch last_seen + log pages** | No LLM: just bookkeeping. |
 
 ### B · User–loan matching (triggers + claim)
+![Workflow B](docs/screenshots/09-workflow-B.png)
+
 | Node | What it does |
 |---|---|
 | **Ingest complete (webhook)** | `POST /webhook/ingest-complete`, Header Auth, responds immediately. Called by the ingest Lambda after COMMIT. |
@@ -353,19 +360,30 @@ re-claiming a stale job closes its abandoned run; the sweeper also closes any ru
 Workflow A calls B in **product mode** with the ids of new or changed products after each crawl.
 
 ### B1 · Match one run (the Treasure Hunt), explained in [§8](#8-the-optimization-treasure-hunt)
+![Workflow B1](docs/screenshots/10-workflow-B1.png)
+
 **Criteria to compile → Batches of 10 → Nova Pro · compile → Validate compiled rules → Save** (Stage 0, cache misses only) →
 **Stage 1+2 · classes & decisions** → **Refresh planner stats** → **Stage 3 · expand, score, diff** →
 **Correctness proof** → **Finish run**. The SQL is in [`sql/matching/`](sql/matching/).
 
 ### C · Notify matched users (SES)
+![Workflow C](docs/screenshots/11-workflow-C.png)
+
 | Node | What it does |
 |---|---|
 | **Users to email** | New, un-notified matches of the run; the best offer **per lender** (best platform), ranked by tier → fit score → rate, top 5 per user. |
+| **Sign dashboard links** | ONE HTTP call per run to the api Lambda's `POST /internal/email-tokens` (same Header Auth credential as the webhook): a signed 14-day link per user. The HMAC key never enters n8n; if signing fails, the emails go out without the link. |
 | **Compose emails** (`email.js`) | Personalized HTML + text: best pick, top picks, *why* ("your income is 3.6× the minimum"), *you'll also need…*, disclaimer. All crawled text is HTML-escaped, and only `http(s)` links are rendered. The recipient is a test alias chosen deterministically, and a guard **aborts** on anything else. |
 | **One email at a time → Send via AWS SES → Delivery result → wait 1.1 s** | The AWS SES node with the Assume Role credential, paced for the SES sandbox (1 email/s). |
 | **All results → one item → Record notifications** | `sent`/`failed` rows with SES message ids; all other users with new matches are recorded as `skipped_demo` (demo cap of 5 real emails per run). |
 
+A received email (best pick, top picks with the reason, the dashboard button):
+
+![Notification email](docs/screenshots/14-email.png)
+
 ### E · Error handler (the error workflow of A, A1, B, B1 and C)
+![Workflow E](docs/screenshots/13-workflow-E.png)
+
 | Node | What it does |
 |---|---|
 | **On workflow error** (Error Trigger) | n8n starts E whenever a production execution of another workflow fails (schedule, webhook, sub-workflow). |
@@ -557,9 +575,11 @@ published criteria**, never an approval probability.
     brute-force proof
 - **42 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
   what runs inside n8n.
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push: ruff → Node
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push (two jobs: `test`, `dashboard`): ruff → Node
   tests → Python unit + integration tests (Postgres 17 container with TLS) → the committed
   workflow JSON must equal the generator's output.
+
+  ![CI](docs/screenshots/18-github-ci.png)
 - Structured JSON logs (AWS Lambda Powertools) carrying `job_id`.
 
 ```bash
@@ -607,6 +627,14 @@ the borrower's side and the operator's, at **`/app`** on the same API (no new ho
 | **What if** | Sliders for income, score, age, employment: lenders coming into / falling out of reach, plus the **exact** next threshold ("with an income of ₹20,000, Kotak Mahindra Bank comes into reach") | `GET /products` (with AI-compiled rules); [`eligibility.ts`](dashboard/src/lib/eligibility.ts) mirrors the SQL decision. A test asserts it reproduces **Workflow B's decision on all 59 live products** |
 | **Save, compare, hide, alerts** | Shortlist, top 3 side by side (EMI, total interest, how much cheaper), a merged document checklist, "tell me when a new lender matches" | `GET/PUT /me/preferences` → `user_preferences` (migration 004) |
 | **`/app/ops`** the engine, live | The latest big run as a **self-building pipeline** (pairs → classes → decisions → AI calls → matches → emails, with the brute-force proof); recent runs; crawl health by source; workflow errors; CSV upload with live stages | `GET /ops/runs`, `/ops/crawl`, `/ops/errors` (aggregates only, no personal data) |
+
+**From the email to the dashboard:** every notification email carries a **"View all N
+matches"** button: Workflow C asks the api Lambda to sign one link per user (verified live:
+check → matches → `email tokens signed count=1` → 1 email with the button).
+
+![Borrower dashboard](docs/screenshots/15-dashboard.png)
+![Compare view](docs/screenshots/16-dashboard-compare.png)
+![Engine console](docs/screenshots/17-engine.png)
 
 **Access without accounts:** `/check` returns an HMAC-SHA256 token (`user_id` + expiry, key in
 Secrets Manager, 24 h); it lives in `sessionStorage` only. Forged or expired tokens get 401

@@ -258,3 +258,48 @@ def test_every_route_is_wired_in_serverless_yml():
     """A route in the code but not in serverless.yml would silently 404 in production."""
     events = set(re.findall(r"- httpApi: (\S+ \S+)", (ROOT / "serverless.yml").read_text()))
     assert set(api.ROUTES) == events
+
+
+class TestEmailTokens:
+    SECRET = "s" * 48
+
+    @pytest.fixture
+    def secrets(self, deps, monkeypatch):
+        keys = {"t": KEY, "w": self.SECRET.encode()}
+        monkeypatch.setattr(api, "token_key", lambda arn: keys[arn])
+        monkeypatch.setattr(
+            api,
+            "dependencies",
+            lambda: api.Dependencies(
+                db_host="h",
+                db_secret_arn="a",
+                bucket="b",
+                s3=None,
+                token_secret_arn="t",
+                webhook_secret_arn="w",
+            ),
+        )
+
+    def post(self, lambda_context, body, secret):
+        event = {"routeKey": "POST /internal/email-tokens", "headers": {}, "body": json.dumps(body)}
+        if secret is not None:
+            event["headers"]["x-webhook-secret"] = secret
+        res = api.handler(event, lambda_context)
+        return res["statusCode"], json.loads(res["body"])
+
+    def test_signs_one_link_per_user_valid_for_two_weeks(self, secrets, lambda_context):
+        status, body = self.post(lambda_context, {"user_ids": [str(USER)]}, self.SECRET)
+        assert status == 200
+        token = body["tokens"][str(USER)]
+        now = int(time.time())
+        assert tokens.verify(token, KEY, now + 13 * 24 * 3600) == USER
+        with pytest.raises(tokens.InvalidTokenError, match="expired"):
+            tokens.verify(token, KEY, now + 15 * 24 * 3600)
+
+    @pytest.mark.parametrize("secret", [None, "", "wrong", "s" * 47])
+    def test_wrong_or_missing_secret_is_401(self, secrets, lambda_context, secret):
+        assert self.post(lambda_context, {"user_ids": [str(USER)]}, secret)[0] == 401
+
+    @pytest.mark.parametrize("ids", [[], ["nope"], [str(USER)] * 51, "x"])
+    def test_bad_body_is_400(self, secrets, lambda_context, ids):
+        assert self.post(lambda_context, {"user_ids": ids}, self.SECRET)[0] == 400

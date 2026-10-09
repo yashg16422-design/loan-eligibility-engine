@@ -1381,7 +1381,7 @@ RETURNING job_id::text
 # ---------------------------------------------------------------- Workflow C (notify)
 
 
-def workflow_c() -> dict:
+def workflow_c(api_url: str) -> dict:
     f = Flow(
         WF_C,
         "C · Notify matched users (SES)",
@@ -1462,6 +1462,31 @@ ORDER BY u.user_id
         (440, 0),
         credentials=PG,
     )
+    # ONE call per run: the api Lambda signs a 14-day dashboard link per user. The HMAC key
+    # stays in AWS; n8n authenticates with the same Header Auth credential as the webhook.
+    f.add(
+        "Sign dashboard links",
+        HTTP_T,
+        4.2,
+        {
+            "method": "POST",
+            "url": f"{api_url}/internal/email-tokens",
+            "authentication": "genericCredentialType",
+            "genericAuthType": "httpHeaderAuth",
+            "sendBody": True,
+            "specifyBody": "json",
+            "jsonBody": "={{ JSON.stringify({ user_ids: $('Users to email').all().map((i) => i.json.user_id) }) }}",
+            "options": {"timeout": 10000},
+        },
+        (550, 0),
+        credentials=WEBHOOK_AUTH,
+        executeOnce=True,
+        retryOnFail=True,
+        maxTries=2,
+        waitBetweenTries=1000,
+        # No link is better than no email: on failure the emails go out without it.
+        onError="continueRegularOutput",
+    )
     f.add(
         "Compose emails",
         CODE_T,
@@ -1472,16 +1497,20 @@ ORDER BY u.user_id
                 entry=f"""
 const ALIASES = {json.dumps(TEST_ALIASES)};
 const FROM = {json.dumps(SES_FROM)};
-return $input.all().map((item) => {{
+const APP = {json.dumps(api_url + "/app/dashboard?t=")};
+const tokens = $('Sign dashboard links').first()?.json?.tokens || {{}};
+return $('Users to email').all().map((item) => {{
   const user = item.json;
   // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.
   const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);
-  return {{ json: {{ user_id: user.user_id, to, from: FROM, ...composeEmail(user) }} }};
+  const token = tokens[user.user_id];
+  const dashboard_url = token ? APP + encodeURIComponent(token) : null;
+  return {{ json: {{ user_id: user.user_id, to, from: FROM, ...composeEmail({{ ...user, dashboard_url }}) }} }};
 }});
 """,
             )
         },
-        (660, 0),
+        (770, 0),
     )
     f.add(
         "One email at a time",
@@ -1604,7 +1633,8 @@ RETURNING emails_sent, emails_failed, emails_skipped_demo,
         ("Run now (latest run)", "Latest run with new matches"),
         ("Latest run with new matches", "Users to email"),
         ("From B (run)", "Users to email"),
-        ("Users to email", "Compose emails"),
+        ("Users to email", "Sign dashboard links"),
+        ("Sign dashboard links", "Compose emails"),
         ("Compose emails", "One email at a time"),
         ("Send via AWS SES", "Delivery result"),
         ("Delivery result", "1 email / second (SES sandbox)"),
@@ -1783,12 +1813,14 @@ def main() -> None:
     # DATA_BUCKET lets CI regenerate the workflows without AWS access (not a secret: the
     # bucket name is already in the committed JSON). Locally it comes from the stack.
     bucket = os.environ.get("DATA_BUCKET") or stack_output("DataBucketName")
+    # The public API base (signed dashboard links in Workflow C's emails). Not a secret.
+    api_url = (os.environ.get("API_URL") or stack_output("HttpApiUrl")).rstrip("/")
     for filename, wf in (
         ("A_loan_discovery.json", workflow_a()),
         ("A1_process_batch.json", workflow_a1(bucket)),
         ("B_matching.json", workflow_b()),
         ("B1_match_run.json", workflow_b1()),
-        ("C_notification.json", workflow_c()),
+        ("C_notification.json", workflow_c(api_url)),
         ("E_error_handler.json", workflow_e()),
         ("E1_error_drill.json", workflow_e1()),
     ):

@@ -70,6 +70,7 @@ jobs:
       - name: Workflow JSON matches the generator
         env:
           DATA_BUCKET: loan-engine-dev-data-434661699719  # bucket name, already in the JSON
+          API_URL: https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com  # public API, in the JSON
         run: |
           python n8n/build_workflows.py
           git diff --exit-code -- n8n/workflows/ \

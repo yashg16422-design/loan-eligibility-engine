@@ -53,11 +53,19 @@ function whyText(p) {
 
 const CHANNEL = { direct: 'on the lender\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };
 
-/** Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked. */
+/** A signed dashboard link is shown only if it is a real https URL (never javascript: etc.). */
+const safeLink = (url) => (/^https:\/\/[^\s"'<>]+$/i.test(String(url || '')) ? String(url) : null);
+
+/**
+ * Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked.
+ * `user.dashboard_url` (optional) is the signed "view all my matches" link; when signing
+ * failed upstream, the email simply goes out without it.
+ */
 function composeEmail(user) {
   const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);
   if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);
   const first = String(user.name || '').trim().split(/\s+/)[0] || 'there';
+  const dashboard = safeLink(user.dashboard_url);
   const best = picks[0];
   const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;
 
@@ -79,6 +87,8 @@ function composeEmail(user) {
   <h2 style="margin-bottom:4px">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>
   <p style="color:#555;margin-top:0">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>
   <table style="width:100%;border-collapse:collapse">${picks.map(card).join('')}</table>
+  ${dashboard ? `<p style="margin:20px 0 4px"><a href="${escapeHtml(dashboard)}" style="display:inline-block;background:#F2A93B;color:#1B1305;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600">View all ${escapeHtml(user.matches_total)} matches</a></p>
+  <p style="color:#555;font-size:13px;margin-top:6px">Compare offers side by side, see what would unlock more lenders, and save your shortlist. The link works for 14 days.</p>` : ''}
   <p style="color:#888;font-size:12px;margin-top:18px">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>
   Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>
 </body></html>`;
@@ -88,9 +98,10 @@ function composeEmail(user) {
     `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,
     `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,
     ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),
+    ...(dashboard ? [`View all your matches (link valid 14 days): ${dashboard}`] : []),
     'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',
   ].join('\n');
   return { subject, html, text };
 }
 
-if (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };
+if (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };

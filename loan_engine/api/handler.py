@@ -11,11 +11,14 @@ Routes (a table, so adding one is a one-line change):
     GET  /products            -> active products + compiled rules (what-if simulator)
     GET  /ops/runs|crawl|errors -> aggregates for the operator view (no personal data)
     GET  /app, /app/{proxy+}  -> the built dashboard (single-page app)
+    POST /internal/email-tokens -> (X-Webhook-Secret) signed "view my matches" links for
+                                 Workflow C's emails; the HMAC key never leaves AWS
 """
 
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import time
@@ -67,6 +70,7 @@ class Dependencies:
     bucket: str
     s3: Any
     token_secret_arn: str = ""
+    webhook_secret_arn: str = ""
     compile_prompt_version: str = "compile_v1"
     validation_rules: str = ""
 
@@ -79,6 +83,7 @@ def dependencies() -> Dependencies:
         db_secret_arn=os.environ["DB_SECRET_ARN"],
         bucket=os.environ["DATA_BUCKET"],
         token_secret_arn=os.environ.get("TOKEN_SECRET_ARN", ""),
+        webhook_secret_arn=os.environ.get("N8N_WEBHOOK_SECRET_ARN", ""),
         compile_prompt_version=os.environ.get("COMPILE_PROMPT_VERSION", "compile_v1"),
         validation_rules=os.environ.get("VALIDATION_RULES", ""),
         # Regional virtual-hosted endpoint: the browser POSTs to
@@ -307,6 +312,33 @@ def get_ops_errors(event: dict[str, Any], deps: Dependencies) -> Response:
         return json_response(200, repository.ops_errors(conn))
 
 
+MAX_EMAIL_TOKENS = 50  # Workflow C sends at most a handful per run (SES sandbox)
+
+
+def create_email_tokens(event: dict[str, Any], deps: Dependencies) -> Response:
+    """Sign 14-day dashboard links for the users Workflow C is about to email.
+
+    Called by n8n with the same shared secret that guards the ingest webhook (one secret,
+    one Header Auth credential). Signing here keeps the HMAC key out of n8n entirely.
+    """
+    sent = (event.get("headers") or {}).get("x-webhook-secret", "")
+    expected = token_key(deps.webhook_secret_arn).decode()
+    if not sent or not hmac.compare_digest(sent.encode(), expected.encode()):
+        logger.warning("email-token request with a wrong or missing secret")
+        raise UnauthorizedError
+    raw = parse_json_body(event).get("user_ids")
+    if not isinstance(raw, list) or not 0 < len(raw) <= MAX_EMAIL_TOKENS:
+        raise BadRequestError(f"user_ids must be a list of 1-{MAX_EMAIL_TOKENS} ids")
+    try:
+        users = [uuid.UUID(str(u)) for u in raw]
+    except ValueError:
+        raise BadRequestError("user_ids contains an invalid id") from None
+    key = token_key(deps.token_secret_arn)
+    expires = int(time.time()) + tokens.EMAIL_TTL_SECONDS
+    logger.info("email tokens signed", count=len(users))
+    return json_response(200, {"tokens": {str(u): tokens.sign(u, expires, key) for u in users}})
+
+
 def get_app(event: dict[str, Any], deps: Dependencies) -> Response:
     file = static.resolve((event.get("pathParameters") or {}).get("proxy", ""))
     if file is None:
@@ -329,6 +361,7 @@ ROUTES: dict[str, Callable[[dict[str, Any], Dependencies], Response]] = {
     "GET /ops/errors": get_ops_errors,
     "GET /app": get_app,
     "GET /app/{proxy+}": get_app,
+    "POST /internal/email-tokens": create_email_tokens,
 }
 
 

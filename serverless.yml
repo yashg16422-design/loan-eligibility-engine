@@ -103,6 +103,7 @@ functions:
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       DATA_BUCKET: ${self:custom.dataBucket}
       TOKEN_SECRET_ARN: !Ref DashboardTokenSecret
+      N8N_WEBHOOK_SECRET_ARN: !Ref N8nWebhookSecret # verifies Workflow C's token requests
       COMPILE_PROMPT_VERSION: compile_v1 # = COMPILE_PROMPT_VERSION in n8n/build_workflows.py
       VALIDATION_RULES: "" # keep equal to the ingest function's: one set of rules
       POWERTOOLS_LOG_LEVEL: INFO
@@ -121,6 +122,7 @@ functions:
       - httpApi: GET /ops/errors
       - httpApi: GET /app
       - httpApi: GET /app/{proxy+}
+      - httpApi: POST /internal/email-tokens
 
 resources:
   Resources:
@@ -794,6 +796,7 @@ resources:
                   Resource:
                     - !Ref AppIngestDbSecret
                     - !Ref DashboardTokenSecret
+                    - !Ref N8nWebhookSecret
 
   # Merge throttling into the HTTP API stage that Serverless generates:
   # the only public surface gets a rate limit (PLAN.md §4.3).

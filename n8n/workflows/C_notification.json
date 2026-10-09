@@ -88,16 +88,49 @@
     },
     {
       "parameters": {
-        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked. */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst ALIASES = [\"yashg16422+one@gmail.com\", \"yashg16422+two@gmail.com\", \"yashg16422+three@gmail.com\"];\nconst FROM = \"yashg16422@gmail.com\";\nreturn $input.all().map((item) => {\n  const user = item.json;\n  // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.\n  const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);\n  return { json: { user_id: user.user_id, to, from: FROM, ...composeEmail(user) } };\n});\n"
+        "method": "POST",
+        "url": "https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/internal/email-tokens",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ user_ids: $('Users to email').all().map((i) => i.json.user_id) }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "name": "Sign dashboard links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        550,
+        0
+      ],
+      "id": "LoanEngineWfC001-05",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "qaXP0OsyRtnbitga",
+          "name": "Ingest webhook secret"
+        }
+      },
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** A signed dashboard link is shown only if it is a real https URL (never javascript: etc.). */\nconst safeLink = (url) => (/^https:\\/\\/[^\\s\"'<>]+$/i.test(String(url || '')) ? String(url) : null);\n\n/**\n * Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked.\n * `user.dashboard_url` (optional) is the signed \"view all my matches\" link; when signing\n * failed upstream, the email simply goes out without it.\n */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const dashboard = safeLink(user.dashboard_url);\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  ${dashboard ? `<p style=\"margin:20px 0 4px\"><a href=\"${escapeHtml(dashboard)}\" style=\"display:inline-block;background:#F2A93B;color:#1B1305;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600\">View all ${escapeHtml(user.matches_total)} matches</a></p>\n  <p style=\"color:#555;font-size:13px;margin-top:6px\">Compare offers side by side, see what would unlock more lenders, and save your shortlist. The link works for 14 days.</p>` : ''}\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    ...(dashboard ? [`View all your matches (link valid 14 days): ${dashboard}`] : []),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst ALIASES = [\"yashg16422+one@gmail.com\", \"yashg16422+two@gmail.com\", \"yashg16422+three@gmail.com\"];\nconst FROM = \"yashg16422@gmail.com\";\nconst APP = \"https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/dashboard?t=\";\nconst tokens = $('Sign dashboard links').first()?.json?.tokens || {};\nreturn $('Users to email').all().map((item) => {\n  const user = item.json;\n  // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.\n  const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);\n  const token = tokens[user.user_id];\n  const dashboard_url = token ? APP + encodeURIComponent(token) : null;\n  return { json: { user_id: user.user_id, to, from: FROM, ...composeEmail({ ...user, dashboard_url }) } };\n});\n"
       },
       "name": "Compose emails",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
+        770,
         0
       ],
-      "id": "LoanEngineWfC001-05"
+      "id": "LoanEngineWfC001-06"
     },
     {
       "parameters": {
@@ -111,7 +144,7 @@
         880,
         0
       ],
-      "id": "LoanEngineWfC001-06"
+      "id": "LoanEngineWfC001-07"
     },
     {
       "parameters": {
@@ -134,7 +167,7 @@
         1100,
         100
       ],
-      "id": "LoanEngineWfC001-07",
+      "id": "LoanEngineWfC001-08",
       "credentials": {
         "awsAssumeRole": {
           "id": "fa286DA3YraErW57",
@@ -157,7 +190,7 @@
         1320,
         100
       ],
-      "id": "LoanEngineWfC001-08"
+      "id": "LoanEngineWfC001-09"
     },
     {
       "parameters": {
@@ -172,7 +205,7 @@
         1540,
         100
       ],
-      "id": "LoanEngineWfC001-09"
+      "id": "LoanEngineWfC001-10"
     },
     {
       "parameters": {
@@ -185,7 +218,7 @@
         1100,
         -120
       ],
-      "id": "LoanEngineWfC001-10"
+      "id": "LoanEngineWfC001-11"
     },
     {
       "parameters": {
@@ -202,7 +235,7 @@
         1100,
         -120
       ],
-      "id": "LoanEngineWfC001-11",
+      "id": "LoanEngineWfC001-12",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
@@ -246,6 +279,17 @@
       ]
     },
     "Users to email": {
+      "main": [
+        [
+          {
+            "node": "Sign dashboard links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign dashboard links": {
       "main": [
         [
           {

@@ -478,3 +478,16 @@ test('parseConverseResponse turns "null" text into a real null before the normal
   assert.equal(e.criteria[0].min_income, null);
   assert.deepEqual(e.criteria[0].other_conditions, []);
 });
+
+test('composeEmail adds the signed dashboard link only when it is a safe https URL', () => {
+  const link = 'https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/dashboard?t=abc.123.sig';
+  const withLink = E.composeEmail({ ...USER, dashboard_url: link });
+  assert.match(withLink.html, /View all \d+ matches/);
+  assert.ok(withLink.html.includes(`href="${link}"`));
+  assert.ok(withLink.text.includes(link));
+  for (const bad of [undefined, '', 'javascript:alert(1)', 'http://plain.example/app', 'https://x.com/"><script>']) {
+    const out = E.composeEmail({ ...USER, dashboard_url: bad });
+    assert.doesNotMatch(out.html, /View all \d+ matches/);
+    assert.doesNotMatch(out.html, /<script>/);
+  }
+});
