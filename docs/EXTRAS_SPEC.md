@@ -30,7 +30,12 @@ comments that explain *why*, tests for logic, no secrets).
    Only the demo users from the mocks.
 5. **Assets must be legal to ship:** your own models, CC0 or public-domain textures (e.g.
    NASA Blue Marble for the Earth), and open-licensed fonts. Credit them in `web/CREDITS.md`.
-6. **Honest product copy:** everything is "indicative eligibility, not a loan offer or
+6. **Design skills** are installed in `.claude/skills/`: `frontend-design` (Anthropic),
+   `design-taste-frontend` and `impeccable`. Use them. **`impeccable` is installed docs-only:
+   never run, download or install its `scripts/impeccable` CLI or any binary.** Skip the steps
+   that need it (context loading, live mode, pinning) and apply its reference guides by reading
+   them.
+7. **Honest product copy:** everything is "indicative eligibility, not a loan offer or
    approval". Every number in the pitch must come from `README.md` or the mocks (they were
    measured), never invented.
 
