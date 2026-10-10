@@ -553,3 +553,17 @@ test('composeEmail output matches the committed snapshot (subject + text body)',
   if (process.env.UPDATE_SNAPSHOT === '1') fs.writeFileSync(file, got);
   assert.equal(got, fs.readFileSync(file, 'utf8'));
 });
+
+test('composeBatch builds every skipped user\'s email and never lets one user stop the batch', () => {
+  const out = E.composeBatch([
+    USER,
+    { ...USER, user_id: 'gone', picks: [] },
+    { ...USER, user_id: 'odd', picks: null },
+  ]);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].subject, 'Dhruv, you may qualify for 18 personal loans (best: ICICI Bank)');
+  assert.match(out[0].body_text, /BEST PICK: ICICI Bank/);
+  assert.ok(!('html' in out[0])); // only what is stored: subject + text
+  assert.match(out[1].subject, /not composed: no active matches/);
+  assert.match(out[2].subject, /not composed/);
+});

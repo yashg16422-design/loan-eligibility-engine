@@ -576,3 +576,37 @@ def test_reference_dataset_is_never_another_merchants_upload(db):
     # A purged reference upload stops being public.
     db.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (jobs["t4-admin"],))
     assert repository.reference_job(db) != jobs["t4-admin"]
+
+
+def test_products_compiled_late_are_rematched_once(db):
+    """T12: a run that compiles a text for the first time asks B to re-match its products."""
+    text, product = db.execute(
+        "SELECT other_criteria_text, product_id FROM loan_products "
+        "WHERE is_active AND other_criteria_text IS NOT NULL ORDER BY other_criteria_text DESC "
+        "LIMIT 1"
+    ).fetchone()
+    db.execute(
+        "DELETE FROM criteria_rules WHERE criteria_text_hash = "
+        "encode(sha256(convert_to(%s, 'UTF8')), 'hex')",
+        (text,),
+    )
+    run = new_run(db)
+    assert run_sql(db, "products_compiled_late.sql", run, PROMPT_VERSION)["product_ids"] == []
+    # The run compiles that text now (what "Save compiled rules" records).
+    db.execute(
+        "INSERT INTO criteria_rules (criteria_text_hash, prompt_version, rules, requirements, "
+        "model_id) VALUES (encode(sha256(convert_to(%s, 'UTF8')), 'hex'), %s, '[]', '[]', 't')",
+        (text, PROMPT_VERSION),
+    )
+    db.execute("UPDATE pipeline_runs SET rules_compiled = 1 WHERE run_id = %s", (run,))
+    late = run_sql(db, "products_compiled_late.sql", run, PROMPT_VERSION)["product_ids"]
+    assert str(product) in late
+    # The follow-up product-mode run compiles nothing: it never triggers another.
+    follow = str(
+        db.execute(
+            "INSERT INTO pipeline_runs (mode, scope_product_ids, rules_compiled) "
+            "VALUES ('products', %s::uuid[], 0) RETURNING run_id",
+            (late,),
+        ).fetchone()[0]
+    )
+    assert run_sql(db, "products_compiled_late.sql", follow, PROMPT_VERSION)["product_ids"] == []

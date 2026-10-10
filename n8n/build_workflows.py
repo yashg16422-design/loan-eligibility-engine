@@ -33,6 +33,7 @@ WF_A1 = "LoanEngineWfA101"
 WF_B = "LoanEngineWfB001"
 WF_B1 = "LoanEngineWfB101"
 WF_C = "LoanEngineWfC001"
+WF_C1 = "LoanEngineWfC101"  # composes (never sends) the demo-capped users' emails, in batches
 WF_E = "LoanEngineWfE001"  # error handler: settings.errorWorkflow of every other workflow
 WF_E1 = "LoanEngineWfE101"  # drill: fails on purpose to prove the error path end to end
 # Notification config (Workflow C). Not secrets: the SES-verified sender and test aliases.
@@ -44,6 +45,8 @@ TEST_ALIASES = [
     "yashg16422+three@gmail.com",
 ]
 DEMO_MAX_EMAILS = 5  # SES sandbox: 200/day, 1/s. The rest are recorded as skipped_demo.
+COMPOSE_BATCH = 500  # C1: emails composed per sub-workflow execution (bounded memory)
+REMATCH_LATE_COMPILES = True  # B: re-match products whose criteria compiled after a failure
 CRAWL_DROP_ALERT_PCT = 30  # Workflow A alerts when a channel's usable pages drop by more than this
 COMPILE_PROMPT_VERSION = "compile_v1"
 # Bedrock list price used for the cost ESTIMATE in pipeline_runs (USD per 1k tokens).
@@ -138,6 +141,9 @@ NODE_NOTES: dict[str, dict[str, str]] = {
         "Matching failed?": "A failed or stopped B1 run marks the job FAILED instead of hanging.",
         "Mark job failed": "Visible in the upload UI; the sweeper retries it later.",
         "Notify users (C)": "Emails users with new matches (sub-workflow C).",
+        "Products compiled late": "Products whose criteria compiled for the first time in this run.",
+        "Re-match them?": "Earlier users hold a provisional 'may qualify' for them: decide again.",
+        "Re-match all users (B, product mode)": "Product-mode run for those products; it compiles nothing, so it never loops.",
     },
     WF_B1: {
         "From B (run)": "Called by B with the claimed run_id.",
@@ -174,6 +180,14 @@ NODE_NOTES: dict[str, dict[str, str]] = {
         "1 email / second (SES sandbox)": "Paces the loop for the SES sandbox rate.",
         "All results -> one item": "Collapses the loop output so the summary runs once.",
         "Record notifications": "Everyone else is recorded as skipped_demo; counters set from the table.",
+        "Compose the rest (C1)": "Builds and stores every other user's email, 500 per sub-workflow run.",
+        "More to compose?": "Loops until every user's email is stored (bounded: at most 200 batches).",
+    },
+    WF_C1: {
+        "From C (run)": "Called by C with the run_id, once per batch.",
+        "Next users to compose": "Up to 500 users whose send was skipped and whose email is not built yet.",
+        "Compose (no send)": "email.js builds each personal email (subject + text); nothing is sent.",
+        "Save composed emails": "Stores them on the notification rows; returns how many remain.",
     },
     WF_E: {
         "Drill: simulate an error": "Manual trigger replaying a sample payload through the same nodes.",
@@ -1464,9 +1478,10 @@ def workflow_b() -> dict:
         "secret, private network) right after a CSV is ingested.\n- **Sweeper** every 10 min: recovers jobs "
         "whose webhook was missed (n8n down, network blip).\n- **From A** (product mode): re-match all users "
         "against new/changed products.\n\n**Claim** = atomic lock on the job, so duplicates and concurrent "
-        "triggers never double-match. Then **B1** runs the Treasure Hunt.",
+        "triggers never double-match. Then **B1** runs the Treasure Hunt, **C** notifies, and products "
+        "whose criteria compiled late are re-matched for every user (product mode, never loops).",
         (-40, -440),
-        (600, 320),
+        (600, 340),
     )
     # First trigger in the file = the one `n8n execute` (CLI) starts from.
     f.add("Run now (demo)", "n8n-nodes-base.manualTrigger", 1, {}, (0, 200))
@@ -1610,6 +1625,40 @@ RETURNING job_id::text
         f.link(a, b)
     f.link("Matching failed?", "Mark job failed", out=0)
     f.link("Matching failed?", "Notify users (C)", out=1)
+    if REMATCH_LATE_COMPILES:
+        f.add(
+            "Products compiled late",
+            PG_T,
+            2.5,
+            pg_query(
+                sql_file("products_compiled_late.sql"),
+                f"={{{{ [ $('Claim job + start run').itemMatching($itemIndex).json.run_id, "
+                f"'{COMPILE_PROMPT_VERSION}' ] }}}}",
+            ),
+            (1100, 400),
+            credentials=PG,
+        )
+        f.add(
+            "Re-match them?", IF_T, 2, if_true("={{ $json.product_ids.length > 0 }}"), (1320, 400)
+        )
+        # Fire and forget: the product-mode run is its own execution (no nesting B -> B -> ...).
+        f.add(
+            "Re-match all users (B, product mode)",
+            "n8n-nodes-base.executeWorkflow",
+            1.2,
+            {
+                "source": "database",
+                "workflowId": {"__rl": True, "value": WF_B, "mode": "id"},
+                "mode": "once",
+                "options": {"waitForSubWorkflow": False},
+            },
+            (1540, 400),
+        )
+        # From the success branch itself, not after C: C returns nothing when no one has new
+        # matches, and late compiles still need their re-match then.
+        f.link("Matching failed?", "Products compiled late", out=1)
+        f.link("Products compiled late", "Re-match them?")
+        f.link("Re-match them?", "Re-match all users (B, product mode)", out=0)
     return f.build()
 
 
@@ -1627,7 +1676,8 @@ def workflow_c(api_url: str) -> dict:
         "**best pick + top picks** (top 5, one per lender, best platform shown), why each fits, and what else "
         "they'd need.\n\n- Sent with the **AWS SES node** (Assume Role credential, no keys), 1 email/second "
         "(SES sandbox).\n- **Only to test aliases**: never the CSV address (guarded in code).\n- Demo cap: "
-        f"first {DEMO_MAX_EMAILS} users get real mail; the rest are recorded as `skipped_demo`.\n- Each send "
+        f"first {DEMO_MAX_EMAILS} users get real mail; every other user's email is still **composed and "
+        "stored** by **C1** (batches of 500), recorded as `skipped_demo`.\n- Each send "
         "is **recorded the moment SES answers**, so a crash mid-loop never emails anyone twice.",
         (-40, -400),
         (620, 300),
@@ -1750,7 +1800,8 @@ const email = $('One email at a time').first().json;
 const r = $input.first().json;
 const id = r.MessageId || r.messageId || r?.SendEmailResponse?.SendEmailResult?.MessageId || null;
 return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error || !id ? 'failed' : 'sent',
-  ses_message_id: id, error: r.error ? String(r.error.message || JSON.stringify(r.error)).slice(0, 500) : (id ? null : 'no MessageId') } }];
+  ses_message_id: id, error: r.error ? String(r.error.message || JSON.stringify(r.error)).slice(0, 500) : (id ? null : 'no MessageId'),
+  subject: email.subject, text: email.text } }];
 """
             )
         },
@@ -1765,7 +1816,8 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
         pg_query(
             sql_file("notify_record_send.sql"),
             "={{ [ $('Users to email').first().json.run_id, $json.user_id, $json.alias_email, "
-            "$json.status, $json.ses_message_id || '', $json.error || '' ] }}",
+            "$json.status, $json.ses_message_id || '', $json.error || '', $json.subject || '', "
+            "$json.text || '' ] }}",
         ),
         (1540, 100),
         credentials=PG,
@@ -1815,9 +1867,107 @@ return [{ json: { run_id: $('Users to email').first().json.run_id, results: $inp
         ("1 email / second (SES sandbox)", "One email at a time"),
     ]:
         f.link(a, b)
+    # Every other matched user's email is composed too (C1, 500 per execution, so a 10k run
+    # never holds all emails in one execution); only delivery is capped by the SES sandbox.
+    f.add(
+        "Compose the rest (C1)",
+        "n8n-nodes-base.executeWorkflow",
+        1.2,
+        {
+            "source": "database",
+            "workflowId": {"__rl": True, "value": WF_C1, "mode": "id"},
+            "mode": "once",
+            "options": {"waitForSubWorkflow": True},
+        },
+        (1320, -120),
+    )
+    f.add(
+        "More to compose?",
+        IF_T,
+        2,
+        # Ends when nothing remains, when a batch stored nothing, or after 200 batches (100k
+        # users): the loop can never spin forever.
+        if_true(
+            "={{ Number($json.remaining) > 0 && Number($json.composed) > 0 && $runIndex < 200 }}"
+        ),
+        (1540, -120),
+    )
     f.link("One email at a time", "All results -> one item", out=0)  # done
     f.link("All results -> one item", "Record notifications")
+    f.link("Record notifications", "Compose the rest (C1)")
+    f.link("Compose the rest (C1)", "More to compose?")
+    f.link("More to compose?", "Compose the rest (C1)", out=0)
     f.link("One email at a time", "Send via AWS SES", out=1)  # loop
+    return f.build()
+
+
+# ---------------------------------------------------------------- Workflow C1 (compose batch)
+
+
+def workflow_c1() -> dict:
+    f = Flow(
+        WF_C1,
+        "C1 · Compose a batch of emails (sub-workflow)",
+        f"Builds and stores the personalized email of up to {COMPOSE_BATCH} users whose send was skipped by the demo cap.",
+    )
+    f.sticky(
+        f"## C1 · Compose a batch (≤{COMPOSE_BATCH} users)\nCalled by **C** in a loop after the real sends. "
+        "Every matched user gets their personalized email **built and stored** (subject + text on their "
+        "notification row); only delivery is capped by the SES sandbox.\n\n- One execution per batch, "
+        "so memory stays bounded on a 10,000-user run.\n- Never sends anything: no SES node here.",
+        (-40, -340),
+        (560, 260),
+    )
+    f.add(
+        "From C (run)",
+        "n8n-nodes-base.executeWorkflowTrigger",
+        1.1,
+        {"inputSource": "passthrough"},
+        (0, 0),
+    )
+    f.add(
+        "Next users to compose",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("notify_compose_batch.sql"),
+            f"={{{{ [ $json.run_id, {COMPOSE_BATCH} ] }}}}",
+        ),
+        (220, 0),
+        credentials=PG,
+    )
+    f.add(
+        "Compose (no send)",
+        CODE_T,
+        2,
+        {
+            "jsCode": js(
+                "email.js",
+                entry="""
+const users = $input.all().map((i) => i.json);
+return [{ json: { run_id: users[0].run_id, emails: composeBatch(users) } }];
+""",
+            )
+        },
+        (440, 0),
+    )
+    f.add(
+        "Save composed emails",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("notify_save_composed.sql"),
+            "={{ [ $json.run_id, JSON.stringify($json.emails) ] }}",
+        ),
+        (660, 0),
+        credentials=PG,
+    )
+    for a, b in [
+        ("From C (run)", "Next users to compose"),
+        ("Next users to compose", "Compose (no send)"),
+        ("Compose (no send)", "Save composed emails"),
+    ]:
+        f.link(a, b)
     return f.build()
 
 
@@ -1995,6 +2145,7 @@ def main() -> None:
         ("B_matching.json", workflow_b()),
         ("B1_match_run.json", workflow_b1()),
         ("C_notification.json", workflow_c(api_url)),
+        ("C1_compose_batch.json", workflow_c1()),
         ("E_error_handler.json", workflow_e()),
         ("E1_error_drill.json", workflow_e1()),
     ):

@@ -11,7 +11,7 @@ BUCKET="$(scripts/stack-output.sh DataBucketName)"
 INSTANCE="$(scripts/stack-output.sh N8nInstanceId)"
 # n8n 2.x: a sub-workflow called from another workflow must be PUBLISHED. The parent
 # workflows are published too once they are ready (that also arms their schedules).
-PUBLISH_IDS="${PUBLISH_IDS:-LoanEngineWfA101 LoanEngineWfA001 LoanEngineWfB101 LoanEngineWfC001 LoanEngineWfB001 LoanEngineWfE001}"
+PUBLISH_IDS="${PUBLISH_IDS:-LoanEngineWfA101 LoanEngineWfA001 LoanEngineWfB101 LoanEngineWfC101 LoanEngineWfC001 LoanEngineWfB001 LoanEngineWfE001}"
 
 ssm() { # run shell commands on the instance, wait, print stdout (and stderr on failure)
   local id

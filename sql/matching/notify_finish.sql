@@ -29,6 +29,6 @@ UPDATE pipeline_runs SET
     emails_skipped_demo = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'skipped_demo')
                           + (SELECT count(*) FROM ins_skip)
 WHERE run_id = $1::uuid
-RETURNING emails_sent, emails_failed, emails_skipped_demo,
+RETURNING run_id::text, emails_sent, emails_failed, emails_skipped_demo,
           (SELECT count(*) FROM mark) AS matches_marked_notified,
           (SELECT count(*) FROM ins_skip) AS notification_rows;

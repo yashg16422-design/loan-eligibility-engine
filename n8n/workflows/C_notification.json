@@ -5,7 +5,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## C · User notification\nRuns after **B**. For each user with NEW matches: one email with the **best pick + top picks** (top 5, one per lender, best platform shown), why each fits, and what else they'd need.\n\n- Sent with the **AWS SES node** (Assume Role credential, no keys), 1 email/second (SES sandbox).\n- **Only to test aliases**: never the CSV address (guarded in code).\n- Demo cap: first 5 users get real mail; the rest are recorded as `skipped_demo`.\n- Each send is **recorded the moment SES answers**, so a crash mid-loop never emails anyone twice.",
+        "content": "## C · User notification\nRuns after **B**. For each user with NEW matches: one email with the **best pick + top picks** (top 5, one per lender, best platform shown), why each fits, and what else they'd need.\n\n- Sent with the **AWS SES node** (Assume Role credential, no keys), 1 email/second (SES sandbox).\n- **Only to test aliases**: never the CSV address (guarded in code).\n- Demo cap: first 5 users get real mail; every other user's email is still **composed and stored** by **C1** (batches of 500), recorded as `skipped_demo`.\n- Each send is **recorded the moment SES answers**, so a crash mid-loop never emails anyone twice.",
         "width": 620,
         "height": 300
       },
@@ -131,7 +131,7 @@
     },
     {
       "parameters": {
-        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** A signed dashboard link is shown only if it is a real https URL (never javascript: etc.). */\nconst safeLink = (url) => (/^https:\\/\\/[^\\s\"'<>]+$/i.test(String(url || '')) ? String(url) : null);\n\n/**\n * Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked.\n * `user.dashboard_url` (optional) is the signed \"view all my matches\" link; when signing\n * failed upstream, the email simply goes out without it.\n */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const dashboard = safeLink(user.dashboard_url);\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  ${dashboard ? `<p style=\"margin:20px 0 4px\"><a href=\"${escapeHtml(dashboard)}\" style=\"display:inline-block;background:#F2A93B;color:#1B1305;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600\">View all ${escapeHtml(user.matches_total)} matches</a></p>\n  <p style=\"color:#555;font-size:13px;margin-top:6px\">Compare offers side by side, see what would unlock more lenders, and save your shortlist. The link works for 14 days.</p>` : ''}\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    ...(dashboard ? [`View all your matches (link valid 14 days): ${dashboard}`] : []),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst ALIASES = [\"yashg16422+one@gmail.com\", \"yashg16422+two@gmail.com\", \"yashg16422+three@gmail.com\"];\nconst FROM = \"yashg16422@gmail.com\";\nconst APP = \"https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/dashboard?t=\";\nconst tokens = $('Sign dashboard links').first()?.json?.tokens || {};\nreturn $('Users to email').all().map((item) => {\n  const user = item.json;\n  // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.\n  const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);\n  const token = tokens[user.user_id];\n  const dashboard_url = token ? APP + encodeURIComponent(token) : null;\n  return { json: { user_id: user.user_id, to, from: FROM, ...composeEmail({ ...user, dashboard_url }) } };\n});\n"
+        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** A signed dashboard link is shown only if it is a real https URL (never javascript: etc.). */\nconst safeLink = (url) => (/^https:\\/\\/[^\\s\"'<>]+$/i.test(String(url || '')) ? String(url) : null);\n\n/**\n * Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked.\n * `user.dashboard_url` (optional) is the signed \"view all my matches\" link; when signing\n * failed upstream, the email simply goes out without it.\n */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const dashboard = safeLink(user.dashboard_url);\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  ${dashboard ? `<p style=\"margin:20px 0 4px\"><a href=\"${escapeHtml(dashboard)}\" style=\"display:inline-block;background:#F2A93B;color:#1B1305;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600\">View all ${escapeHtml(user.matches_total)} matches</a></p>\n  <p style=\"color:#555;font-size:13px;margin-top:6px\">Compare offers side by side, see what would unlock more lenders, and save your shortlist. The link works for 14 days.</p>` : ''}\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    ...(dashboard ? [`View all your matches (link valid 14 days): ${dashboard}`] : []),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\n/**\n * Compose (never send) the emails of a batch of users whose real send was skipped by the demo\n * cap: subject + plain text to store. One user's bad data never stops the batch; a user whose\n * matches are gone gets a marker instead, so every row is settled and the loop always ends.\n */\nfunction composeBatch(users) {\n  return users.map((user) => {\n    if (!user.picks || !user.picks.length) {\n      return { user_id: user.user_id, subject: '(not composed: no active matches left)', body_text: '' };\n    }\n    try {\n      const { subject, text } = composeEmail(user);\n      return { user_id: user.user_id, subject, body_text: text };\n    } catch (err) {\n      return { user_id: user.user_id, subject: `(not composed: ${String(err.message).slice(0, 200)})`, body_text: '' };\n    }\n  });\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail, composeBatch };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst ALIASES = [\"yashg16422+one@gmail.com\", \"yashg16422+two@gmail.com\", \"yashg16422+three@gmail.com\"];\nconst FROM = \"yashg16422@gmail.com\";\nconst APP = \"https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/dashboard?t=\";\nconst tokens = $('Sign dashboard links').first()?.json?.tokens || {};\nreturn $('Users to email').all().map((item) => {\n  const user = item.json;\n  // Guard: the recipient is one of OUR test aliases, chosen deterministically; never the CSV email.\n  const to = assertAllowed(recipientFor(user.user_id, ALIASES), ALIASES);\n  const token = tokens[user.user_id];\n  const dashboard_url = token ? APP + encodeURIComponent(token) : null;\n  return { json: { user_id: user.user_id, to, from: FROM, ...composeEmail({ ...user, dashboard_url }) } };\n});\n"
       },
       "name": "Compose emails",
       "type": "n8n-nodes-base.code",
@@ -197,7 +197,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst email = $('One email at a time').first().json;\nconst r = $input.first().json;\nconst id = r.MessageId || r.messageId || r?.SendEmailResponse?.SendEmailResult?.MessageId || null;\nreturn [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error || !id ? 'failed' : 'sent',\n  ses_message_id: id, error: r.error ? String(r.error.message || JSON.stringify(r.error)).slice(0, 500) : (id ? null : 'no MessageId') } }];\n"
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst email = $('One email at a time').first().json;\nconst r = $input.first().json;\nconst id = r.MessageId || r.messageId || r?.SendEmailResponse?.SendEmailResult?.MessageId || null;\nreturn [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error || !id ? 'failed' : 'sent',\n  ses_message_id: id, error: r.error ? String(r.error.message || JSON.stringify(r.error)).slice(0, 500) : (id ? null : 'no MessageId'),\n  subject: email.subject, text: email.text } }];\n"
       },
       "name": "Delivery result",
       "type": "n8n-nodes-base.code",
@@ -213,9 +213,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Workflow C · Record ONE send, right after SES answers (inside the send loop).\n-- Params: $1 run_id, $2 user_id, $3 alias_email, $4 status ('sent'|'failed'),\n--         $5 ses_message_id ('' if none), $6 error ('' if none).\n-- Recording each send immediately means a crash mid-loop never emails anyone twice: the\n-- re-run's \"Users to email\" skips users whose matches are already notified, and its demo cap\n-- counts the sends already recorded. A failed send stays un-notified for a later retry.\nWITH s AS (\n    SELECT $1::uuid AS run_id, $2::uuid AS user_id, $3::text AS alias_email, $4::text AS status,\n           nullif($5::text, '') AS ses_message_id, nullif($6::text, '') AS error\n), ins AS (\n    INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error)\n    SELECT s.user_id, s.alias_email, r.job_id, s.run_id, s.status, s.ses_message_id, s.error\n    FROM s JOIN pipeline_runs r ON r.run_id = s.run_id\n    RETURNING 1\n), mark AS (\n    UPDATE matches m SET notified_at = now()\n    FROM s\n    WHERE s.status = 'sent' AND m.match_run_id = s.run_id AND m.user_id = s.user_id\n      AND m.status = 'active' AND m.notified_at IS NULL\n    RETURNING 1\n)\nSELECT s.user_id::text, s.alias_email, s.status, s.ses_message_id, s.error,\n       (SELECT count(*) FROM ins) AS recorded, (SELECT count(*) FROM mark) AS matches_marked\nFROM s;",
+        "query": "-- Workflow C · Record ONE send, right after SES answers (inside the send loop).\n-- Params: $1 run_id, $2 user_id, $3 alias_email, $4 status ('sent'|'failed'),\n--         $5 ses_message_id ('' if none), $6 error ('' if none), $7 subject, $8 text body.\n-- Recording each send immediately means a crash mid-loop never emails anyone twice: the\n-- re-run's \"Users to email\" skips users whose matches are already notified, and its demo cap\n-- counts the sends already recorded. A failed send stays un-notified for a later retry.\nWITH s AS (\n    SELECT $1::uuid AS run_id, $2::uuid AS user_id, $3::text AS alias_email, $4::text AS status,\n           nullif($5::text, '') AS ses_message_id, nullif($6::text, '') AS error,\n           nullif($7::text, '') AS subject, nullif($8::text, '') AS body_text\n), ins AS (\n    INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error,\n                               subject, body_text)\n    SELECT s.user_id, s.alias_email, r.job_id, s.run_id, s.status, s.ses_message_id, s.error,\n           s.subject, s.body_text\n    FROM s JOIN pipeline_runs r ON r.run_id = s.run_id\n    RETURNING 1\n), mark AS (\n    UPDATE matches m SET notified_at = now()\n    FROM s\n    WHERE s.status = 'sent' AND m.match_run_id = s.run_id AND m.user_id = s.user_id\n      AND m.status = 'active' AND m.notified_at IS NULL\n    RETURNING 1\n)\nSELECT s.user_id::text, s.alias_email, s.status, s.ses_message_id, s.error,\n       (SELECT count(*) FROM ins) AS recorded, (SELECT count(*) FROM mark) AS matches_marked\nFROM s;",
         "options": {
-          "queryReplacement": "={{ [ $('Users to email').first().json.run_id, $json.user_id, $json.alias_email, $json.status, $json.ses_message_id || '', $json.error || '' ] }}"
+          "queryReplacement": "={{ [ $('Users to email').first().json.run_id, $json.user_id, $json.alias_email, $json.status, $json.ses_message_id || '', $json.error || '', $json.subject || '', $json.text || '' ] }}"
         }
       },
       "name": "Record this send",
@@ -270,7 +270,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Workflow C · Finish: after the send loop. Params: $1 run_id.\n-- Sent and failed rows were already written one by one (notify_record_send.sql). Every OTHER\n-- user with new matches is recorded as skipped_demo (production would email them) and marked\n-- notified, so nobody is emailed twice; then the run's counters are set from the table, which\n-- makes a re-run idempotent.\nWITH run AS (\n    SELECT job_id FROM pipeline_runs WHERE run_id = $1::uuid\n), rest AS (\n    SELECT DISTINCT m.user_id FROM matches m\n    WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL\n      AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.run_id = $1::uuid AND n.user_id = m.user_id)\n), ins_skip AS (\n    INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, error)\n    SELECT user_id, '(demo cap: not sent)', (SELECT job_id FROM run), $1::uuid, 'skipped_demo',\n           'demo cap reached: production would email this user'\n    FROM rest\n    RETURNING 1\n), mark AS (\n    UPDATE matches SET notified_at = now()\n    WHERE match_run_id = $1::uuid AND status = 'active' AND notified_at IS NULL\n      AND user_id IN (SELECT user_id FROM rest)\n    RETURNING 1\n)\n-- Counts read the table as it was before this statement (sends recorded earlier) plus what\n-- this statement inserts.\nUPDATE pipeline_runs SET\n    emails_sent = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'sent'),\n    emails_failed = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'failed'),\n    emails_skipped_demo = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'skipped_demo')\n                          + (SELECT count(*) FROM ins_skip)\nWHERE run_id = $1::uuid\nRETURNING emails_sent, emails_failed, emails_skipped_demo,\n          (SELECT count(*) FROM mark) AS matches_marked_notified,\n          (SELECT count(*) FROM ins_skip) AS notification_rows;",
+        "query": "-- Workflow C · Finish: after the send loop. Params: $1 run_id.\n-- Sent and failed rows were already written one by one (notify_record_send.sql). Every OTHER\n-- user with new matches is recorded as skipped_demo (production would email them) and marked\n-- notified, so nobody is emailed twice; then the run's counters are set from the table, which\n-- makes a re-run idempotent.\nWITH run AS (\n    SELECT job_id FROM pipeline_runs WHERE run_id = $1::uuid\n), rest AS (\n    SELECT DISTINCT m.user_id FROM matches m\n    WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL\n      AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.run_id = $1::uuid AND n.user_id = m.user_id)\n), ins_skip AS (\n    INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, error)\n    SELECT user_id, '(demo cap: not sent)', (SELECT job_id FROM run), $1::uuid, 'skipped_demo',\n           'demo cap reached: production would email this user'\n    FROM rest\n    RETURNING 1\n), mark AS (\n    UPDATE matches SET notified_at = now()\n    WHERE match_run_id = $1::uuid AND status = 'active' AND notified_at IS NULL\n      AND user_id IN (SELECT user_id FROM rest)\n    RETURNING 1\n)\n-- Counts read the table as it was before this statement (sends recorded earlier) plus what\n-- this statement inserts.\nUPDATE pipeline_runs SET\n    emails_sent = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'sent'),\n    emails_failed = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'failed'),\n    emails_skipped_demo = (SELECT count(*) FROM notifications WHERE run_id = $1::uuid AND status = 'skipped_demo')\n                          + (SELECT count(*) FROM ins_skip)\nWHERE run_id = $1::uuid\nRETURNING run_id::text, emails_sent, emails_failed, emails_skipped_demo,\n          (SELECT count(*) FROM mark) AS matches_marked_notified,\n          (SELECT count(*) FROM ins_skip) AS notification_rows;",
         "options": {
           "queryReplacement": "={{ [ $json.run_id ] }}"
         }
@@ -290,6 +290,65 @@
         }
       },
       "notes": "Everyone else is recorded as skipped_demo; counters set from the table.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfC101",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Compose the rest (C1)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1320,
+        -120
+      ],
+      "id": "LoanEngineWfC001-14",
+      "notes": "Builds and stores every other user's email, 500 per sub-workflow run.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ Number($json.remaining) > 0 && Number($json.composed) > 0 && $runIndex < 200 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "More to compose?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        -120
+      ],
+      "id": "LoanEngineWfC001-15",
+      "notes": "Loops until every user's email is stored (bounded: at most 200 batches).",
       "notesInFlow": true
     }
   ],
@@ -427,6 +486,39 @@
         [
           {
             "node": "Record notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record notifications": {
+      "main": [
+        [
+          {
+            "node": "Compose the rest (C1)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose the rest (C1)": {
+      "main": [
+        [
+          {
+            "node": "More to compose?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "More to compose?": {
+      "main": [
+        [
+          {
+            "node": "Compose the rest (C1)",
             "type": "main",
             "index": 0
           }

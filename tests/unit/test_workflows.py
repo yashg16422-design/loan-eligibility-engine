@@ -52,6 +52,7 @@ def test_all_expected_workflows_are_exported():
         "B_matching.json",
         "B1_match_run.json",
         "C_notification.json",
+        "C1_compose_batch.json",
         "E_error_handler.json",
         "E1_error_drill.json",
     } <= set(WORKFLOWS)
@@ -181,3 +182,15 @@ def test_every_node_has_a_short_note_on_the_canvas(wf):
         note = node.get("notes", "")
         assert note and len(note) <= 120, f"{wf['name']} > {node['name']}: note missing or too long"
         assert node.get("notesInFlow") is True
+
+
+def test_c_composes_every_users_email_in_bounded_batches_and_c1_never_sends():
+    c, c1 = WORKFLOWS["C_notification.json"], WORKFLOWS["C1_compose_batch.json"]
+    out = lambda wf, name, i: [e["node"] for e in wf["connections"][name]["main"][i]]  # noqa: E731
+    assert out(c, "Record notifications", 0) == ["Compose the rest (C1)"]
+    assert out(c, "Compose the rest (C1)", 0) == ["More to compose?"]
+    assert out(c, "More to compose?", 0) == ["Compose the rest (C1)"]  # the loop
+    guard = next(n for n in c["nodes"] if n["name"] == "More to compose?")
+    condition = json.dumps(guard["parameters"])
+    assert "remaining" in condition and "composed" in condition and "$runIndex < 200" in condition
+    assert not any(n["type"] == "n8n-nodes-base.awsSes" for n in c1["nodes"])  # never sends

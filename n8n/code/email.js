@@ -104,4 +104,23 @@ function composeEmail(user) {
   return { subject, html, text };
 }
 
-if (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail };
+/**
+ * Compose (never send) the emails of a batch of users whose real send was skipped by the demo
+ * cap: subject + plain text to store. One user's bad data never stops the batch; a user whose
+ * matches are gone gets a marker instead, so every row is settled and the loop always ends.
+ */
+function composeBatch(users) {
+  return users.map((user) => {
+    if (!user.picks || !user.picks.length) {
+      return { user_id: user.user_id, subject: '(not composed: no active matches left)', body_text: '' };
+    }
+    try {
+      const { subject, text } = composeEmail(user);
+      return { user_id: user.user_id, subject, body_text: text };
+    } catch (err) {
+      return { user_id: user.user_id, subject: `(not composed: ${String(err.message).slice(0, 200)})`, body_text: '' };
+    }
+  });
+}
+
+if (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail, composeBatch };

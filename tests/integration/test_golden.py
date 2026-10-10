@@ -205,12 +205,19 @@ def test_workflow_c_records_each_send_so_a_rerun_never_emails_twice(db, first_up
         msg = "ses-1" if status == "sent" else ""
         err = "" if status == "sent" else "throttled"
         return run_sql(
-            db, "notify_record_send.sql", run_id, user_id, "a+one@gmail.com", status, msg, err
+            db,
+            "notify_record_send.sql",
+            *(run_id, user_id, "a+one@gmail.com", status, msg, err, "Subject", "Body"),
         )
 
     first = users_to_email()
     assert len(first) == 5
     assert record(first[0], "sent")["matches_marked"] > 0
+    stored = db.execute(
+        "SELECT subject, body_text FROM notifications WHERE run_id = %s AND user_id = %s",
+        (run_id, first[0]),
+    ).fetchone()
+    assert stored == ("Subject", "Body")  # the sent email itself is kept
     record(first[1], "sent")
     # n8n dies here. The re-run picks only the remaining quota, and never the two emailed users.
     again = users_to_email()
@@ -229,3 +236,35 @@ def test_workflow_c_records_each_send_so_a_rerun_never_emails_twice(db, first_up
     again_done = run_sql(db, "notify_finish.sql", run_id)
     assert again_done["notification_rows"] == 0
     assert again_done["emails_skipped_demo"] == done["emails_skipped_demo"]
+
+
+def test_workflow_c1_composes_every_skipped_users_email_and_the_loop_ends(db, first_upload):
+    """C1's SQL, driven the way C's loop drives it (Python stands in for email.js)."""
+    _, result = first_upload
+    run_id = str(result["funnel"]["run_id"])
+    skipped = db.execute(
+        "SELECT count(*) FROM notifications WHERE run_id = %s AND status = 'skipped_demo'",
+        (run_id,),
+    ).fetchone()[0]
+    assert skipped > 1000  # the C test above recorded the rest of the 10k users as skipped
+
+    batches, remaining = 0, None
+    while remaining != 0:
+        cur = db.execute(sql("notify_compose_batch.sql"), {"p1": run_id, "p2": 500})
+        names = [c.name for c in cur.description]
+        users = [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+        assert 0 < len(users) <= 500
+        assert all(u["picks"] and len(u["picks"]) <= 5 for u in users)
+        emails = [
+            {"user_id": u["user_id"], "subject": f"s{u['user_id'][:4]}", "body_text": "t"}
+            for u in users
+        ]
+        saved = run_sql(db, "notify_save_composed.sql", run_id, json.dumps(emails))
+        assert saved["composed"] == len(users)
+        remaining = saved["remaining"]
+        batches += 1
+        assert batches <= 30
+    assert batches == -(-skipped // 500)  # ceil: every batch full except the last
+    assert db.execute(
+        "SELECT count(*) FROM notifications WHERE run_id = %s AND subject IS NULL", (run_id,)
+    ).fetchone() == (0,)

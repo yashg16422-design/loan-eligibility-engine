@@ -1,0 +1,148 @@
+{
+  "id": "LoanEngineWfC101",
+  "name": "C1 · Compose a batch of emails (sub-workflow)",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## C1 · Compose a batch (≤500 users)\nCalled by **C** in a loop after the real sends. Every matched user gets their personalized email **built and stored** (subject + text on their notification row); only delivery is capped by the SES sandbox.\n\n- One execution per batch, so memory stays bounded on a 10,000-user run.\n- Never sends anything: no SES node here.",
+        "width": 560,
+        "height": 260
+      },
+      "name": "Note 0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -340
+      ],
+      "id": "LoanEngineWfC101-00"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "name": "From C (run)",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "LoanEngineWfC101-01",
+      "notes": "Called by C with the run_id, once per batch.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow C1 · The next batch of users whose real send was skipped (demo cap) and whose email\n-- is not composed yet. Params: $1 run_id, $2 batch size.\n-- Same picks as an emailed user (best offer per lender, ranked by tier, fit score, rate). A user\n-- whose matches were superseded since still gets a row (picks NULL), so the batch settles them.\nWITH todo AS (\n  SELECT n.user_id FROM notifications n\n  WHERE n.run_id = $1::uuid AND n.status = 'skipped_demo' AND n.subject IS NULL\n  ORDER BY n.user_id LIMIT $2::int\n), new_m AS (\n  SELECT m.user_id, m.tier, m.requirements, m.fit_score, m.fit_reasons,\n         p.lender, p.lender_key, p.channel, p.product_url, p.product_name,\n         p.interest_rate_min, p.interest_rate_max, p.loan_amount_max\n  FROM matches m JOIN loan_products p USING (product_id) JOIN todo USING (user_id)\n  WHERE m.match_run_id = $1::uuid AND m.status = 'active'\n), per_user AS (\n  SELECT user_id, count(*)::int AS matches_total, count(DISTINCT lender_key)::int AS lenders_total\n  FROM new_m GROUP BY user_id\n), best_per_lender AS (\n  SELECT DISTINCT ON (n.user_id, n.lender_key) n.*\n  FROM new_m n\n  ORDER BY n.user_id, n.lender_key, (n.tier = 'eligible') DESC, n.fit_score DESC,\n           n.interest_rate_min NULLS LAST, n.product_name\n), ranked AS (\n  SELECT b.*, row_number() OVER (PARTITION BY b.user_id ORDER BY (b.tier = 'eligible') DESC,\n         b.fit_score DESC, b.interest_rate_min NULLS LAST, b.product_name) AS rnk\n  FROM best_per_lender b\n)\nSELECT $1::text AS run_id, u.user_id::text, u.name, u.monthly_income, u.credit_score,\n       u.employment_status, u.age, pu.matches_total, pu.lenders_total,\n       json_agg(json_build_object(\n         'lender', r.lender, 'channel', r.channel, 'tier', r.tier, 'requirements', r.requirements,\n         'interest_rate_min', r.interest_rate_min, 'interest_rate_max', r.interest_rate_max,\n         'loan_amount_max', r.loan_amount_max, 'product_url', r.product_url,\n         'fit_score', r.fit_score, 'fit_reasons', r.fit_reasons) ORDER BY r.rnk)\n         FILTER (WHERE r.rnk <= 5) AS picks\nFROM todo t\nJOIN users u ON u.user_id = t.user_id\nLEFT JOIN per_user pu ON pu.user_id = t.user_id\nLEFT JOIN ranked r ON r.user_id = t.user_id\nGROUP BY u.user_id, pu.matches_total, pu.lenders_total\nORDER BY u.user_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, 500 ] }}"
+        }
+      },
+      "name": "Next users to compose",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        0
+      ],
+      "id": "LoanEngineWfC101-02",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Up to 500 users whose send was skipped and whose email is not built yet.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * Workflow C: personalized notification emails (pure functions).\n *\n * Safety rules (CLAUDE.md \"Never\"):\n *   - Mail goes ONLY to the configured test aliases, never to the CSV address. recipientFor()\n *     picks an alias deterministically and assertAllowed() aborts on anything else.\n *   - Every value from the web (lender names, conditions) is HTML-escaped: a crawled page\n *     must never be able to inject markup into an email.\n * The email is \"indicative eligibility, not a loan offer\": it explains WHY each product was\n * suggested using the transparent fit score (Stage 3), never an opaque prediction.\n */\n\nconst PICKS_IN_EMAIL = 5; // best pick + up to 4 top picks, at most one per lender (decided in SQL)\n\nfunction escapeHtml(value) {\n  return String(value ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[c]);\n}\n\n/** Small, stable string hash (FNV-1a 32-bit): same user -> same alias on every run. */\nfunction fnv1a(text) {\n  let h = 0x811c9dc5;\n  for (const ch of String(text)) { h ^= ch.codePointAt(0); h = Math.imul(h, 0x01000193) >>> 0; }\n  return h;\n}\n\nfunction recipientFor(userId, aliases) {\n  if (!aliases.length) throw new Error('no test aliases configured');\n  return aliases[fnv1a(userId) % aliases.length];\n}\n\n/** Abort the send if the recipient is not one of the configured aliases. */\nfunction assertAllowed(recipient, aliases) {\n  if (!aliases.includes(recipient)) throw new Error(`refusing to email ${recipient}: not a configured test alias`);\n  return recipient;\n}\n\nconst rupees = (n) => (n == null ? null : `₹${Number(n).toLocaleString('en-IN')}`);\n\nfunction rateText(p) {\n  if (p.interest_rate_min == null) return 'rate on request';\n  if (p.interest_rate_max == null || p.interest_rate_max === p.interest_rate_min) return `from ${p.interest_rate_min}% p.a.`;\n  return `${p.interest_rate_min}% – ${p.interest_rate_max}% p.a.`;\n}\n\n/** One-line \"why\": every number traces back to a published lender rule. */\nfunction whyText(p) {\n  const r = p.fit_reasons || {};\n  const parts = [];\n  if (r.income_multiple != null) parts.push(`your income is ${r.income_multiple}× the minimum`);\n  if (r.credit_margin != null) parts.push(`your credit score is ${r.credit_margin >= 0 ? '+' : ''}${r.credit_margin} vs the minimum`);\n  return parts.length ? parts.join(', ') : 'you meet the published criteria';\n}\n\nconst CHANNEL = { direct: 'on the lender\\'s site', bankbazaar: 'via BankBazaar', paisabazaar: 'via Paisabazaar' };\n\n/** A signed dashboard link is shown only if it is a real https URL (never javascript: etc.). */\nconst safeLink = (url) => (/^https:\\/\\/[^\\s\"'<>]+$/i.test(String(url || '')) ? String(url) : null);\n\n/**\n * Subject, HTML and plain-text bodies for one user. `user.picks` is already ranked.\n * `user.dashboard_url` (optional) is the signed \"view all my matches\" link; when signing\n * failed upstream, the email simply goes out without it.\n */\nfunction composeEmail(user) {\n  const picks = (user.picks || []).slice(0, PICKS_IN_EMAIL);\n  if (!picks.length) throw new Error(`no picks for user ${user.user_id}`);\n  const first = String(user.name || '').trim().split(/\\s+/)[0] || 'there';\n  const dashboard = safeLink(user.dashboard_url);\n  const best = picks[0];\n  const subject = `${first}, you may qualify for ${user.lenders_total} personal loan${user.lenders_total === 1 ? '' : 's'} (best: ${best.lender})`;\n\n  const card = (p, i) => {\n    const badge = p.tier === 'eligible'\n      ? '<span style=\"background:#e6f4ea;color:#1e7e34;padding:2px 8px;border-radius:10px;font-size:12px\">Eligible</span>'\n      : '<span style=\"background:#fff4e5;color:#a35a00;padding:2px 8px;border-radius:10px;font-size:12px\">May qualify</span>';\n    const needs = p.requirements\n      ? `<div style=\"color:#555;font-size:13px;margin-top:4px\">You'll also need: ${escapeHtml(p.requirements).slice(0, 400)}</div>` : '';\n    return `<tr><td style=\"padding:12px 0;border-bottom:1px solid #eee\">\n      <div style=\"font-weight:600\">${i === 0 ? '⭐ Best pick: ' : ''}${escapeHtml(p.lender)} Personal Loan ${badge}</div>\n      <div style=\"font-size:14px;margin-top:2px\">${escapeHtml(rateText(p))} · ${escapeHtml(CHANNEL[p.channel] || p.channel)}${p.loan_amount_max ? ` · up to ${escapeHtml(rupees(p.loan_amount_max))}` : ''}</div>\n      <div style=\"color:#555;font-size:13px;margin-top:4px\">Why: ${escapeHtml(whyText(p))}.</div>${needs}\n      ${/^https?:\\/\\//i.test(p.product_url || '') ? `<div style=\"margin-top:4px\"><a href=\"${escapeHtml(p.product_url)}\">View on source</a></div>` : ''}\n    </td></tr>`;\n  };\n\n  const html = `<!doctype html><html><body style=\"font-family:Arial,Helvetica,sans-serif;color:#222;max-width:620px;margin:auto\">\n  <h2 style=\"margin-bottom:4px\">Hi ${escapeHtml(first)}, here are your personal-loan matches</h2>\n  <p style=\"color:#555;margin-top:0\">Based on your profile (${escapeHtml(rupees(user.monthly_income))}/month, credit score ${escapeHtml(user.credit_score)}, ${escapeHtml(String(user.employment_status).replace('_', '-'))}, age ${escapeHtml(user.age)}) you match <b>${escapeHtml(user.matches_total)}</b> offers from <b>${escapeHtml(user.lenders_total)}</b> lenders. Our top ${picks.length}:</p>\n  <table style=\"width:100%;border-collapse:collapse\">${picks.map(card).join('')}</table>\n  ${dashboard ? `<p style=\"margin:20px 0 4px\"><a href=\"${escapeHtml(dashboard)}\" style=\"display:inline-block;background:#F2A93B;color:#1B1305;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600\">View all ${escapeHtml(user.matches_total)} matches</a></p>\n  <p style=\"color:#555;font-size:13px;margin-top:6px\">Compare offers side by side, see what would unlock more lenders, and save your shortlist. The link works for 14 days.</p>` : ''}\n  <p style=\"color:#888;font-size:12px;margin-top:18px\">Indicative eligibility based on criteria published by lenders and comparison sites; not a loan offer or approval. Final eligibility, rates and terms are decided by the lender.<br>\n  Demo notice: this test message was routed to a test inbox, not to the address in the uploaded CSV.</p>\n</body></html>`;\n\n  const text = [\n    `Hi ${first}, here are your personal-loan matches.`,\n    `Profile: ${rupees(user.monthly_income)}/month, credit score ${user.credit_score}, ${user.employment_status}, age ${user.age}.`,\n    `You match ${user.matches_total} offers from ${user.lenders_total} lenders. Top ${picks.length}:`,\n    ...picks.map((p, i) => `${i === 0 ? '* BEST PICK: ' : '- '}${p.lender} (${p.tier === 'eligible' ? 'eligible' : 'may qualify'}) ${rateText(p)} ${CHANNEL[p.channel] || p.channel}. Why: ${whyText(p)}.${p.requirements ? ` Also needed: ${String(p.requirements).slice(0, 300)}` : ''}`),\n    ...(dashboard ? [`View all your matches (link valid 14 days): ${dashboard}`] : []),\n    'Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.',\n  ].join('\\n');\n  return { subject, html, text };\n}\n\n/**\n * Compose (never send) the emails of a batch of users whose real send was skipped by the demo\n * cap: subject + plain text to store. One user's bad data never stops the batch; a user whose\n * matches are gone gets a marker instead, so every row is settled and the loop always ends.\n */\nfunction composeBatch(users) {\n  return users.map((user) => {\n    if (!user.picks || !user.picks.length) {\n      return { user_id: user.user_id, subject: '(not composed: no active matches left)', body_text: '' };\n    }\n    try {\n      const { subject, text } = composeEmail(user);\n      return { user_id: user.user_id, subject, body_text: text };\n    } catch (err) {\n      return { user_id: user.user_id, subject: `(not composed: ${String(err.message).slice(0, 200)})`, body_text: '' };\n    }\n  });\n}\n\nif (typeof module !== 'undefined') module.exports = { PICKS_IN_EMAIL, safeLink, escapeHtml, fnv1a, recipientFor, assertAllowed, whyText, composeEmail, composeBatch };\n\n\n// ---- n8n entry ------------------------------------------------------------\n\nconst users = $input.all().map((i) => i.json);\nreturn [{ json: { run_id: users[0].run_id, emails: composeBatch(users) } }];\n"
+      },
+      "name": "Compose (no send)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "id": "LoanEngineWfC101-03",
+      "notes": "email.js builds each personal email (subject + text); nothing is sent.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow C1 · Store a batch of composed emails. Params: $1 run_id, $2 JSON array of\n-- {user_id, subject, body_text}. Returns how many were stored and how many remain, which is\n-- what C's loop decides on.\nWITH composed AS (\n    SELECT * FROM jsonb_to_recordset($2::jsonb) AS c(user_id text, subject text, body_text text)\n), saved AS (\n    UPDATE notifications n SET subject = c.subject, body_text = c.body_text\n    FROM composed c\n    WHERE n.run_id = $1::uuid AND n.status = 'skipped_demo' AND n.subject IS NULL\n      AND n.user_id = c.user_id::uuid\n    RETURNING 1\n)\nSELECT $1::text AS run_id,\n       (SELECT count(*) FROM saved)::int AS composed,\n       ((SELECT count(*) FROM notifications\n         WHERE run_id = $1::uuid AND status = 'skipped_demo' AND subject IS NULL)\n        - (SELECT count(*) FROM saved))::int AS remaining;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, JSON.stringify($json.emails) ] }}"
+        }
+      },
+      "name": "Save composed emails",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        660,
+        0
+      ],
+      "id": "LoanEngineWfC101-04",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Stores them on the notification rows; returns how many remain.",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "From C (run)": {
+      "main": [
+        [
+          {
+            "node": "Next users to compose",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next users to compose": {
+      "main": [
+        [
+          {
+            "node": "Compose (no send)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose (no send)": {
+      "main": [
+        [
+          {
+            "node": "Save composed emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "LoanEngineWfE001"
+  },
+  "meta": {
+    "description": "Builds and stores the personalized email of up to 500 users whose send was skipped by the demo cap."
+  },
+  "pinData": {}
+}
