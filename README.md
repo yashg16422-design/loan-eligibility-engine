@@ -20,6 +20,13 @@ pipeline reduced that to **164 equivalence classes** and **5 LLM calls in total 
 then **0 calls** on every later run, and a brute-force check proves the optimized result is
 **identical** to evaluating all 590,000 pairs one by one.
 
+### Reviewer quick start
+1. **Upload:** open the [merchant console](https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/merchant), sign up with any email (Cognito sends a 6-digit code; check Spam), then **Upload CSV** with [`tests/fixtures/demo_users.csv`](tests/fixtures/demo_users.csv). Your workspace starts empty.
+2. **Watch it run** (about 30 s): Uploaded → Validated and loaded (the row with credit score 950 is rejected, with its reason) → Matched (Workflow B) → Notified (Workflow C).
+3. **Emails** go only to the owner's three Gmail test `+aliases`, never to CSV addresses. The console shows the emails that were sent ("Emails sent for this upload"), and the received email is in the [screenshot](docs/screenshots/14-email.png) and the video.
+4. **Treasure Hunt:** [§8](#8-the-optimization-treasure-hunt) and the raw measurements in [`docs/evidence/`](docs/evidence/). **Every required path checked live:** [`REQUIRED_PATH.md`](docs/evidence/REQUIRED_PATH.md).
+5. **n8n:** credential setup in [§5](#5-configuring-credentials-inside-n8n); workflows node by node in [§6](#6-workflows-a--b--c-node-by-node); to run n8n locally without AWS, see [§4.7](#47-run-n8n-locally-without-aws-for-reviewers).
+
 ---
 
 ## Contents
@@ -444,7 +451,7 @@ Live example: *Kotak via BankBazaar* ₹20,000/month, 10.99–16.99%; *Kotak via
 type** (59 active products, 26 lenders), and the email shows the best platform per lender.
 
 **Robustness rules**
-- **Polite:** robots.txt obeyed per URL; 1 request/s; pages interleaved across sites; honest User-Agent.
+- **Polite:** robots.txt obeyed per URL; 1 request/s; pages interleaved across sites; a browser-compatible User-Agent that names the project.
 - **No evasion:** a 403/429/CAPTCHA means *skip*. The optional headless renderer (`renderer/`,
   Playwright, off by default) is only for sites that allow plain HTTP but load data client-side,
   and it is SSRF-guarded (it refuses private and metadata IPs).
@@ -589,7 +596,7 @@ published criteria**, never an approval probability.
 - **Single-AZ RDS `db.t4g.micro`:** production: Multi-AZ, larger instance, automated rotation for app roles.
 - **Very large files:** the current ingest handles a 10k-row file in seconds and files up to 50 MB.
   Beyond about 1 GB: S3 byte-range chunking with one SQS message per chunk, or Step Functions Distributed Map.
-- **Upload API authentication:** the demo endpoint is open (throttled). Production adds Cognito/OIDC.
+- **Upload API:** uploads already require a Cognito sign-in and belong to the signed-in account. Production adds per-account quotas and an AWS WAF rate rule.
 - **Crawler:** add alerting when a source's product count drops; enable the renderer per source where allowed.
 - **LLM quality:** a hand-labelled gold set to measure field-level extraction accuracy per model (Nova Pro vs Lite).
 
@@ -636,7 +643,7 @@ serverless.yml              all AWS resources (VPC, endpoints, RDS, S3, SQS, Lam
 docker-compose.yml          n8n (+ optional renderer, + local Postgres profile)
 deploy/n8n/boot.sh          idempotent EC2 bootstrap (Docker, secrets → .env, start n8n)
 loan_engine/                Python Lambdas: api/ (FastAPI + Mangum), ingest/, migrate/, common/ (validation, db, secrets, notifier)
-sql/                        001–006 migrations, R__grants.sql (least privilege), matching/ (Treasure Hunt SQL)
+sql/                        001–009 migrations, R__grants.sql (least privilege), matching/ (Treasure Hunt SQL)
 n8n/workflows/              the workflow exports A, A1, B, B1, C, E, E1 (generated)
 n8n/code/                   Code-node logic (tested with node --test)
 n8n/prompts/                versioned LLM prompts
@@ -655,92 +662,11 @@ PLAN.md                     the build plan + decision log
 
 ## 14. Extra: landing page, app and accounts (one product)
 
-One origin serves everything from the api Lambda (no extra hosting, no CORS):
-
-| Path | What | Built from |
-|---|---|---|
-| **`/`** | The **ClickPar Match** landing: the scroll story (globe → India → Surat, the problem, the team, Aarav's journey, the engine, proof) | [`web/`](web/) (Vite + TypeScript + three.js) |
-| **`/app/merchant`** (also `/app/`) | **Merchant console** (sign-in required to upload; the landing's top bar has *Merchant login*): **Workspace** with two tools, *Bulk upload* (CSV → the **live pipeline**: Upload → Validate and load → Workflow B → Workflow C, with rows and funnel charts forming as the run reports) and *Single lookup* (one customer's four numbers → their full results) → **Metrics** shown by default (your customers, matches, emails; lender products, pairs, classes, AI calls, proof) → **Analytics** of any dataset you pick (your uploads, or the 10,000-user reference) → **History & runs** behind expand rows: your uploads (View / Delete), matching runs, Workflows A/B/C/E with retries and errors | [`dashboard/`](dashboard/) (React + Tailwind) |
-| **`/app/check`** | One person's check: a 1-row CSV through the **same** pipeline (≈ 11 s live) | |
-| **`/app/dashboard`** | Results in order: **Top 5** (best pick first) → **Also eligible** → **May qualify** → **Not eligible, with the exact published rule missed** → **Quick tips** (exact score/income thresholds that open more lenders); **What if** (mirrors Workflow B's decision, tested on all 59 live products) and **Compare** (EMI, total interest) alongside | |
-| **`/app/account`** | **Accounts (Amazon Cognito)**: sign up with email + password, confirm with the emailed code, sign in from any device; saved checks; daily top picks | |
-| **`/upload`** | Redirects to the merchant console (uploads now need an account) | |
-
-**Accounts:** sign up with email + password (confirmed by an emailed code), **forgot / reset
-password** (emailed code), or **Continue with Google** (Cognito's OAuth 2.0 authorization-code
-flow with PKCE through the managed-login domain; Google's client secret is a Secrets Manager
-dynamic reference, never in the repo or the template; switched on with `GOOGLE_SIGN_IN=true`
-once `loan-engine/<stage>/google-oauth` exists). One account per verified email: a password
-sign-up and a Google sign-in with the same address resolve to the same account row, so uploads
-and saved checks follow the person. Cognito owns identity (passwords never reach our code or database). Its default
-email sender delivers verification codes to **any** address, which our own SES cannot do while
-in the sandbox. API Gateway's **JWT authorizer** verifies the Cognito ID token on every
-`/account` route before the Lambda runs (verified live: no token or a fake one → 401). Our
-database stores `accounts` (Cognito `sub`, email, daily-picks flag) and `account_profiles`
-(which checks an account saved; whoever saves a check first owns it, enforced by a UNIQUE key).
-Saving needs the results link, proving the person ran (or was emailed) that check.
-
-**From the email to the dashboard:** every notification email carries a **"View all N
-matches"** button: Workflow C asks the api Lambda to sign one 14-day link per user (verified
-live: check → matches → `email tokens signed count=1` → 1 email with the button).
-
-**Every account starts fresh:** an owned upload's customers get account-scoped ids (UUIDv5 of
-account + CSV `user_id`), so the same file uploaded by a second reviewer loads as new customers
-and runs the whole pipeline (match, proof, emails), while the same account re-uploading it is
-still idempotent. Signed in, the console shows only your uploads, metrics and analytics (an
-empty state before the first upload); *Reset my workspace* deletes all your uploads' customers
-(`DELETE /uploads`), and admins can clear every account (`DELETE /uploads?scope=all`).
-
-**Uploads belong to accounts (migration 008):** every `/uploads` route is behind the Cognito JWT
-authorizer; `POST /uploads` stamps the job with the account, and `GET /uploads`,
-`GET /uploads/{job_id}` and `DELETE /uploads/{job_id}` answer only for the owner (or an admin;
-anyone else gets a 404, so other merchants' uploads are not even confirmed to exist). Upload
-progress includes rejected raw lines, which can hold personal data: that is why it is
-owner-only. `GET /uploads` lists the account's uploads as records (file, time, rows new /
-changed / rejected, customers still in the database, matches, emails; counts only); each row
-has *View* (its own charts) and *Delete*. The default charts show the upload with the most users,
-and the runs list always includes the full-file reference run, so test runs or a reset never
-hide the measured Treasure Hunt numbers.
-
-**Data reset (start again without touching accounts):**
-
-| Who | Where | What is deleted | Route |
-|---|---|---|---|
-| A person | My matches → *Start over* | their own instant check (only instant checks; a link can never delete bulk-upload data) | `DELETE /me` (dashboard token) |
-| A signed-in account | Account → *Remove* / *Start fresh* | its saved checks: its own instant checks are deleted, a saved bulk-upload profile is only unlinked; the account and its settings stay | `DELETE /account/profiles[/{user_id}]` (Cognito) |
-| The uploading merchant | Merchant console → History & runs → **Your uploads** → *Delete* | that upload's customers, so the same file can be uploaded again and run as a new record (B matches, C emails) | `DELETE /uploads/{job_id}` (Cognito, owner) |
-| An admin | Same table (an admin sees every account's uploads) → *Delete*, or *Delete all uploaded users* | any upload's customers, or every customer that came from a CSV | `DELETE /uploads[/{job_id}]` (Cognito + `admin` group) |
-
-Matches, email records, preferences and account links go with each user by `ON DELETE
-CASCADE` (migration 006 adds the `user_id` indexes that keep this an index lookup per user).
-Lender products, `pipeline_runs` (the Treasure Hunt evidence) and the job rows are never
-deleted; a cleared upload is stamped `purged_at` and shows *data deleted* in recent runs. A job
-that is still loading, matching, or inside the 2-minute window in which Workflow C emails is
-refused (409), and its row is locked during the delete. Tested
-against real Postgres as the least-privilege `app_ingest` role
-(`test_data_reset_runs_as_app_ingest_and_keeps_history`).
-
-Admin membership is never self-service. After signing up in the app, add yourself once:
-
-```bash
-aws cognito-idp admin-add-user-to-group --region ap-southeast-2 --user-pool-id "$(scripts/stack-output.sh UserPoolId)" --username you@example.com --group-name admin
-```
-
-Sign out and in again so the new ID token carries the group.
-
-**Design:** monochrome studio chrome (true black, white type, grey hairlines, light Inter
-display, tracked JetBrains Mono for data labels, a white primary button) with colour only where
-it carries data: green eligible, amber may qualify, red not eligible, violet for the engine,
-blue / teal / indigo for who the customers are. Progressive disclosure: metrics and analytics
-by default, history, runs and retries behind expand rows; long result lists on *My matches*
-collapse with their counts visible. Documented in [`dashboard/DESIGN.md`](dashboard/DESIGN.md).
-No decorative motion: bars move only when their numbers change.
+Beyond the assignment, the same api Lambda serves a landing page (`/`), the **merchant console**
+(`/app/merchant`: the upload UI, plus analytics and a single-customer lookup), a borrower
+dashboard that the email's **View all N matches** button opens, and Cognito accounts (email +
+password or Google). Uploads require sign-in and belong to the account: each reviewer starts
+with an empty workspace and sees only their own uploads. Details, routes and the data-reset
+rules: [`docs/EXTRAS.md`](docs/EXTRAS.md).
 
 ![Borrower dashboard](docs/screenshots/15-dashboard.png)
-![Compare view](docs/screenshots/16-dashboard-compare.png)
-![Overview](docs/screenshots/17-engine.png)
-
-```bash
-scripts/build-frontends.sh   # web/ -> loan_engine/api/site/, dashboard/ -> loan_engine/api/static/
-serverless deploy            # ships both inside the api Lambda
-```
