@@ -27,7 +27,9 @@
         0,
         160
       ],
-      "id": "LoanEngineWfE001-01"
+      "id": "LoanEngineWfE001-01",
+      "notes": "Manual trigger replaying a sample payload through the same nodes.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -40,7 +42,9 @@
         220,
         160
       ],
-      "id": "LoanEngineWfE001-02"
+      "id": "LoanEngineWfE001-02",
+      "notes": "A realistic n8n error payload for the drill.",
+      "notesInFlow": true
     },
     {
       "parameters": {},
@@ -51,7 +55,9 @@
         0,
         -40
       ],
-      "id": "LoanEngineWfE001-03"
+      "id": "LoanEngineWfE001-03",
+      "notes": "n8n starts E when any production execution of A, A1, B, B1 or C fails.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -64,7 +70,9 @@
         440,
         40
       ],
-      "id": "LoanEngineWfE001-04"
+      "id": "LoanEngineWfE001-04",
+      "notes": "errors.js: one record from both n8n payload shapes; never throws.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -90,7 +98,9 @@
       },
       "retryOnFail": true,
       "maxTries": 3,
-      "waitBetweenTries": 3000
+      "waitBetweenTries": 3000,
+      "notes": "Stores it in workflow_errors; alert at most once per workflow per 30 min.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -123,7 +133,9 @@
         880,
         40
       ],
-      "id": "LoanEngineWfE001-06"
+      "id": "LoanEngineWfE001-06",
+      "notes": "Rate limit, so a failing schedule cannot drain the SES quota.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -156,7 +168,9 @@
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 2000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Alert to the test alias; a failed alert never fails the handler.",
+      "notesInFlow": true
     }
   ],
   "connections": {

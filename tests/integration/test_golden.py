@@ -2,8 +2,8 @@
 
 Builds a fresh database, ingests the pinned synthetic 10k file (plus a few bad rows) through
 the production ingest code, runs Workflow B's SQL in order (claim -> Stage 1+2 -> statistics
--> Stage 3 -> brute-force proof) and compares an order-independent fingerprint with
-tests/fixtures/golden_fingerprint.json.
+-> pre-write proof -> Stage 3 -> post-write proof) and compares an order-independent
+fingerprint with tests/fixtures/golden_fingerprint.json.
 
 The fingerprint may only change in a commit that intends to change outcomes, and that commit
 must say why. To regenerate it:
@@ -28,6 +28,7 @@ from tests.integration.matching_setup import (
     ingest_csv,
     load_products_and_rules,
     run_sql,
+    sql,
     stage3,
 )
 from tests.synthetic_users import synthetic_users_csv
@@ -74,6 +75,9 @@ def match(db: psycopg.Connection, job_id: object) -> dict:
     """Workflow B1 for one upload, in production order."""
     run_id = claim(db, job_id)
     funnel = run_sql(db, "stage1_classes.sql", run_id, PROMPT_VERSION)
+    db.execute((ROOT / "sql" / "matching" / "refresh_stats.sql").read_text())
+    prewrite = run_sql(db, "prewrite_check.sql", run_id, PROMPT_VERSION)
+    assert prewrite["prewrite_ok"] is True and prewrite["users_without_class"] == 0
     expand = stage3(db, run_id)
     proof = run_sql(db, "brute_force_check.sql", run_id, PROMPT_VERSION)
     return {"funnel": funnel, "expand": expand, "proof": proof}
@@ -186,3 +190,42 @@ def test_independent_recompute_matches_the_engine(db, first_upload):
     for row in chart:
         mine = independent[row["lender"]]
         assert (mine["users"], mine["eligible_users"]) == (row["users"], row["eligible_users"])
+
+
+def test_workflow_c_records_each_send_so_a_rerun_never_emails_twice(db, first_upload):
+    """Workflow C's SQL: crash after 2 of 5 sends, re-run -> only 3 more; finish is idempotent."""
+    _, result = first_upload
+    run_id = str(result["funnel"]["run_id"])
+
+    def users_to_email() -> list[str]:
+        cur = db.execute(sql("notify_users.sql"), {"p1": run_id, "p2": 5})
+        return [r[1] for r in cur.fetchall()]
+
+    def record(user_id: str, status: str) -> dict:
+        msg = "ses-1" if status == "sent" else ""
+        err = "" if status == "sent" else "throttled"
+        return run_sql(
+            db, "notify_record_send.sql", run_id, user_id, "a+one@gmail.com", status, msg, err
+        )
+
+    first = users_to_email()
+    assert len(first) == 5
+    assert record(first[0], "sent")["matches_marked"] > 0
+    record(first[1], "sent")
+    # n8n dies here. The re-run picks only the remaining quota, and never the two emailed users.
+    again = users_to_email()
+    assert len(again) == 3 and not set(again) & set(first[:2])
+    failed = record(again[0], "failed")
+    assert (failed["recorded"], failed["matches_marked"]) == (1, 0)  # failed: retried later
+
+    with_new = db.execute(
+        "SELECT count(DISTINCT user_id) FROM notifications WHERE run_id = %s", (run_id,)
+    ).fetchone()[0]
+    done = run_sql(db, "notify_finish.sql", run_id)
+    assert (done["emails_sent"], done["emails_failed"]) == (2, 1)
+    total_users = result["funnel"]["users_in"]
+    assert done["emails_skipped_demo"] == total_users - with_new
+    # Running the finish step again changes nothing.
+    again_done = run_sql(db, "notify_finish.sql", run_id)
+    assert again_done["notification_rows"] == 0
+    assert again_done["emails_skipped_demo"] == done["emails_skipped_demo"]

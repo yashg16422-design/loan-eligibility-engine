@@ -27,7 +27,9 @@
         0,
         200
       ],
-      "id": "LoanEngineWfB001-01"
+      "id": "LoanEngineWfB001-01",
+      "notes": "Manual trigger: matches the newest unmatched upload.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -51,7 +53,9 @@
           "name": "Ingest webhook secret"
         }
       },
-      "webhookId": "6f1c0b2e-6b53-4c1e-9a7d-6f3c2a1b0e01"
+      "webhookId": "6f1c0b2e-6b53-4c1e-9a7d-6f3c2a1b0e01",
+      "notes": "Called by the ingest Lambda after COMMIT; Header Auth; answers at once.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -71,7 +75,9 @@
         0,
         60
       ],
-      "id": "LoanEngineWfB001-03"
+      "id": "LoanEngineWfB001-03",
+      "notes": "Recovery: picks up jobs whose webhook was missed or whose run died.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -84,7 +90,9 @@
         0,
         360
       ],
-      "id": "LoanEngineWfB001-04"
+      "id": "LoanEngineWfB001-04",
+      "notes": "Re-match every user against new or changed products.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -97,7 +105,9 @@
         220,
         -120
       ],
-      "id": "LoanEngineWfB001-05"
+      "id": "LoanEngineWfB001-05",
+      "notes": "Validates the body: a non-UUID job_id never reaches SQL.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -118,7 +128,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "sweeper.sql: missed, stale or failed jobs (max 3 tries).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -131,7 +143,9 @@
         220,
         360
       ],
-      "id": "LoanEngineWfB001-07"
+      "id": "LoanEngineWfB001-07",
+      "notes": "Turns A's product ids into a product-mode request.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -154,7 +168,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Atomic claim: a duplicate webhook racing the sweeper can never double-match.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -177,7 +193,9 @@
         120
       ],
       "id": "LoanEngineWfB001-09",
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Runs the Treasure Hunt for this run (sub-workflow B1).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -210,7 +228,9 @@
         880,
         120
       ],
-      "id": "LoanEngineWfB001-10"
+      "id": "LoanEngineWfB001-10",
+      "notes": "A failed or stopped B1 run marks the job FAILED instead of hanging.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -233,7 +253,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Visible in the upload UI; the sweeper retries it later.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -256,7 +278,9 @@
         20
       ],
       "id": "LoanEngineWfB001-12",
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Emails users with new matches (sub-workflow C).",
+      "notesInFlow": true
     }
   ],
   "connections": {

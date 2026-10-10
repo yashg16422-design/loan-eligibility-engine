@@ -506,3 +506,29 @@ def test_email_previews_follow_workflow_c_ranking(db):
         lenders = [x["lender"] for x in p["picks"]]
         assert len(lenders) <= 5 and len(lenders) == len(set(lenders))
         assert p["lenders_total"] >= len(lenders) and p["matches_total"] >= p["lenders_total"]
+
+
+def test_prewrite_proof_stops_a_wrong_decision_before_any_match_is_written(db):
+    """A corrupted class decision is caught BEFORE Stage 3: matches stay exactly as they were."""
+    before = db.execute("SELECT count(*), max(match_id) FROM matches").fetchone()
+    run = new_run(db)
+    run_sql(db, "stage1_classes.sql", run, PROMPT_VERSION)
+    clean = run_sql(db, "prewrite_check.sql", run, PROMPT_VERSION)
+    assert clean["prewrite_ok"] is True and clean["mismatches"] == 0
+    assert clean["naive_matches"] == clean["class_matches"]
+
+    # Flip one eligible class decision to not_eligible: every user in that class loses a match.
+    flipped = db.execute(
+        "UPDATE match_pairs SET tier = 'not_eligible' WHERE (run_id, class_id, product_id) = "
+        "(SELECT run_id, class_id, product_id FROM match_pairs mp JOIN match_classes mc "
+        "USING (run_id, class_id) WHERE mp.run_id = %s AND mp.tier = 'eligible' AND mc.users > 0 "
+        "LIMIT 1) RETURNING class_id",
+        (run,),
+    ).fetchone()
+    assert flipped is not None
+    caught = run_sql(db, "prewrite_check.sql", run, PROMPT_VERSION)
+    assert caught["prewrite_ok"] is False and caught["mismatches"] > 0
+    assert db.execute("SELECT count(*), max(match_id) FROM matches").fetchone() == before
+    assert db.execute(
+        "SELECT prewrite_ok FROM pipeline_runs WHERE run_id = %s", (run,)
+    ).fetchone() == (False,)

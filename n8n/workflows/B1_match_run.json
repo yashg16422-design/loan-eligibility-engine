@@ -5,7 +5,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## B1 · The Optimization Treasure Hunt\n**Stage 0** · Nova Pro compiles each product's free-text criteria ONCE into checkable rules (cached by text hash) → LLM cost scales with distinct criteria texts, not users.\n**Stage 1+2** · SQL equivalence classes: every threshold is a cut point, users with identical intervals form one class → decide class x product.\n**Stage 3** · expand to users, fit score, diff vs active matches (one transaction, advisory lock).\n**Proof** · naive per-user re-evaluation must give 0 mismatches.",
+        "content": "## B1 · The Optimization Treasure Hunt\n**Stage 0** · Nova Pro compiles each product's free-text criteria ONCE into checkable rules (cached by text hash) → LLM cost scales with distinct criteria texts, not users.\n**Stage 1+2** · SQL equivalence classes: every threshold is a cut point, users with identical intervals form one class → decide class x product.\n**Stage 3** · expand to users, fit score, diff vs active matches (one transaction, advisory lock).\n**Proofs** · a naive per-user re-evaluation must give 0 mismatches twice: BEFORE Stage 3 writes (class decisions) and AFTER (stored matches). A failure stops the run.",
         "width": 620,
         "height": 320
       },
@@ -29,7 +29,9 @@
         0,
         0
       ],
-      "id": "LoanEngineWfB101-01"
+      "id": "LoanEngineWfB101-01",
+      "notes": "Called by B with the claimed run_id.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -53,7 +55,9 @@
           "name": "RDS app (n8n_workflows)"
         }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "notes": "Distinct criteria texts not yet compiled (cache misses only).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -66,7 +70,9 @@
         440,
         0
       ],
-      "id": "LoanEngineWfB101-03"
+      "id": "LoanEngineWfB101-03",
+      "notes": "10 texts per Nova call; usually 0 after the first run.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -99,7 +105,9 @@
         660,
         0
       ],
-      "id": "LoanEngineWfB101-04"
+      "id": "LoanEngineWfB101-04",
+      "notes": "Skips the LLM entirely when every text is cached.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -112,7 +120,9 @@
         880,
         -160
       ],
-      "id": "LoanEngineWfB101-05"
+      "id": "LoanEngineWfB101-05",
+      "notes": "Asks Nova Pro to turn free-text criteria into checkable rules.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -150,7 +160,9 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Bedrock Converse, temperature 0; LLM cost scales with texts, not users.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -163,7 +175,9 @@
         1320,
         -160
       ],
-      "id": "LoanEngineWfB101-07"
+      "id": "LoanEngineWfB101-07",
+      "notes": "Each rule re-checked against its source text; failures become requirements.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -186,7 +200,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Caches rules by text hash; records calls, tokens, cost on the run.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -209,7 +225,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Cut points → equivalence classes; decide class x product in SQL.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -231,7 +249,84 @@
           "name": "RDS app (n8n_workflows)"
         }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "notes": "ANALYZE the bulk-written tables so Stage 3 gets a good plan.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow B · Pre-write proof: runs AFTER Stage 1+2 and BEFORE Stage 3. Params: $1 run_id,\n-- $2 prompt_version.\n--\n-- Re-decides EVERY user x product pair the naive way (real values, no classes) and compares\n-- it with the class decisions expanded to users through the same floors Stage 3 will use\n-- (the run's cuts -> match_classes -> match_pairs). It reads `matches` never and writes only\n-- pipeline_runs.prewrite_ok, so a failure stops the run before any match is written.\n-- A user who maps to no class (impossible by construction) counts as a mismatch for every\n-- product they should match.\nWITH run AS (\n    SELECT * FROM pipeline_runs WHERE run_id = $1::uuid\n), prods AS (\n    SELECT p.*, r.rules AS residual_rules, r.requirements AS residual_requirements\n    FROM loan_products p\n    LEFT JOIN criteria_rules r\n           ON r.prompt_version = $2\n          AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex')\n    WHERE p.is_active\n      AND ((SELECT mode FROM run) = 'upload' OR p.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[])))\n), usr AS (\n    SELECT u.* FROM users u\n    WHERE (SELECT mode FROM run) = 'products' OR u.upload_job_id = (SELECT job_id FROM run)\n), naive AS (  -- every user x every product, decided on the user's REAL values\n    SELECT u.user_id, p.product_id,\n        CASE\n            WHEN NOT ((p.min_monthly_income IS NULL OR u.monthly_income >= p.min_monthly_income)\n                  AND (p.min_credit_score   IS NULL OR u.credit_score  >= p.min_credit_score)\n                  AND (p.max_credit_score   IS NULL OR u.credit_score  <= p.max_credit_score)\n                  AND (p.min_age            IS NULL OR u.age           >= p.min_age)\n                  AND (p.max_age            IS NULL OR u.age           <= p.max_age)\n                  AND (p.employment_types   IS NULL OR u.employment_status = ANY (p.employment_types)))\n                THEN 'fails_hard_criteria'\n            WHEN p.other_criteria_text IS NULL THEN 'eligible'\n            WHEN p.residual_rules IS NULL THEN 'conditional'\n            WHEN NOT (SELECT coalesce(bool_and(CASE\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '>=' THEN u.monthly_income >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '<=' THEN u.monthly_income <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '>=' THEN u.credit_score  >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '<=' THEN u.credit_score  <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '>=' THEN u.age           >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '<=' THEN u.age           <= (x->>'value')::numeric\n                        ELSE true END), true)\n                      FROM jsonb_array_elements(coalesce(p.residual_rules, '[]'::jsonb)) AS x\n                      WHERE x->>'applies_to' IN ('any', u.employment_status))\n                THEN 'not_eligible'\n            WHEN jsonb_array_length(p.residual_requirements) > 0 THEN 'conditional'\n            ELSE 'eligible' END AS tier\n    FROM usr u CROSS JOIN prods p\n), naive_kept AS (\n    SELECT user_id, product_id, tier FROM naive WHERE tier IN ('eligible', 'conditional')\n), user_class AS (  -- the same floors Stage 3 uses\n    SELECT u.user_id, mc.class_id\n    FROM usr u\n    CROSS JOIN LATERAL (\n        SELECT coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'income' FROM run)) c WHERE c::int <= u.monthly_income), -1) AS fi,\n               coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'score' FROM run)) c WHERE c::int <= u.credit_score), -1) AS fs,\n               coalesce((SELECT max(c::int) FROM jsonb_array_elements_text((SELECT cuts->'age' FROM run)) c WHERE c::int <= u.age), -1) AS fa\n    ) f\n    LEFT JOIN match_classes mc ON mc.run_id = $1::uuid AND mc.income_floor = f.fi AND mc.score_floor = f.fs\n                              AND mc.age_floor = f.fa AND mc.employment_status = u.employment_status\n), expanded AS (  -- what Stage 3 would write\n    SELECT uc.user_id, mp.product_id, mp.tier\n    FROM user_class uc\n    JOIN match_pairs mp ON mp.run_id = $1::uuid AND mp.class_id = uc.class_id\n                       AND mp.tier IN ('eligible', 'conditional')\n    WHERE mp.product_id IN (SELECT product_id FROM prods)\n), diff AS (\n    (SELECT * FROM naive_kept EXCEPT SELECT * FROM expanded)\n    UNION ALL\n    (SELECT * FROM expanded EXCEPT SELECT * FROM naive_kept)\n)\nUPDATE pipeline_runs SET prewrite_ok = ((SELECT count(*) FROM diff) = 0)\nWHERE run_id = $1::uuid\nRETURNING run_id,\n    (SELECT count(*) FROM naive) AS pairs_checked,\n    (SELECT count(*) FROM naive_kept) AS naive_matches,\n    (SELECT count(*) FROM expanded) AS class_matches,\n    (SELECT count(*) FROM user_class WHERE class_id IS NULL) AS users_without_class,\n    (SELECT count(*) FROM diff) AS mismatches,\n    prewrite_ok;",
+        "options": {
+          "queryReplacement": "={{ [ $('From B (run)').first().json.run_id, 'compile_v1' ] }}"
+        }
+      },
+      "name": "Pre-write proof",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2200,
+        0
+      ],
+      "id": "LoanEngineWfB101-11",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Naive per-user check of the class decisions BEFORE any match is written.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.prewrite_ok === true && Number($json.mismatches) === 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Pre-write passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        0
+      ],
+      "id": "LoanEngineWfB101-12",
+      "notes": "Any mismatch stops the run here: zero matches written.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nconst p = $input.first().json;\nthrow new Error(`Pre-write proof failed: ${p.mismatches} of ${p.pairs_checked} pairs differ from the naive check (${p.users_without_class} users without a class). No match was written.`);\n"
+      },
+      "name": "Stop: pre-write proof failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        200
+      ],
+      "id": "LoanEngineWfB101-13",
+      "notes": "Throws, so B marks the job failed and C never runs.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -245,16 +340,18 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2200,
+        2640,
         0
       ],
-      "id": "LoanEngineWfB101-11",
+      "id": "LoanEngineWfB101-14",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Expand to users, fit score, diff vs active matches (one transaction).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -268,21 +365,23 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2420,
+        2860,
         0
       ],
-      "id": "LoanEngineWfB101-12",
+      "id": "LoanEngineWfB101-15",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Re-checks every stored pair against the naive evaluation.",
+      "notesInFlow": true
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE pipeline_runs SET status = 'done', finished_at = now(),\n       rules_compiled = coalesce(rules_compiled, 0), llm_calls = coalesce(llm_calls, 0),\n       llm_cache_hits = residual_texts - coalesce(rules_compiled, 0),\n       llm_input_tokens = coalesce(llm_input_tokens, 0), llm_output_tokens = coalesce(llm_output_tokens, 0),\n       llm_cost_usd_est = coalesce(llm_cost_usd_est, 0)\nWHERE run_id = $1::uuid\nRETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, classes,\n          class_product_pairs, pairs_after_sql, rule_decided, llm_candidates, not_eligible_pairs,\n          residual_texts, rules_compiled, llm_cache_hits, llm_calls, llm_input_tokens, llm_output_tokens,\n          llm_cost_usd_est, matches_new, matches_superseded, matches_unchanged, correctness_ok",
+        "query": "UPDATE pipeline_runs SET status = 'done', finished_at = now(),\n       rules_compiled = coalesce(rules_compiled, 0), llm_calls = coalesce(llm_calls, 0),\n       llm_cache_hits = residual_texts - coalesce(rules_compiled, 0),\n       llm_input_tokens = coalesce(llm_input_tokens, 0), llm_output_tokens = coalesce(llm_output_tokens, 0),\n       llm_cost_usd_est = coalesce(llm_cost_usd_est, 0)\nWHERE run_id = $1::uuid\nRETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, classes,\n          class_product_pairs, pairs_after_sql, rule_decided, llm_candidates, not_eligible_pairs,\n          residual_texts, rules_compiled, llm_cache_hits, llm_calls, llm_input_tokens, llm_output_tokens,\n          llm_cost_usd_est, matches_new, matches_superseded, matches_unchanged, prewrite_ok,\n          correctness_ok",
         "options": {
           "queryReplacement": "={{ [ $('From B (run)').first().json.run_id ] }}"
         }
@@ -291,16 +390,18 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        2860,
+        3300,
         0
       ],
-      "id": "LoanEngineWfB101-13",
+      "id": "LoanEngineWfB101-16",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Marks the run done and returns every Treasure Hunt counter.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -330,10 +431,12 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        2640,
+        3080,
         0
       ],
-      "id": "LoanEngineWfB101-14"
+      "id": "LoanEngineWfB101-17",
+      "notes": "0 mismatches required before the run is done.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -343,23 +446,27 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2860,
+        3300,
         200
       ],
-      "id": "LoanEngineWfB101-15"
+      "id": "LoanEngineWfB101-18",
+      "notes": "Throws: nothing marked done, nobody emailed, E alerts.",
+      "notesInFlow": true
     },
     {
       "parameters": {
-        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// One item that reads like the README table: how much work each stage removed, and the proof.\nconst r = $input.first().json;\nconst proof = $('Correctness proof').first().json;\nconst ratio = (a, b) => (a && b ? Math.round((Number(b) / Number(a)) * 10000) / 100 : null);\nreturn [{ json: {\n  run_id: r.run_id, mode: r.mode, job_id: r.job_id,\n  funnel: {\n    naive_pairs: r.naive_pairs,\n    pairs_passing_published_rules: r.pairs_after_sql,\n    equivalence_classes: r.classes,\n    class_product_decisions: r.class_product_pairs,\n    decisions_as_share_of_naive_pct: ratio(r.naive_pairs, r.class_product_pairs),\n    llm_calls: r.llm_calls, llm_cache_hits: r.llm_cache_hits, llm_cost_usd_est: r.llm_cost_usd_est,\n    matches_new: r.matches_new, matches_superseded: r.matches_superseded, matches_unchanged: r.matches_unchanged,\n  },\n  proof: { pairs_checked: proof.naive_pairs_evaluated, mismatches: proof.mismatches, correctness_ok: proof.correctness_ok },\n} }];\n"
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// One item that reads like the README table: how much work each stage removed, and the proof.\nconst r = $input.first().json;\nconst proof = $('Correctness proof').first().json;\nconst pre = $('Pre-write proof').first().json;\nconst ratio = (a, b) => (a && b ? Math.round((Number(b) / Number(a)) * 10000) / 100 : null);\nreturn [{ json: {\n  run_id: r.run_id, mode: r.mode, job_id: r.job_id,\n  funnel: {\n    naive_pairs: r.naive_pairs,\n    pairs_passing_published_rules: r.pairs_after_sql,\n    equivalence_classes: r.classes,\n    class_product_decisions: r.class_product_pairs,\n    decisions_as_share_of_naive_pct: ratio(r.naive_pairs, r.class_product_pairs),\n    llm_calls: r.llm_calls, llm_cache_hits: r.llm_cache_hits, llm_cost_usd_est: r.llm_cost_usd_est,\n    matches_new: r.matches_new, matches_superseded: r.matches_superseded, matches_unchanged: r.matches_unchanged,\n  },\n  proof: {\n    before_write: { pairs_checked: pre.pairs_checked, mismatches: pre.mismatches, ok: pre.prewrite_ok },\n    after_write: { pairs_checked: proof.naive_pairs_evaluated, mismatches: proof.mismatches, ok: proof.correctness_ok },\n  },\n} }];\n"
       },
       "name": "Treasure Hunt funnel",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3080,
+        3520,
         0
       ],
-      "id": "LoanEngineWfB101-16"
+      "id": "LoanEngineWfB101-19",
+      "notes": "One item: pairs → classes → decisions → LLM calls → matches → mismatches.",
+      "notesInFlow": true
     }
   ],
   "connections": {
@@ -455,7 +562,18 @@
       "main": [
         [
           {
-            "node": "Stage 3 · expand, score, diff",
+            "node": "Pre-write proof",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-write proof": {
+      "main": [
+        [
+          {
+            "node": "Pre-write passed?",
             "type": "main",
             "index": 0
           }
@@ -489,6 +607,24 @@
         [
           {
             "node": "Treasure Hunt funnel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-write passed?": {
+      "main": [
+        [
+          {
+            "node": "Stage 3 · expand, score, diff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: pre-write proof failed",
             "type": "main",
             "index": 0
           }
@@ -540,7 +676,7 @@
     "errorWorkflow": "LoanEngineWfE001"
   },
   "meta": {
-    "description": "Stage 0 compile criteria (LLM, cached) → Stage 1+2 SQL classes → stats → Stage 3 expand/score/diff → proof."
+    "description": "Stage 0 compile criteria (LLM, cached) → Stage 1+2 SQL classes → stats → pre-write proof → Stage 3 expand/score/diff → post-write proof."
   },
   "pinData": {}
 }

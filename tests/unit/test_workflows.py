@@ -147,3 +147,37 @@ def test_b1_correctness_proof_gates_the_run():
     stop = next(n for n in b1["nodes"] if n["name"] == "Stop: proof failed")
     assert "throw new Error" in stop["parameters"]["jsCode"]
     assert out("Finish run", 0) == ["Treasure Hunt funnel"]
+
+
+def test_b1_prewrite_proof_runs_before_any_match_is_written():
+    """The class decisions are checked BEFORE Stage 3; a failure throws and Stage 3 never runs."""
+    b1 = WORKFLOWS["B1_match_run.json"]
+    out = lambda name, i: [e["node"] for e in b1["connections"][name]["main"][i]]  # noqa: E731
+    assert out("Refresh planner stats", 0) == ["Pre-write proof"]
+    assert out("Pre-write proof", 0) == ["Pre-write passed?"]
+    assert out("Pre-write passed?", 0) == ["Stage 3 · expand, score, diff"]
+    assert out("Pre-write passed?", 1) == ["Stop: pre-write proof failed"]
+    stop = next(n for n in b1["nodes"] if n["name"] == "Stop: pre-write proof failed")
+    assert "throw new Error" in stop["parameters"]["jsCode"]
+    pre = next(n for n in b1["nodes"] if n["name"] == "Pre-write proof")
+    assert "FROM matches" not in pre["parameters"]["query"]  # it never reads or writes matches
+    # Stage 3 is reachable ONLY through the pre-write gate.
+    into_stage3 = [
+        src
+        for src, conns in b1["connections"].items()
+        for outs in conns["main"]
+        for e in outs
+        if e["node"] == "Stage 3 · expand, score, diff"
+    ]
+    assert into_stage3 == ["Pre-write passed?"]
+
+
+@pytest.mark.parametrize("wf", WORKFLOWS.values(), ids=WORKFLOWS.keys())
+def test_every_node_has_a_short_note_on_the_canvas(wf):
+    """Each work node explains itself on the canvas in one line (notes shown in flow)."""
+    for node in wf["nodes"]:
+        if node["type"] == "n8n-nodes-base.stickyNote":
+            continue
+        note = node.get("notes", "")
+        assert note and len(note) <= 120, f"{wf['name']} > {node['name']}: note missing or too long"
+        assert node.get("notesInFlow") is True

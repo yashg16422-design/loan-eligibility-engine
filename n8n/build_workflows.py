@@ -44,6 +44,7 @@ TEST_ALIASES = [
     "yashg16422+three@gmail.com",
 ]
 DEMO_MAX_EMAILS = 5  # SES sandbox: 200/day, 1/s. The rest are recorded as skipped_demo.
+CRAWL_DROP_ALERT_PCT = 30  # Workflow A alerts when a channel's usable pages drop by more than this
 COMPILE_PROMPT_VERSION = "compile_v1"
 # Bedrock list price used for the cost ESTIMATE in pipeline_runs (USD per 1k tokens).
 NOVA_PRO_USD_PER_1K = {"input": 0.0008, "output": 0.0032}
@@ -73,6 +74,120 @@ WEBHOOK_AUTH = {
         "id": os.environ.get("N8N_CRED_WEBHOOK", "qaXP0OsyRtnbitga"),
         "name": "Ingest webhook secret",
     }
+}
+
+
+# One line under every node on the canvas (n8n `notes` + `notesInFlow`): what it does and why.
+# tests/unit/test_workflows.py checks that every work node has one, at most 120 characters.
+NODE_NOTES: dict[str, dict[str, str]] = {
+    WF_A: {
+        "Every day 06:00 IST": "The assignment's schedule trigger: one crawl a day.",
+        "Run now (demo)": "Manual trigger for demos; same path as the schedule.",
+        "Start run": "New crawl run_id + the enabled crawl_sources rows (sites are config, not code).",
+        "Origins to check": "One item per site, so each robots.txt is fetched once.",
+        "Fetch robots.txt": "GET /robots.txt per site; errors never stop the crawl.",
+        "Robots rules": "RFC 9309 parser (robots.js) decides every URL before it is fetched.",
+        "Hub sources": "Comparison-site hub pages that list lenders.",
+        "Fetch hub pages": "GET each hub page (1 request/s).",
+        "Discover pages": "Lender links from hubs + direct bank pages, interleaved round-robin across sites.",
+        "robots.txt allows?": "Disallowed pages are logged and never fetched.",
+        "Log robots-disallowed": "Records each skipped URL as robots_disallowed in crawl_runs.",
+        "Every 5 pages": "Loop: batches of 5 pages go to A1, so results are written as the crawl goes.",
+        "Batch → one item": "Packs the 5 pages into one item for the sub-workflow call.",
+        "Process batch (A1)": "Fetch, isolate, hash, LLM only if changed, verify, upsert (sub-workflow A1).",
+        "Run summary": "Collects the batch results into one item for Finish run.",
+        "Finish run": "Deactivates products gone from healthy pages; counts pages, products, tokens.",
+        "Products changed?": "New or changed products are re-matched against every user.",
+        "Re-match changed products (B)": "Calls B in product mode with the changed product ids.",
+        "Crawl health": "Usable pages per channel vs the previous crawl: a >30% drop means a site changed.",
+        "Crawl degraded?": "Alert at most once a day; the drop is always logged in workflow_errors.",
+        "Email crawl alert (SES)": "Tells the operator which channel degraded (test alias only).",
+    },
+    WF_A1: {
+        "From A (batch)": "Called by A with up to 5 pages and the crawl run_id.",
+        "Expand pages": "One item per page.",
+        "Fetch page (1 req/s)": "Polite GET (browser-compatible UA, 1 req/s, retries); optional renderer.",
+        "Classify fetch": "ok / blocked (403, 429, challenge: skipped, never bypassed) / failed.",
+        "Live fetch failed?": "Failed pages fall back to their saved S3 snapshot.",
+        "S3 fixture": "Reads the page snapshot from S3 (the instance role, no keys).",
+        "Use fixture": "Marks the page as fixture so the run stays honest about its source.",
+        "Pages with HTML": "Joins live and fixture pages back into one stream.",
+        "Isolate sections": "Scores candidate windows to find the eligibility and rate sections.",
+        "Hash sections": "SHA-256 of the sections + prompt/normalizer version.",
+        "URLs → one query": "One lookup for all pages instead of one query per page.",
+        "Known hashes": "Last stored hash per page.",
+        "Mark changed": "Compares hashes: unchanged pages skip the LLM entirely.",
+        "Changed?": "Only changed pages go to Nova Pro.",
+        "Build Nova request": "ONE batched Converse request for all changed pages of the batch.",
+        "Nova Pro (Converse)": "Amazon Bedrock Nova Pro, temperature 0, via the Assume Role credential.",
+        "Verify + normalize": "Every criterion must quote the page; numbers parsed deterministically.",
+        "Upsert products + log pages": "One SQL statement per batch + a crawl_runs row per page.",
+        "Unchanged → bookkeeping": "No LLM: prepares last_seen updates for unchanged pages.",
+        "Touch last_seen + log pages": "Marks products still seen; logs pages as unchanged.",
+    },
+    WF_B: {
+        "Run now (demo)": "Manual trigger: matches the newest unmatched upload.",
+        "Ingest complete (webhook)": "Called by the ingest Lambda after COMMIT; Header Auth; answers at once.",
+        "Sweeper every 10 min": "Recovery: picks up jobs whose webhook was missed or whose run died.",
+        "From A (product mode)": "Re-match every user against new or changed products.",
+        "Webhook → request": "Validates the body: a non-UUID job_id never reaches SQL.",
+        "Jobs waiting for matching": "sweeper.sql: missed, stale or failed jobs (max 3 tries).",
+        "Products → request": "Turns A's product ids into a product-mode request.",
+        "Claim job + start run": "Atomic claim: a duplicate webhook racing the sweeper can never double-match.",
+        "Match (B1)": "Runs the Treasure Hunt for this run (sub-workflow B1).",
+        "Matching failed?": "A failed or stopped B1 run marks the job FAILED instead of hanging.",
+        "Mark job failed": "Visible in the upload UI; the sweeper retries it later.",
+        "Notify users (C)": "Emails users with new matches (sub-workflow C).",
+    },
+    WF_B1: {
+        "From B (run)": "Called by B with the claimed run_id.",
+        "Criteria to compile": "Distinct criteria texts not yet compiled (cache misses only).",
+        "Batches of 10 texts": "10 texts per Nova call; usually 0 after the first run.",
+        "Anything to compile?": "Skips the LLM entirely when every text is cached.",
+        "Build compile request": "Asks Nova Pro to turn free-text criteria into checkable rules.",
+        "Nova Pro · compile": "Bedrock Converse, temperature 0; LLM cost scales with texts, not users.",
+        "Validate compiled rules": "Each rule re-checked against its source text; failures become requirements.",
+        "Save compiled rules": "Caches rules by text hash; records calls, tokens, cost on the run.",
+        "Stage 1+2 · classes & decisions": "Cut points → equivalence classes; decide class x product in SQL.",
+        "Refresh planner stats": "ANALYZE the bulk-written tables so Stage 3 gets a good plan.",
+        "Pre-write proof": "Naive per-user check of the class decisions BEFORE any match is written.",
+        "Pre-write passed?": "Any mismatch stops the run here: zero matches written.",
+        "Stop: pre-write proof failed": "Throws, so B marks the job failed and C never runs.",
+        "Stage 3 · expand, score, diff": "Expand to users, fit score, diff vs active matches (one transaction).",
+        "Correctness proof": "Re-checks every stored pair against the naive evaluation.",
+        "Proof passed?": "0 mismatches required before the run is done.",
+        "Stop: proof failed": "Throws: nothing marked done, nobody emailed, E alerts.",
+        "Finish run": "Marks the run done and returns every Treasure Hunt counter.",
+        "Treasure Hunt funnel": "One item: pairs → classes → decisions → LLM calls → matches → mismatches.",
+    },
+    WF_C: {
+        "Run now (latest run)": "Manual trigger for the newest run with new matches.",
+        "Latest run with new matches": "Finds that run.",
+        "From B (run)": "Called by B after a successful match run.",
+        "Users to email": "Users with new matches: top 5 picks, one per lender, best platform.",
+        "Sign dashboard links": "One call to the api Lambda: a signed 14-day dashboard link per user.",
+        "Compose emails": "email.js: personal HTML + text; recipient guarded to the test aliases.",
+        "One email at a time": "Loop: one email per iteration.",
+        "Send via AWS SES": "The AWS SES node with the Assume Role credential (no keys).",
+        "Delivery result": "SES message id, or the error.",
+        "Record this send": "Stored immediately: a crash mid-loop never emails anyone twice.",
+        "1 email / second (SES sandbox)": "Paces the loop for the SES sandbox rate.",
+        "All results -> one item": "Collapses the loop output so the summary runs once.",
+        "Record notifications": "Everyone else is recorded as skipped_demo; counters set from the table.",
+    },
+    WF_E: {
+        "Drill: simulate an error": "Manual trigger replaying a sample payload through the same nodes.",
+        "Sample error payload": "A realistic n8n error payload for the drill.",
+        "On workflow error": "n8n starts E when any production execution of A, A1, B, B1 or C fails.",
+        "Summarize error": "errors.js: one record from both n8n payload shapes; never throws.",
+        "Record error": "Stores it in workflow_errors; alert at most once per workflow per 30 min.",
+        "Alert due?": "Rate limit, so a failing schedule cannot drain the SES quota.",
+        "Email alert (SES)": "Alert to the test alias; a failed alert never fails the handler.",
+    },
+    WF_E1: {
+        "Run drill": "Scheduled while the drill is published (scripts/n8n-workflows.sh drill).",
+        "Fail on purpose": "Throws, to prove that Workflow E records and alerts.",
+    },
 }
 
 
@@ -160,6 +275,11 @@ class Flow:
         )
 
     def build(self) -> dict[str, Any]:
+        notes = NODE_NOTES.get(self.wf_id, {})
+        for node in self.nodes:
+            if node["type"] != "n8n-nodes-base.stickyNote" and node["name"] in notes:
+                node["notes"] = notes[node["name"]]
+                node["notesInFlow"] = True
         return {
             "id": self.wf_id,
             "name": self.name,
@@ -680,9 +800,10 @@ def workflow_a() -> dict:
         "1. Sources come from the `crawl_sources` table (config, not code).\n2. robots.txt is fetched "
         "per site and obeyed.\n3. Hubs are crawled for lender links; pages are interleaved across "
         "sites (polite).\n4. Pages go in batches of 5 to **A1**, which writes results as it goes.\n"
-        "5. Finish: deactivate products that vanished from pages crawled OK; report.",
+        "5. Finish: deactivate products that vanished from pages crawled OK; report.\n6. Crawl health: "
+        "a channel whose usable pages drop >30% (a site redesign) is logged and alerts once a day.",
         (-40, -380),
-        (560, 300),
+        (560, 320),
     )
     f.add(
         "Every day 06:00 IST",
@@ -906,6 +1027,41 @@ SELECT $1::text AS run_id,
         (2420, -200),
         credentials=PG,
     )
+    # Crawl health: a site redesign shows up as a drop in usable pages, not as a failed run.
+    f.add(
+        "Crawl health",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("crawl_health.sql"), f"={{{{ [ $json.run_id, {CRAWL_DROP_ALERT_PCT} ] }}}}"
+        ),
+        (2640, 40),
+        credentials=PG,
+    )
+    f.add("Crawl degraded?", IF_T, 2, if_true("={{ $json.should_alert }}"), (2860, 40))
+    f.add(
+        "Email crawl alert (SES)",
+        "n8n-nodes-base.awsSes",
+        1,
+        {
+            "authentication": "assumeRole",
+            "resource": "email",
+            "operation": "send",
+            "isBodyHtml": True,
+            "fromEmail": SES_FROM,
+            "toAddresses": [TEST_ALIASES[0]],
+            "subject": "Loan engine: crawl degraded",
+            "body": "={{ '<p>Workflow A run ' + $json.run_id + ': ' + $json.summary + '.</p>"
+            "<p>Products from failed pages are kept; check the source pages for a layout change.</p>' }}",
+            "additionalFields": {},
+        },
+        (3080, 40),
+        credentials=AWS,
+        retryOnFail=True,
+        maxTries=2,
+        waitBetweenTries=2000,
+        onError="continueRegularOutput",  # the row is stored in workflow_errors either way
+    )
     f.add(
         "Products changed?", IF_T, 2, if_true("={{ $json.product_ids.length > 0 }}"), (2640, -200)
     )
@@ -946,6 +1102,9 @@ SELECT $1::text AS run_id,
     f.link("Every 5 pages", "Run summary", out=0)  # done
     f.link("Every 5 pages", "Batch → one item", out=1)  # loop
     f.link("Products changed?", "Re-match changed products (B)", out=0)
+    f.link("Finish run", "Crawl health")
+    f.link("Crawl health", "Crawl degraded?")
+    f.link("Crawl degraded?", "Email crawl alert (SES)", out=0)
     return f.build()
 
 
@@ -956,15 +1115,16 @@ def workflow_b1() -> dict:
     f = Flow(
         WF_B1,
         "B1 · Match one run (Treasure Hunt)",
-        "Stage 0 compile criteria (LLM, cached) → Stage 1+2 SQL classes → stats → Stage 3 expand/score/diff → proof.",
+        "Stage 0 compile criteria (LLM, cached) → Stage 1+2 SQL classes → stats → pre-write proof → Stage 3 expand/score/diff → post-write proof.",
     )
     f.sticky(
         "## B1 · The Optimization Treasure Hunt\n**Stage 0** · Nova Pro compiles each product's free-text "
         "criteria ONCE into checkable rules (cached by text hash) → LLM cost scales with distinct criteria "
         "texts, not users.\n**Stage 1+2** · SQL equivalence classes: every threshold is a cut point, users "
         "with identical intervals form one class → decide class x product.\n**Stage 3** · expand to users, "
-        "fit score, diff vs active matches (one transaction, advisory lock).\n**Proof** · naive per-user "
-        "re-evaluation must give 0 mismatches.",
+        "fit score, diff vs active matches (one transaction, advisory lock).\n**Proofs** · a naive per-user "
+        "re-evaluation must give 0 mismatches twice: BEFORE Stage 3 writes (class decisions) and AFTER "
+        "(stored matches). A failure stops the run.",
         (-40, -420),
         (620, 320),
     )
@@ -1132,12 +1292,46 @@ RETURNING rules_compiled, llm_calls
         credentials=PG,
         alwaysOutputData=True,
     )
+    # Pre-write proof: the class decisions, expanded to users, must equal a naive per-user
+    # evaluation BEFORE Stage 3 writes a single match. On a mismatch the run stops here.
+    f.add(
+        "Pre-write proof",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("prewrite_check.sql"),
+            f"={{{{ [ $('From B (run)').first().json.run_id, '{COMPILE_PROMPT_VERSION}' ] }}}}",
+        ),
+        (2200, 0),
+        credentials=PG,
+    )
+    f.add(
+        "Pre-write passed?",
+        IF_T,
+        2,
+        if_true("={{ $json.prewrite_ok === true && Number($json.mismatches) === 0 }}"),
+        (2420, 0),
+    )
+    f.add(
+        "Stop: pre-write proof failed",
+        CODE_T,
+        2,
+        {
+            "jsCode": js(
+                entry="""
+const p = $input.first().json;
+throw new Error(`Pre-write proof failed: ${p.mismatches} of ${p.pairs_checked} pairs differ from the naive check (${p.users_without_class} users without a class). No match was written.`);
+"""
+            )
+        },
+        (2640, 200),
+    )
     f.add(
         "Stage 3 · expand, score, diff",
         PG_T,
         2.5,
         pg_query(sql_file("stage3_expand.sql"), "={{ [ $('From B (run)').first().json.run_id ] }}"),
-        (2200, 0),
+        (2640, 0),
         credentials=PG,
     )
     f.add(
@@ -1148,7 +1342,7 @@ RETURNING rules_compiled, llm_calls
             sql_file("brute_force_check.sql"),
             f"={{{{ [ $('From B (run)').first().json.run_id, '{COMPILE_PROMPT_VERSION}' ] }}}}",
         ),
-        (2420, 0),
+        (2860, 0),
         credentials=PG,
     )
     f.add(
@@ -1166,11 +1360,12 @@ WHERE run_id = $1::uuid
 RETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, classes,
           class_product_pairs, pairs_after_sql, rule_decided, llm_candidates, not_eligible_pairs,
           residual_texts, rules_compiled, llm_cache_hits, llm_calls, llm_input_tokens, llm_output_tokens,
-          llm_cost_usd_est, matches_new, matches_superseded, matches_unchanged, correctness_ok
+          llm_cost_usd_est, matches_new, matches_superseded, matches_unchanged, prewrite_ok,
+          correctness_ok
 """,
             "={{ [ $('From B (run)').first().json.run_id ] }}",
         ),
-        (2860, 0),
+        (3300, 0),
         credentials=PG,
     )
     # The proof GATES the run: if the class pipeline disagrees with checking every pair one by
@@ -1180,7 +1375,7 @@ RETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, 
         IF_T,
         2,
         if_true("={{ $json.correctness_ok === true && Number($json.mismatches) === 0 }}"),
-        (2640, 0),
+        (3080, 0),
     )
     f.add(
         "Stop: proof failed",
@@ -1194,7 +1389,7 @@ throw new Error(`Correctness proof failed: ${p.mismatches} of ${p.naive_pairs_ev
 """
             )
         },
-        (2860, 200),
+        (3300, 200),
     )
     f.add(
         "Treasure Hunt funnel",
@@ -1206,6 +1401,7 @@ throw new Error(`Correctness proof failed: ${p.mismatches} of ${p.naive_pairs_ev
 // One item that reads like the README table: how much work each stage removed, and the proof.
 const r = $input.first().json;
 const proof = $('Correctness proof').first().json;
+const pre = $('Pre-write proof').first().json;
 const ratio = (a, b) => (a && b ? Math.round((Number(b) / Number(a)) * 10000) / 100 : null);
 return [{ json: {
   run_id: r.run_id, mode: r.mode, job_id: r.job_id,
@@ -1218,12 +1414,15 @@ return [{ json: {
     llm_calls: r.llm_calls, llm_cache_hits: r.llm_cache_hits, llm_cost_usd_est: r.llm_cost_usd_est,
     matches_new: r.matches_new, matches_superseded: r.matches_superseded, matches_unchanged: r.matches_unchanged,
   },
-  proof: { pairs_checked: proof.naive_pairs_evaluated, mismatches: proof.mismatches, correctness_ok: proof.correctness_ok },
+  proof: {
+    before_write: { pairs_checked: pre.pairs_checked, mismatches: pre.mismatches, ok: pre.prewrite_ok },
+    after_write: { pairs_checked: proof.naive_pairs_evaluated, mismatches: proof.mismatches, ok: proof.correctness_ok },
+  },
 } }];
 """
             )
         },
-        (3080, 0),
+        (3520, 0),
     )
 
     for a, b in [
@@ -1235,12 +1434,15 @@ return [{ json: {
         ("Validate compiled rules", "Save compiled rules"),
         ("Save compiled rules", "Stage 1+2 · classes & decisions"),
         ("Stage 1+2 · classes & decisions", "Refresh planner stats"),
-        ("Refresh planner stats", "Stage 3 · expand, score, diff"),
+        ("Refresh planner stats", "Pre-write proof"),
+        ("Pre-write proof", "Pre-write passed?"),
         ("Stage 3 · expand, score, diff", "Correctness proof"),
         ("Correctness proof", "Proof passed?"),
         ("Finish run", "Treasure Hunt funnel"),
     ]:
         f.link(a, b)
+    f.link("Pre-write passed?", "Stage 3 · expand, score, diff", out=0)
+    f.link("Pre-write passed?", "Stop: pre-write proof failed", out=1)
     f.link("Proof passed?", "Finish run", out=0)
     f.link("Proof passed?", "Stop: proof failed", out=1)
     f.link("Anything to compile?", "Build compile request", out=0)
@@ -1425,7 +1627,8 @@ def workflow_c(api_url: str) -> dict:
         "**best pick + top picks** (top 5, one per lender, best platform shown), why each fits, and what else "
         "they'd need.\n\n- Sent with the **AWS SES node** (Assume Role credential, no keys), 1 email/second "
         "(SES sandbox).\n- **Only to test aliases**: never the CSV address (guarded in code).\n- Demo cap: "
-        f"first {DEMO_MAX_EMAILS} users get real mail; the rest are recorded as `skipped_demo`.",
+        f"first {DEMO_MAX_EMAILS} users get real mail; the rest are recorded as `skipped_demo`.\n- Each send "
+        "is **recorded the moment SES answers**, so a crash mid-loop never emails anyone twice.",
         (-40, -400),
         (620, 300),
     )
@@ -1453,45 +1656,7 @@ ORDER BY finished_at DESC LIMIT 1
         "Users to email",
         PG_T,
         2.5,
-        pg_query(
-            """
--- New, un-notified active matches of this run. The demo-capped first N users get their
--- top picks: best offer PER LENDER (best platform), ranked by tier, fit score, rate.
-WITH new_m AS (
-  SELECT m.user_id, m.tier, m.requirements, m.fit_score, m.fit_reasons,
-         p.lender, p.lender_key, p.channel, p.product_url, p.product_name,
-         p.interest_rate_min, p.interest_rate_max, p.loan_amount_max
-  FROM matches m JOIN loan_products p USING (product_id)
-  WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL
-), per_user AS (
-  SELECT user_id, count(*)::int AS matches_total, count(DISTINCT lender_key)::int AS lenders_total
-  FROM new_m GROUP BY user_id
-), chosen AS (
-  SELECT user_id FROM per_user ORDER BY user_id LIMIT $2::int
-), best_per_lender AS (
-  SELECT DISTINCT ON (n.user_id, n.lender_key) n.*
-  FROM new_m n JOIN chosen USING (user_id)
-  ORDER BY n.user_id, n.lender_key, (n.tier = 'eligible') DESC, n.fit_score DESC,
-           n.interest_rate_min NULLS LAST, n.product_name
-), ranked AS (
-  SELECT b.*, row_number() OVER (PARTITION BY b.user_id ORDER BY (b.tier = 'eligible') DESC,
-         b.fit_score DESC, b.interest_rate_min NULLS LAST, b.product_name) AS rnk
-  FROM best_per_lender b
-)
-SELECT $1::text AS run_id, u.user_id::text, u.name, u.monthly_income, u.credit_score, u.employment_status, u.age,
-       pu.matches_total, pu.lenders_total,
-       json_agg(json_build_object(
-         'lender', r.lender, 'channel', r.channel, 'tier', r.tier, 'requirements', r.requirements,
-         'interest_rate_min', r.interest_rate_min, 'interest_rate_max', r.interest_rate_max,
-         'loan_amount_max', r.loan_amount_max, 'product_url', r.product_url,
-         'fit_score', r.fit_score, 'fit_reasons', r.fit_reasons) ORDER BY r.rnk)
-         FILTER (WHERE r.rnk <= 5) AS picks
-FROM ranked r JOIN users u USING (user_id) JOIN per_user pu USING (user_id)
-GROUP BY u.user_id, pu.matches_total, pu.lenders_total
-ORDER BY u.user_id
-""",
-            f"={{{{ [ $json.run_id, {DEMO_MAX_EMAILS} ] }}}}",
-        ),
+        pg_query(sql_file("notify_users.sql"), f"={{{{ [ $json.run_id, {DEMO_MAX_EMAILS} ] }}}}"),
         (440, 0),
         credentials=PG,
     )
@@ -1591,12 +1756,26 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
         },
         (1320, 100),
     )
+    # Recorded the moment SES answers: a crash mid-loop never emails anyone twice. Returns the
+    # same fields as "Delivery result", so the loop's done output is unchanged.
+    f.add(
+        "Record this send",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("notify_record_send.sql"),
+            "={{ [ $('Users to email').first().json.run_id, $json.user_id, $json.alias_email, "
+            "$json.status, $json.ses_message_id || '', $json.error || '' ] }}",
+        ),
+        (1540, 100),
+        credentials=PG,
+    )
     f.add(
         "1 email / second (SES sandbox)",
         "n8n-nodes-base.wait",
         1.1,
         {"resume": "timeInterval", "amount": 1.1, "unit": "seconds"},
-        (1540, 100),
+        (1760, 100),
     )
     # The loop's "done" output carries one item per email; a Postgres node runs once PER ITEM,
     # so collapse to ONE item first (found live: the summary query ran 5x and duplicated rows).
@@ -1607,7 +1786,8 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
         {
             "jsCode": js(
                 entry="""
-return [{ json: { run_id: $('Users to email').first().json.run_id, results: $input.all().map((i) => i.json) } }];
+// Sends were recorded one by one; the summary only needs the run.
+return [{ json: { run_id: $('Users to email').first().json.run_id, results: $input.all().length } }];
 """
             )
         },
@@ -1617,47 +1797,7 @@ return [{ json: { run_id: $('Users to email').first().json.run_id, results: $inp
         "Record notifications",
         PG_T,
         2.5,
-        pg_query(
-            """
--- Sent/failed rows for the emailed users; every OTHER user with new matches is recorded as
--- skipped_demo (production would email them). notified_at is set for sent + skipped users so
--- they are never emailed twice; failed sends stay un-notified for a later retry.
-WITH sent AS (
-  SELECT * FROM jsonb_to_recordset($2::jsonb)
-         AS s(user_id text, alias_email text, status text, ses_message_id text, error text)
-), run AS (
-  SELECT job_id FROM pipeline_runs WHERE run_id = $1::uuid
-), ins_sent AS (
-  INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error)
-  SELECT user_id::uuid, alias_email, (SELECT job_id FROM run), $1::uuid, status, ses_message_id, error FROM sent
-  RETURNING 1
-), rest AS (
-  SELECT DISTINCT m.user_id FROM matches m
-  WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL
-    AND m.user_id NOT IN (SELECT user_id::uuid FROM sent)
-), ins_skip AS (
-  INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, error)
-  SELECT user_id, '(demo cap: not sent)', (SELECT job_id FROM run), $1::uuid, 'skipped_demo',
-         'demo cap reached: production would email this user'
-  FROM rest
-  RETURNING 1
-), mark AS (
-  UPDATE matches SET notified_at = now()
-  WHERE match_run_id = $1::uuid AND status = 'active' AND notified_at IS NULL
-    AND (user_id IN (SELECT user_id::uuid FROM sent WHERE status = 'sent') OR user_id IN (SELECT user_id FROM rest))
-  RETURNING 1
-)
-UPDATE pipeline_runs SET
-  emails_sent = (SELECT count(*) FROM sent WHERE status = 'sent'),
-  emails_failed = (SELECT count(*) FROM sent WHERE status = 'failed'),
-  emails_skipped_demo = (SELECT count(*) FROM rest)
-WHERE run_id = $1::uuid
-RETURNING emails_sent, emails_failed, emails_skipped_demo,
-          (SELECT count(*) FROM mark) AS matches_marked_notified,
-          (SELECT count(*) FROM ins_sent) + (SELECT count(*) FROM ins_skip) AS notification_rows
-""",
-            "={{ [ $json.run_id, JSON.stringify($json.results) ] }}",
-        ),
+        pg_query(sql_file("notify_finish.sql"), "={{ [ $json.run_id ] }}"),
         (1100, -120),
         credentials=PG,
     )
@@ -1670,7 +1810,8 @@ RETURNING emails_sent, emails_failed, emails_skipped_demo,
         ("Sign dashboard links", "Compose emails"),
         ("Compose emails", "One email at a time"),
         ("Send via AWS SES", "Delivery result"),
-        ("Delivery result", "1 email / second (SES sandbox)"),
+        ("Delivery result", "Record this send"),
+        ("Record this send", "1 email / second (SES sandbox)"),
         ("1 email / second (SES sandbox)", "One email at a time"),
     ]:
         f.link(a, b)

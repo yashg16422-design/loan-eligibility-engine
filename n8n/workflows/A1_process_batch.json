@@ -29,7 +29,9 @@
         0,
         0
       ],
-      "id": "LoanEngineWfA101-01"
+      "id": "LoanEngineWfA101-01",
+      "notes": "Called by A with up to 5 pages and the crawl run_id.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -42,7 +44,9 @@
         220,
         0
       ],
-      "id": "LoanEngineWfA101-02"
+      "id": "LoanEngineWfA101-02",
+      "notes": "One item per page.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -92,7 +96,9 @@
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 3000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Polite GET (browser-compatible UA, 1 req/s, retries); optional renderer.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -105,7 +111,9 @@
         660,
         0
       ],
-      "id": "LoanEngineWfA101-04"
+      "id": "LoanEngineWfA101-04",
+      "notes": "ok / blocked (403, 429, challenge: skipped, never bypassed) / failed.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -138,7 +146,9 @@
         880,
         0
       ],
-      "id": "LoanEngineWfA101-05"
+      "id": "LoanEngineWfA101-05",
+      "notes": "Failed pages fall back to their saved S3 snapshot.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -183,7 +193,9 @@
           "name": "AWS n8n role (assume)"
         }
       },
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Reads the page snapshot from S3 (the instance role, no keys).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -196,7 +208,9 @@
         1320,
         -120
       ],
-      "id": "LoanEngineWfA101-07"
+      "id": "LoanEngineWfA101-07",
+      "notes": "Marks the page as fixture so the run stays honest about its source.",
+      "notesInFlow": true
     },
     {
       "parameters": {},
@@ -207,7 +221,9 @@
         1540,
         0
       ],
-      "id": "LoanEngineWfA101-08"
+      "id": "LoanEngineWfA101-08",
+      "notes": "Joins live and fixture pages back into one stream.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -220,7 +236,9 @@
         1760,
         0
       ],
-      "id": "LoanEngineWfA101-09"
+      "id": "LoanEngineWfA101-09",
+      "notes": "Scores candidate windows to find the eligibility and rate sections.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -236,7 +254,9 @@
         1980,
         0
       ],
-      "id": "LoanEngineWfA101-10"
+      "id": "LoanEngineWfA101-10",
+      "notes": "SHA-256 of the sections + prompt/normalizer version.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -249,7 +269,9 @@
         2200,
         0
       ],
-      "id": "LoanEngineWfA101-11"
+      "id": "LoanEngineWfA101-11",
+      "notes": "One lookup for all pages instead of one query per page.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -273,7 +295,9 @@
           "name": "RDS app (n8n_workflows)"
         }
       },
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "notes": "Last stored hash per page.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -286,7 +310,9 @@
         2640,
         0
       ],
-      "id": "LoanEngineWfA101-13"
+      "id": "LoanEngineWfA101-13",
+      "notes": "Compares hashes: unchanged pages skip the LLM entirely.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -319,7 +345,9 @@
         2860,
         0
       ],
-      "id": "LoanEngineWfA101-14"
+      "id": "LoanEngineWfA101-14",
+      "notes": "Only changed pages go to Nova Pro.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -332,7 +360,9 @@
         3080,
         -160
       ],
-      "id": "LoanEngineWfA101-15"
+      "id": "LoanEngineWfA101-15",
+      "notes": "ONE batched Converse request for all changed pages of the batch.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -364,7 +394,9 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Amazon Bedrock Nova Pro, temperature 0, via the Assume Role credential.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -377,7 +409,9 @@
         3520,
         -160
       ],
-      "id": "LoanEngineWfA101-17"
+      "id": "LoanEngineWfA101-17",
+      "notes": "Every criterion must quote the page; numbers parsed deterministically.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -400,7 +434,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "One SQL statement per batch + a crawl_runs row per page.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -413,7 +449,9 @@
         3080,
         160
       ],
-      "id": "LoanEngineWfA101-19"
+      "id": "LoanEngineWfA101-19",
+      "notes": "No LLM: prepares last_seen updates for unchanged pages.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -436,7 +474,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Marks products still seen; logs pages as unchanged.",
+      "notesInFlow": true
     }
   ],
   "connections": {

@@ -36,7 +36,9 @@
         0,
         0
       ],
-      "id": "LoanEngineWfE101-01"
+      "id": "LoanEngineWfE101-01",
+      "notes": "Scheduled while the drill is published (scripts/n8n-workflows.sh drill).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -49,7 +51,9 @@
         220,
         0
       ],
-      "id": "LoanEngineWfE101-02"
+      "id": "LoanEngineWfE101-02",
+      "notes": "Throws, to prove that Workflow E records and alerts.",
+      "notesInFlow": true
     }
   ],
   "connections": {

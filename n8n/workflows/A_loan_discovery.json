@@ -5,9 +5,9 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## A · Loan product discovery\n**Schedule:** daily 06:00 IST (+ manual run for demos).\n\n1. Sources come from the `crawl_sources` table (config, not code).\n2. robots.txt is fetched per site and obeyed.\n3. Hubs are crawled for lender links; pages are interleaved across sites (polite).\n4. Pages go in batches of 5 to **A1**, which writes results as it goes.\n5. Finish: deactivate products that vanished from pages crawled OK; report.",
+        "content": "## A · Loan product discovery\n**Schedule:** daily 06:00 IST (+ manual run for demos).\n\n1. Sources come from the `crawl_sources` table (config, not code).\n2. robots.txt is fetched per site and obeyed.\n3. Hubs are crawled for lender links; pages are interleaved across sites (polite).\n4. Pages go in batches of 5 to **A1**, which writes results as it goes.\n5. Finish: deactivate products that vanished from pages crawled OK; report.\n6. Crawl health: a channel whose usable pages drop >30% (a site redesign) is logged and alerts once a day.",
         "width": 560,
-        "height": 300
+        "height": 320
       },
       "name": "Note 0",
       "type": "n8n-nodes-base.stickyNote",
@@ -36,7 +36,9 @@
         0,
         -80
       ],
-      "id": "LoanEngineWfA001-01"
+      "id": "LoanEngineWfA001-01",
+      "notes": "The assignment's schedule trigger: one crawl a day.",
+      "notesInFlow": true
     },
     {
       "parameters": {},
@@ -47,7 +49,9 @@
         0,
         80
       ],
-      "id": "LoanEngineWfA001-02"
+      "id": "LoanEngineWfA001-02",
+      "notes": "Manual trigger for demos; same path as the schedule.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -68,7 +72,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "New crawl run_id + the enabled crawl_sources rows (sites are config, not code).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -81,7 +87,9 @@
         440,
         0
       ],
-      "id": "LoanEngineWfA001-04"
+      "id": "LoanEngineWfA001-04",
+      "notes": "One item per site, so each robots.txt is fetched once.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -120,7 +128,9 @@
       "id": "LoanEngineWfA001-05",
       "retryOnFail": true,
       "maxTries": 2,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "GET /robots.txt per site; errors never stop the crawl.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -133,7 +143,9 @@
         880,
         0
       ],
-      "id": "LoanEngineWfA001-06"
+      "id": "LoanEngineWfA001-06",
+      "notes": "RFC 9309 parser (robots.js) decides every URL before it is fetched.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -147,7 +159,9 @@
         0
       ],
       "id": "LoanEngineWfA001-07",
-      "alwaysOutputData": true
+      "alwaysOutputData": true,
+      "notes": "Comparison-site hub pages that list lenders.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -193,7 +207,9 @@
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "GET each hub page (1 request/s).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -206,7 +222,9 @@
         1540,
         0
       ],
-      "id": "LoanEngineWfA001-09"
+      "id": "LoanEngineWfA001-09",
+      "notes": "Lender links from hubs + direct bank pages, interleaved round-robin across sites.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -239,7 +257,9 @@
         1760,
         0
       ],
-      "id": "LoanEngineWfA001-10"
+      "id": "LoanEngineWfA001-10",
+      "notes": "Disallowed pages are logged and never fetched.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -262,7 +282,9 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Records each skipped URL as robots_disallowed in crawl_runs.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -276,7 +298,9 @@
         1980,
         -40
       ],
-      "id": "LoanEngineWfA001-12"
+      "id": "LoanEngineWfA001-12",
+      "notes": "Loop: batches of 5 pages go to A1, so results are written as the crawl goes.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -289,7 +313,9 @@
         2200,
         80
       ],
-      "id": "LoanEngineWfA001-13"
+      "id": "LoanEngineWfA001-13",
+      "notes": "Packs the 5 pages into one item for the sub-workflow call.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -311,7 +337,9 @@
         2420,
         80
       ],
-      "id": "LoanEngineWfA001-14"
+      "id": "LoanEngineWfA001-14",
+      "notes": "Fetch, isolate, hash, LLM only if changed, verify, upsert (sub-workflow A1).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -324,7 +352,9 @@
         2200,
         -200
       ],
-      "id": "LoanEngineWfA001-15"
+      "id": "LoanEngineWfA001-15",
+      "notes": "Collects the batch results into one item for Finish run.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -347,7 +377,104 @@
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
-      }
+      },
+      "notes": "Deactivates products gone from healthy pages; counts pages, products, tokens.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow A · Crawl health: after \"Finish run\". Params: $1 run_id, $2 drop threshold (percent).\n--\n-- A layout change on a lender or comparison site does not fail the crawl: its pages come back\n-- `failed` (no eligibility section found) and the old products are kept. This compares usable\n-- pages per channel (ok + unchanged + fixture) with the previous crawl and flags a channel that\n-- dropped by more than $2 percent or has no usable page at all. A flagged run is stored in\n-- workflow_errors (visible in /ops/errors) and alerts at most once per day. No product data\n-- is changed here.\nWITH this_run AS (\n    SELECT channel, count(*) FILTER (WHERE status IN ('ok', 'unchanged', 'fixture')) AS usable,\n           count(*) AS pages\n    FROM crawl_runs WHERE run_id = $1::uuid AND channel IS NOT NULL GROUP BY channel\n), prev_run AS (\n    SELECT run_id FROM crawl_runs\n    WHERE run_id <> $1::uuid\n    GROUP BY run_id\n    HAVING max(started_at) < (SELECT min(started_at) FROM crawl_runs WHERE run_id = $1::uuid)\n    ORDER BY max(started_at) DESC LIMIT 1\n), prev AS (\n    SELECT channel, count(*) FILTER (WHERE status IN ('ok', 'unchanged', 'fixture')) AS usable\n    FROM crawl_runs WHERE run_id = (SELECT run_id FROM prev_run) AND channel IS NOT NULL\n    GROUP BY channel\n), cmp AS (\n    SELECT coalesce(t.channel, p.channel) AS channel, coalesce(t.usable, 0) AS usable,\n           p.usable AS prev_usable\n    FROM this_run t FULL JOIN prev p USING (channel)\n), bad AS (\n    SELECT * FROM cmp\n    WHERE usable = 0 OR (prev_usable > 0 AND usable < prev_usable * (1 - $2::numeric / 100))\n), summary AS (\n    SELECT string_agg(format('%s: %s usable pages (previous crawl %s)', channel, usable,\n                             coalesce(prev_usable::text, 'none')), '; ' ORDER BY channel) AS text\n    FROM bad\n), last_alert AS (\n    SELECT max(created_at) AS at FROM workflow_errors WHERE workflow = 'A · crawl health'\n), ins AS (\n    INSERT INTO workflow_errors (workflow, node, message)\n    SELECT 'A · crawl health', 'Crawl health', 'Crawl degraded: ' || (SELECT text FROM summary)\n    WHERE EXISTS (SELECT 1 FROM bad)\n    RETURNING id\n)\nSELECT $1::text AS run_id,\n       EXISTS (SELECT 1 FROM bad) AS degraded,\n       EXISTS (SELECT 1 FROM ins)\n         AND coalesce((SELECT at FROM last_alert) < now() - interval '1 day', true) AS should_alert,\n       coalesce((SELECT text FROM summary), 'all channels healthy') AS summary,\n       (SELECT coalesce(json_agg(cmp ORDER BY channel), '[]'::json) FROM cmp) AS channels;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, 30 ] }}"
+        }
+      },
+      "name": "Crawl health",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2640,
+        40
+      ],
+      "id": "LoanEngineWfA001-17",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Usable pages per channel vs the previous crawl: a >30% drop means a site changed.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.should_alert }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Crawl degraded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        40
+      ],
+      "id": "LoanEngineWfA001-18",
+      "notes": "Alert at most once a day; the drop is always logged in workflow_errors.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "authentication": "assumeRole",
+        "resource": "email",
+        "operation": "send",
+        "isBodyHtml": true,
+        "fromEmail": "yashg16422@gmail.com",
+        "toAddresses": [
+          "yashg16422+one@gmail.com"
+        ],
+        "subject": "Loan engine: crawl degraded",
+        "body": "={{ '<p>Workflow A run ' + $json.run_id + ': ' + $json.summary + '.</p><p>Products from failed pages are kept; check the source pages for a layout change.</p>' }}",
+        "additionalFields": {}
+      },
+      "name": "Email crawl alert (SES)",
+      "type": "n8n-nodes-base.awsSes",
+      "typeVersion": 1,
+      "position": [
+        3080,
+        40
+      ],
+      "id": "LoanEngineWfA001-19",
+      "credentials": {
+        "awsAssumeRole": {
+          "id": "fa286DA3YraErW57",
+          "name": "AWS n8n role (assume)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Tells the operator which channel degraded (test alias only).",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -380,7 +507,9 @@
         2640,
         -200
       ],
-      "id": "LoanEngineWfA001-17"
+      "id": "LoanEngineWfA001-20",
+      "notes": "New or changed products are re-matched against every user.",
+      "notesInFlow": true
     },
     {
       "parameters": {
@@ -402,8 +531,10 @@
         2860,
         -280
       ],
-      "id": "LoanEngineWfA001-18",
-      "onError": "continueRegularOutput"
+      "id": "LoanEngineWfA001-21",
+      "onError": "continueRegularOutput",
+      "notes": "Calls B in product mode with the changed product ids.",
+      "notesInFlow": true
     }
   ],
   "connections": {
@@ -412,6 +543,11 @@
         [
           {
             "node": "Products changed?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Crawl health",
             "type": "main",
             "index": 0
           }
@@ -591,6 +727,28 @@
         [
           {
             "node": "Re-match changed products (B)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crawl health": {
+      "main": [
+        [
+          {
+            "node": "Crawl degraded?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crawl degraded?": {
+      "main": [
+        [
+          {
+            "node": "Email crawl alert (SES)",
             "type": "main",
             "index": 0
           }
