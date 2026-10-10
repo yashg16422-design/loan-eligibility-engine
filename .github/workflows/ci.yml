@@ -63,9 +63,17 @@ jobs:
           done
           docker logs pg; exit 1
 
-      - name: Python unit + integration tests
+      - name: Python unit + integration tests, with coverage
         # -rs lists skipped tests: with PG_TEST_PORT set, the DB tests must run, not skip.
-        run: pytest -rs
+        # Coverage of loan_engine was 92% when the gate was added; it may only go up.
+        run: pytest -rs --cov=loan_engine --cov-report=term-missing:skip-covered --cov-fail-under=90
+
+      - name: Golden master + matching on the streaming ingest path
+        # The ingest tests run on both paths already (parametrized); this re-runs the golden
+        # fingerprint and the matching suite with INGEST_STREAMING on, as deployed.
+        env:
+          INGEST_STREAMING: "true"
+        run: pytest -q tests/integration/test_golden.py tests/integration/test_matching_db.py
 
       - name: Workflow JSON matches the generator
         env:

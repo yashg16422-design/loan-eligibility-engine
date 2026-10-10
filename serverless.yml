@@ -80,7 +80,9 @@ functions:
     description: S3 upload (via SQS) -> validate CSV -> load users into RDS -> notify n8n
     role: IngestRole
     timeout: 120 # the queue's visibility timeout (720 s) is 6x this
-    memorySize: 512
+    # 1024 MB for the CPU share (Lambda's CPU scales with memory); memory use itself is flat
+    # with streaming ingest (docs/evidence/ingest_bench_2026-10-11.json).
+    memorySize: 1024
     vpc:
       securityGroupIds:
         - !Ref LambdaSG
@@ -93,6 +95,8 @@ functions:
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       # Pluggable seams: change behaviour by config, not code.
       VALIDATION_RULES: "" # JSON overrides, e.g. '{"age_min": 21}'; empty = PLAN.md §9 defaults
+      # Constant-memory ingest: rows stream from S3 through COPY into Postgres (rollback: "false").
+      INGEST_STREAMING: "true"
       # Private network only: Lambda SG -> n8n SG on 5678. If the call fails, Workflow B's
       # 10-minute sweeper still picks the job up (the webhook is an accelerator, not a dependency).
       N8N_WEBHOOK_URL: !Sub http://${N8nInstance.PrivateIp}:5678/webhook/ingest-complete

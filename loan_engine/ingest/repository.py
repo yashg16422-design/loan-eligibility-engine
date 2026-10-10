@@ -8,11 +8,12 @@ caller to own the transaction boundaries.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import psycopg
 
-from loan_engine.common.validation import Reject, UserRow
+from loan_engine.common.validation import Reject, RowResult, UserRow
 
 _USER_COLUMNS = (
     "user_id",
@@ -113,6 +114,9 @@ def load_users(conn: psycopg.Connection, job_id: uuid.UUID, users: list[UserRow]
             SELECT user_id, name, email, monthly_income, credit_score,
                    employment_status, age, %(job_id)s
             FROM staging_users
+            -- Rows are locked in user_id order: two concurrent uploads sharing users can
+            -- never lock them in opposite orders and deadlock.
+            ORDER BY user_id
             ON CONFLICT (user_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 email = EXCLUDED.email,
@@ -136,6 +140,104 @@ def load_users(conn: psycopg.Connection, job_id: uuid.UUID, users: list[UserRow]
         {"job_id": job_id},
     ).fetchone() or (0, 0)
     return LoadCounts(inserted=inserted, updated=updated, unchanged=len(users) - inserted - updated)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamLoad:
+    """What the streaming load did: the same numbers the in-memory path reports."""
+
+    total_rows: int
+    rejected: int
+    counts: LoadCounts
+
+
+# One statement after the COPY: rejects (invalid rows + earlier duplicates, last occurrence
+# wins, exactly like validate_csv) and the upsert of the survivors, in user_id order.
+_STREAM_SQL = """
+WITH ranked AS (
+    SELECT s.*, row_number() OVER (PARTITION BY user_id ORDER BY line_no DESC) AS rn
+    FROM staging_rows s WHERE reason IS NULL
+), rejected AS (
+    INSERT INTO upload_rejects (job_id, row_number, raw_line, reason)
+    SELECT %(job_id)s, line_no, raw_line, reason FROM staging_rows WHERE reason IS NOT NULL
+    UNION ALL
+    SELECT %(job_id)s, line_no, raw_line, 'duplicate_in_file' FROM ranked WHERE rn > 1
+    RETURNING 1
+), upserted AS (
+    INSERT INTO users AS u
+        (user_id, name, email, monthly_income, credit_score,
+         employment_status, age, upload_job_id)
+    SELECT user_id, name, email, monthly_income, credit_score,
+           employment_status, age, %(job_id)s
+    FROM ranked WHERE rn = 1
+    ORDER BY user_id  -- deterministic lock order (no deadlock between concurrent uploads)
+    ON CONFLICT (user_id) DO UPDATE SET
+        name = EXCLUDED.name,
+        email = EXCLUDED.email,
+        monthly_income = EXCLUDED.monthly_income,
+        credit_score = EXCLUDED.credit_score,
+        employment_status = EXCLUDED.employment_status,
+        age = EXCLUDED.age,
+        upload_job_id = EXCLUDED.upload_job_id,
+        updated_at = now()
+    WHERE (u.name, u.email, u.monthly_income, u.credit_score, u.employment_status, u.age)
+          IS DISTINCT FROM
+          (EXCLUDED.name, EXCLUDED.email, EXCLUDED.monthly_income,
+           EXCLUDED.credit_score, EXCLUDED.employment_status, EXCLUDED.age)
+    RETURNING (xmax = 0) AS was_inserted
+)
+SELECT (SELECT count(*) FROM staging_rows) AS total_rows,
+       (SELECT count(*) FROM rejected) AS rejected,
+       (SELECT count(*) FROM ranked WHERE rn = 1) AS valid,
+       (SELECT count(*) FROM upserted WHERE was_inserted) AS inserted,
+       (SELECT count(*) FROM upserted WHERE NOT was_inserted) AS updated
+"""
+
+
+def load_stream(
+    conn: psycopg.Connection,
+    job_id: uuid.UUID,
+    rows: Iterator[RowResult],
+    scope: Callable[[str], str] | None = None,
+) -> StreamLoad:
+    """Constant-memory ingest: every row (valid or not) is COPYed straight from the stream
+    into a transaction-local staging table, then one statement resolves duplicates, stores
+    rejects and upserts the survivors. Memory does not grow with the file; Postgres does the
+    set work. `scope` maps a CSV user_id to the account-scoped id (owned uploads)."""
+    conn.execute(
+        "CREATE TEMP TABLE staging_rows ("
+        " line_no int, raw_line text, reason text, user_id uuid, name text, email text,"
+        " monthly_income int, credit_score int, employment_status text, age int) ON COMMIT DROP"
+    )
+    columns = (
+        "line_no, raw_line, reason, user_id, name, email, monthly_income, credit_score,"
+        " employment_status, age"
+    )
+    with conn.cursor() as cur, cur.copy(f"COPY staging_rows ({columns}) FROM STDIN") as copy:
+        for r in rows:
+            u = r.user
+            if u is None:
+                copy.write_row((r.row_number, r.raw_line, r.reason) + (None,) * 7)
+            else:
+                copy.write_row(
+                    (
+                        r.row_number,
+                        r.raw_line,
+                        None,
+                        scope(u.user_id) if scope else u.user_id,
+                        u.name,
+                        u.email,
+                        u.monthly_income,
+                        u.credit_score,
+                        u.employment_status.value,
+                        u.age,
+                    )
+                )
+    total, rejected, valid, inserted, updated = conn.execute(
+        _STREAM_SQL, {"job_id": job_id}
+    ).fetchone() or (0, 0, 0, 0, 0)
+    counts = LoadCounts(inserted=inserted, updated=updated, unchanged=valid - inserted - updated)
+    return StreamLoad(total_rows=total, rejected=rejected, counts=counts)
 
 
 def save_rejects(conn: psycopg.Connection, job_id: uuid.UUID, rejects: list[Reject]) -> None:

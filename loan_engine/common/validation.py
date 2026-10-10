@@ -11,7 +11,7 @@ import csv
 import json
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 
@@ -273,15 +273,23 @@ def _raw_line(row: Record) -> str:
     return ",".join(parts)
 
 
-def validate_csv(lines: Iterable[str], rules: ValidationRules = DEFAULT_RULES) -> ValidationResult:
-    """Validate a whole CSV given as an iterable of text lines.
+@dataclass(frozen=True, slots=True)
+class RowResult:
+    """One CSV row after validation: either a user, or the reason it was refused."""
 
-    Taking lines (not a file path or S3 object) keeps this function pure: the
-    caller decides where the bytes come from, and the same code runs on an S3
-    stream in Lambda and on an in-memory list in tests.
+    row_number: int
+    raw_line: str
+    user: UserRow | None
+    reason: str | None
 
-    Rules: header matched by name; a duplicate `user_id` keeps the LAST
-    occurrence and rejects earlier ones as `duplicate_in_file`.
+
+def iter_rows(lines: Iterable[str], rules: ValidationRules = DEFAULT_RULES) -> Iterator[RowResult]:
+    """Validate a CSV one row at a time, without holding the file in memory.
+
+    The header is checked EAGERLY (before this returns), so a file missing a column fails
+    before anything is written; the rows are then produced lazily. Duplicates are not
+    resolved here (that needs the whole file): validate_csv does it in memory, the streaming
+    ingest does it in SQL.
 
     Raises:
         MissingColumnsError: if the file is empty or lacks a required column.
@@ -295,22 +303,46 @@ def validate_csv(lines: Iterable[str], rules: ValidationRules = DEFAULT_RULES) -
     missing = find_missing_columns(header)
     if missing:
         raise MissingColumnsError(missing)
+    return _validated_rows(reader, header, rules)
 
+
+def _validated_rows(
+    reader: Iterator[list[str]], header: list[str], rules: ValidationRules
+) -> Iterator[RowResult]:
+    for values in reader:
+        if not any(v.strip() for v in values):
+            continue  # blank lines (e.g. trailing newline) are not rows
+        row_number = reader.line_num  # type: ignore[attr-defined]
+        record = _to_record(header, values)
+        raw = _raw_line(record)
+        try:
+            yield RowResult(row_number, raw, validate_row(record, rules), None)
+        except RowError as err:
+            yield RowResult(row_number, raw, None, err.reason)
+
+
+def validate_csv(lines: Iterable[str], rules: ValidationRules = DEFAULT_RULES) -> ValidationResult:
+    """Validate a whole CSV given as an iterable of text lines.
+
+    Taking lines (not a file path or S3 object) keeps this function pure: the
+    caller decides where the bytes come from, and the same code runs on an S3
+    stream in Lambda and on an in-memory list in tests.
+
+    Rules: header matched by name; a duplicate `user_id` keeps the LAST
+    occurrence and rejects earlier ones as `duplicate_in_file`.
+
+    Raises:
+        MissingColumnsError: if the file is empty or lacks a required column.
+    """
     result = ValidationResult()
     # user_id -> (row_number, raw_line, row). Insertion order keeps output stable.
     latest: dict[str, tuple[int, str, UserRow]] = {}
 
-    for values in reader:
-        if not any(v.strip() for v in values):
-            continue  # blank lines (e.g. trailing newline) are not rows
-        row_number = reader.line_num
+    for row in iter_rows(lines, rules):
         result.total_rows += 1
-        record = _to_record(header, values)
-        raw = _raw_line(record)
-        try:
-            user = validate_row(record, rules)
-        except RowError as err:
-            result.rejects.append(Reject(row_number, raw, err.reason))
+        user = row.user
+        if user is None:
+            result.rejects.append(Reject(row.row_number, row.raw_line, row.reason or ""))
             continue
 
         previous = latest.get(user.user_id)
@@ -319,7 +351,7 @@ def validate_csv(lines: Iterable[str], rules: ValidationRules = DEFAULT_RULES) -
             result.rejects.append(Reject(prev_number, prev_raw, "duplicate_in_file"))
             # Delete first so the survivor moves to its newest position in the order.
             del latest[user.user_id]
-        latest[user.user_id] = (row_number, raw, user)
+        latest[user.user_id] = (row.row_number, row.raw_line, user)
 
     result.valid = [user for _, _, user in latest.values()]
     result.rejects.sort(key=lambda r: r.row_number)
@@ -353,7 +385,9 @@ def scope_to_account(users: list[UserRow], account_id: str) -> list[UserRow]:
     UUIDv5 of (account, CSV user_id): stable, so the same file uploaded twice by one account
     is still idempotent, and distinct, so every account starts fresh.
     """
-    return [
-        replace(u, user_id=str(uuid.uuid5(ACCOUNT_SCOPE_NAMESPACE, f"{account_id}:{u.user_id}")))
-        for u in users
-    ]
+    return [replace(u, user_id=scoped_user_id(u.user_id, account_id)) for u in users]
+
+
+def scoped_user_id(user_id: str, account_id: str) -> str:
+    """The account-scoped id of one CSV user_id (see scope_to_account)."""
+    return str(uuid.uuid5(ACCOUNT_SCOPE_NAMESPACE, f"{account_id}:{user_id}"))

@@ -79,8 +79,10 @@ def db() -> psycopg.Connection:
     conn.close()
 
 
-@pytest.fixture
-def env(monkeypatch: pytest.MonkeyPatch, db: psycopg.Connection):
+# Every ingest test runs on both paths: the original in-memory one and the constant-memory
+# streaming one (INGEST_STREAMING). They must behave identically.
+@pytest.fixture(params=[False, True], ids=["in-memory", "streaming"])
+def env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, db: psycopg.Connection):
     s3, notifier = FakeS3(), RecordingNotifier()
     deps = ingest.Dependencies(
         db_host="localhost",
@@ -89,6 +91,7 @@ def env(monkeypatch: pytest.MonkeyPatch, db: psycopg.Connection):
         rules=DEFAULT_RULES,
         notifier=notifier,
         s3=s3,
+        streaming=request.param,
     )
     monkeypatch.setattr(ingest, "cached_db_credentials", lambda arn: CREDS)
     return deps, s3, notifier
@@ -190,6 +193,14 @@ def test_rejects_are_stored(db, env):
     [
         ("user_id,email\n", "missing required column"),
         (b"\xff\xfe not utf-8", "not UTF-8"),
+        # Valid header and first rows, then bytes that are not UTF-8: the streaming path has
+        # already COPYed rows by then; its savepoint must roll them back and still fail cleanly.
+        (
+            b"user_id,name,email,monthly_income,credit_score,employment_status,age\n"
+            + b"33f22eb9-6487-4c15-8e43-5ff59be31a9b,A,a@example.com,48000,742,Salaried,29\n" * 3000
+            + b"\xff\xfe broken\n",
+            "not UTF-8",
+        ),
     ],
 )
 def test_bad_file_fails_immediately_without_retry(db, env, body, error_part):
@@ -199,6 +210,10 @@ def test_bad_file_fails_immediately_without_retry(db, env, body, error_part):
     j = job(db, upload.job_id)
     assert j["status"] == "FAILED" and error_part in j["error"]
     assert notifier.notified == []
+    # Nothing from a bad file is kept.
+    assert db.execute(
+        "SELECT count(*) FROM users WHERE upload_job_id = %s", (upload.job_id,)
+    ).fetchone() == (0,)
 
 
 def test_transient_error_retries_then_fails_on_last_delivery(db, env):
@@ -269,3 +284,128 @@ def test_each_account_starts_fresh_with_the_same_file(db, env):
     assert (job(db, first)["inserted"], job(db, second)["inserted"]) == (2, 2)  # both fresh
     assert (job(db, again)["inserted"], job(db, again)["unchanged"]) == (0, 2)  # idempotent
     assert db.execute("SELECT count(*) FROM users").fetchone()[0] == 4
+
+
+def test_streaming_ingest_memory_does_not_grow_with_the_file(db, monkeypatch, tmp_path):
+    """100,000 rows: the streaming path's peak Python memory stays small and flat, while the
+    in-memory path holds every row (measured with tracemalloc around process_upload)."""
+    import tracemalloc
+
+    from tests.synthetic_users import synthetic_users_csv
+
+    path = tmp_path / "big.csv"
+    path.write_bytes(synthetic_users_csv(rows=100_000, seed=7))
+
+    class FileS3:  # the body streams from disk, like S3's StreamingBody
+        def get_object(self, *, Bucket: str, Key: str) -> dict:  # noqa: N803
+            return {"Body": path.open("rb")}
+
+    monkeypatch.setattr(ingest, "cached_db_credentials", lambda arn: CREDS)
+    peaks = {}
+    for streaming in (False, True):
+        db.execute("TRUNCATE users CASCADE")
+        upload = new_job(db, FakeS3(), b"")
+        deps = ingest.Dependencies(
+            "localhost",
+            "x",
+            int(PORT or 0),
+            DEFAULT_RULES,
+            RecordingNotifier(),
+            FileS3(),
+            streaming,
+        )
+        tracemalloc.start()
+        assert ingest.process_upload(upload, 1, deps) is ingest.Outcome.COMPLETED
+        peaks[streaming] = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        assert job(db, upload.job_id)["inserted"] == 100_000
+    print(f"\nPEAK MB in-memory={peaks[False] / 1e6:.1f} streaming={peaks[True] / 1e6:.1f}")
+    assert peaks[True] < 16 * 1024 * 1024  # flat: independent of the row count
+    assert peaks[True] * 4 < peaks[False]
+
+
+# ---------------------------------------------------------------- concurrency (N7)
+
+
+def _parallel(*calls):
+    """Run the calls at the same moment on separate threads (each opens its own connection)."""
+    import threading
+
+    barrier = threading.Barrier(len(calls))
+    results: list[object] = [None] * len(calls)
+
+    def run(i, fn):
+        barrier.wait()
+        try:
+            results[i] = fn()
+        except Exception as err:
+            results[i] = err
+
+    threads = [threading.Thread(target=run, args=(i, fn)) for i, fn in enumerate(calls)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_the_same_job_delivered_twice_at_once_loads_once(db, env):
+    deps, s3, notifier = env
+    upload = new_job(db, s3, users_csv_bytes())
+    results = _parallel(
+        lambda: ingest.process_upload(upload, 1, deps),
+        lambda: ingest.process_upload(upload, 1, deps),
+    )
+    assert sorted(r.value for r in results) == sorted(
+        [ingest.Outcome.COMPLETED.value, ingest.Outcome.DUPLICATE.value]
+    )
+    j = job(db, upload.job_id)
+    assert (j["status"], j["total_rows"]) == ("COMPLETED", 10_000)
+    assert notifier.notified == [upload.job_id]  # n8n is told exactly once
+
+
+def test_two_uploads_sharing_users_at_once_both_complete(db, env):
+    """Overlapping user ids in two files loaded concurrently: rows are locked in user_id
+    order, so neither deadlocks; the final rows are one of the two files' versions."""
+    deps, s3, _ = env
+    db.execute("TRUNCATE users CASCADE")
+    head = "user_id,name,email,monthly_income,credit_score,employment_status,age\n"
+    ids = [str(uuid.uuid4()) for _ in range(3000)]
+    file_a = head + "".join(f"{u},A,a@example.com,40000,700,Salaried,30\n" for u in ids)
+    file_b = head + "".join(f"{u},B,b@example.com,50000,710,Salaried,31\n" for u in reversed(ids))
+    a, b = new_job(db, s3, file_a), new_job(db, s3, file_b)
+    for _ in range(5):  # repeat: a lock-order bug shows up as a deadlock in some runs
+        results = _parallel(
+            lambda: ingest.process_upload(a, 1, deps), lambda: ingest.process_upload(b, 1, deps)
+        )
+        assert all(r is ingest.Outcome.COMPLETED for r in results), results
+        rows = db.execute("SELECT count(*), count(DISTINCT name) FROM users").fetchone()
+        assert rows[0] == 3000 and rows[1] in (1, 2)
+        for upload in (a, b):  # reset both jobs and run them again
+            db.execute(
+                "UPDATE upload_jobs SET status = 'AWAITING_UPLOAD' WHERE job_id = %s",
+                (upload.job_id,),
+            )
+            db.execute("DELETE FROM upload_rejects WHERE job_id = %s", (upload.job_id,))
+
+
+def test_webhook_and_sweeper_claiming_the_same_job_at_once_start_one_run(db, env):
+    """Workflow B's claim (sql/matching/claim.sql) raced by two callers: exactly one run."""
+    from tests.integration.matching_setup import connect, sql
+
+    deps, s3, _ = env
+    upload = new_job(db, s3, users_csv_bytes())
+    assert ingest.process_upload(upload, 1, deps) is ingest.Outcome.COMPLETED
+
+    def claim():
+        with connect() as conn:
+            params = {"p1": "upload", "p2": str(upload.job_id), "p3": ""}
+            return conn.execute(sql("claim.sql"), params).fetchall()
+
+    results = _parallel(claim, claim)
+    assert sorted(len(r) for r in results) == [0, 1]
+    runs = db.execute(
+        "SELECT count(*) FROM pipeline_runs WHERE job_id = %s AND status = 'running'",
+        (upload.job_id,),
+    ).fetchone()[0]
+    assert runs == 1

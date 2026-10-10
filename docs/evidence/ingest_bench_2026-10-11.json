@@ -1,0 +1,32 @@
+{
+ "file_mb": 50.4,
+ "rows": 520000,
+ "machine": "arm64 Darwin 25.6.0, Python 3.12.14, Postgres 17 in Docker (local)",
+ "note": "Local measurement, not Lambda: Lambda's CPU share scales with its memory size.",
+ "results": [
+  {
+   "path": "streaming",
+   "outcome": "completed",
+   "seconds": 15.8,
+   "peak_python_mb": 0.1,
+   "status": "COMPLETED",
+   "total_rows": 520000,
+   "inserted": 520000,
+   "updated": 0,
+   "unchanged": 0,
+   "rejected": 0
+  },
+  {
+   "path": "in-memory",
+   "outcome": "completed",
+   "seconds": 19.0,
+   "peak_python_mb": 312.7,
+   "status": "COMPLETED",
+   "total_rows": 520000,
+   "inserted": 520000,
+   "updated": 0,
+   "unchanged": 0,
+   "rejected": 0
+  }
+ ]
+}

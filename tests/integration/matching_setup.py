@@ -78,8 +78,15 @@ def fresh_schema(conn: psycopg.Connection) -> None:
         conn.execute(migration.read_text())
 
 
-def ingest_csv(conn: psycopg.Connection, csv_bytes: bytes) -> uuid.UUID:
-    """Create an upload job and run the PRODUCTION ingest code on `csv_bytes`."""
+def ingest_csv(
+    conn: psycopg.Connection, csv_bytes: bytes, streaming: bool | None = None
+) -> uuid.UUID:
+    """Create an upload job and run the PRODUCTION ingest code on `csv_bytes`.
+
+    `streaming` picks the ingest path; None = INGEST_STREAMING from the environment, so the
+    whole integration suite can run on either path (CI runs both)."""
+    if streaming is None:
+        streaming = os.environ.get("INGEST_STREAMING", "false").lower() == "true"
     job_id = uuid.uuid4()
     conn.execute(
         "INSERT INTO upload_jobs (job_id, s3_key) VALUES (%s, %s)", (job_id, f"raw/{job_id}.csv")
@@ -90,7 +97,7 @@ def ingest_csv(conn: psycopg.Connection, csv_bytes: bytes) -> uuid.UUID:
             return {"Body": io.BytesIO(csv_bytes)}
 
     deps = ingest.Dependencies(
-        "localhost", "x", int(PORT or 0), DEFAULT_RULES, ingest.NoopNotifier(), S3()
+        "localhost", "x", int(PORT or 0), DEFAULT_RULES, ingest.NoopNotifier(), S3(), streaming
     )
     ingest.cached_db_credentials = lambda arn: CREDS  # type: ignore[assignment]
     ingest.process_upload(UploadRef("b", f"raw/{job_id}.csv", job_id), 1, deps)

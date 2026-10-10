@@ -24,6 +24,7 @@ from functools import cache
 from typing import Any
 
 import boto3
+import psycopg
 from aws_lambda_powertools import Logger
 
 from loan_engine.common.db import connect
@@ -33,8 +34,10 @@ from loan_engine.common.secrets import cached_db_credentials
 from loan_engine.common.validation import (
     MissingColumnsError,
     ValidationRules,
+    iter_rows,
     rules_from_json,
     scope_to_account,
+    scoped_user_id,
     validate_csv,
 )
 from loan_engine.ingest import repository
@@ -65,6 +68,9 @@ class Dependencies:
     rules: ValidationRules
     notifier: Notifier
     s3: SupportsGetObject
+    # INGEST_STREAMING=true: constant-memory path (repository.load_stream). Same results;
+    # false keeps the original in-memory path (rollback switch).
+    streaming: bool = False
 
 
 def build_notifier(url: str, secret_arn: str) -> Notifier:
@@ -87,6 +93,7 @@ def dependencies() -> Dependencies:
             os.environ.get("N8N_WEBHOOK_URL", ""), os.environ.get("N8N_WEBHOOK_SECRET_ARN", "")
         ),
         s3=boto3.client("s3"),
+        streaming=os.environ.get("INGEST_STREAMING", "false").lower() == "true",
     )
 
 
@@ -109,36 +116,9 @@ def process_upload(upload: UploadRef, receive_count: int, deps: Dependencies) ->
             with conn.transaction():
                 if not repository.claim_job(conn, job_id):
                     return Outcome.DUPLICATE
-                try:
-                    lines = iter_text_lines(deps.s3, upload.bucket, upload.key)
-                    result = validate_csv(lines, deps.rules)
-                except (MissingColumnsError, UnicodeDecodeError) as err:
-                    # The file itself is unusable: retrying can't help, fail now.
-                    reason = str(err) if isinstance(err, MissingColumnsError) else "not UTF-8"
-                    repository.fail_job(conn, job_id, f"bad file: {reason}")
-                    logger.warning("job failed: bad file", reason=reason)
+                load = _load_streaming if deps.streaming else _load_in_memory
+                if load(conn, upload, deps) is Outcome.BAD_FILE:
                     return Outcome.BAD_FILE
-
-                # An owned upload's customers belong to that account: same file, fresh rows.
-                owner = repository.job_account(conn, job_id)
-                valid = scope_to_account(result.valid, owner) if owner else result.valid
-                counts = repository.load_users(conn, job_id, valid)
-                repository.save_rejects(conn, job_id, result.rejects)
-                repository.complete_job(
-                    conn,
-                    job_id,
-                    total_rows=result.total_rows,
-                    counts=counts,
-                    rejected=len(result.rejects),
-                )
-                logger.info(
-                    "job completed",
-                    total_rows=result.total_rows,
-                    inserted=counts.inserted,
-                    updated=counts.updated,
-                    unchanged=counts.unchanged,
-                    rejected=len(result.rejects),
-                )
         except Exception as err:
             if receive_count < MAX_RECEIVES:
                 logger.exception("ingest attempt failed; SQS will redeliver", attempt=receive_count)
@@ -153,6 +133,67 @@ def process_upload(upload: UploadRef, receive_count: int, deps: Dependencies) ->
 
     # Only after COMMIT: never announce data that might still roll back.
     deps.notifier.notify_job_completed(job_id)
+    return Outcome.COMPLETED
+
+
+def _bad_file(conn: psycopg.Connection, job_id: uuid.UUID, err: Exception) -> Outcome:
+    """The file itself is unusable (missing columns, not UTF-8): retrying can't help."""
+    reason = str(err) if isinstance(err, MissingColumnsError) else "not UTF-8"
+    repository.fail_job(conn, job_id, f"bad file: {reason}")
+    logger.warning("job failed: bad file", reason=reason)
+    return Outcome.BAD_FILE
+
+
+def _load_in_memory(conn: psycopg.Connection, upload: UploadRef, deps: Dependencies) -> Outcome:
+    """The original path: validate the whole file in memory, then COPY + upsert."""
+    job_id = upload.job_id
+    try:
+        lines = iter_text_lines(deps.s3, upload.bucket, upload.key)
+        result = validate_csv(lines, deps.rules)
+    except (MissingColumnsError, UnicodeDecodeError) as err:
+        return _bad_file(conn, job_id, err)
+
+    # An owned upload's customers belong to that account: same file, fresh rows.
+    owner = repository.job_account(conn, job_id)
+    valid = scope_to_account(result.valid, owner) if owner else result.valid
+    counts = repository.load_users(conn, job_id, valid)
+    repository.save_rejects(conn, job_id, result.rejects)
+    return _complete(conn, job_id, result.total_rows, counts, len(result.rejects))
+
+
+def _load_streaming(conn: psycopg.Connection, upload: UploadRef, deps: Dependencies) -> Outcome:
+    """Constant memory: rows go from the S3 stream through COPY into Postgres as they are
+    read (repository.load_stream). Same counts, rejects and users as the in-memory path."""
+    job_id = upload.job_id
+    owner = repository.job_account(conn, job_id)
+    scope = (lambda user_id: scoped_user_id(user_id, owner)) if owner else None
+    try:
+        # A savepoint: a decode error halfway through the COPY rolls back only the staging,
+        # so the job can still be marked FAILED in this transaction.
+        with conn.transaction():
+            rows = iter_rows(iter_text_lines(deps.s3, upload.bucket, upload.key), deps.rules)
+            load = repository.load_stream(conn, job_id, rows, scope)
+    except (MissingColumnsError, UnicodeDecodeError) as err:
+        return _bad_file(conn, job_id, err)
+    return _complete(conn, job_id, load.total_rows, load.counts, load.rejected)
+
+
+def _complete(
+    conn: psycopg.Connection,
+    job_id: uuid.UUID,
+    total_rows: int,
+    counts: repository.LoadCounts,
+    rejected: int,
+) -> Outcome:
+    repository.complete_job(conn, job_id, total_rows=total_rows, counts=counts, rejected=rejected)
+    logger.info(
+        "job completed",
+        total_rows=total_rows,
+        inserted=counts.inserted,
+        updated=counts.updated,
+        unchanged=counts.unchanged,
+        rejected=rejected,
+    )
     return Outcome.COMPLETED
 
 
