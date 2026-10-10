@@ -157,3 +157,32 @@ def test_same_file_again_changes_nothing(db, first_upload):
     result = match(db, job_id)
     assert (result["expand"]["matches_new"], result["expand"]["matches_superseded"]) == (0, 0)
     assert result["proof"]["mismatches"] == 0
+
+
+def test_independent_recompute_matches_the_engine(db, first_upload):
+    """scripts/recompute_eligibility.py (plain Python, no SQL) agrees with the analytics chart."""
+    import importlib.util
+    import sys
+
+    from loan_engine.api import repository
+
+    spec = importlib.util.spec_from_file_location(
+        "recompute", ROOT / "scripts" / "recompute_eligibility.py"
+    )
+    recompute = importlib.util.module_from_spec(spec)
+    sys.modules["recompute"] = recompute  # dataclasses look their module up while loading
+    spec.loader.exec_module(recompute)  # type: ignore[union-attr]
+
+    job_id, _ = first_upload
+    products = db.execute("SELECT coalesce(json_agg(p), '[]') FROM loan_products p").fetchone()[0]
+    rules = db.execute(
+        "SELECT coalesce(json_agg(r), '[]') FROM criteria_rules r WHERE prompt_version = %s",
+        (PROMPT_VERSION,),
+    ).fetchone()[0]
+    users = recompute.read_users(golden_csv().decode())
+    independent = {r["lender"]: r for r in recompute.recompute(users, products, rules)}
+    chart = repository.analytics(db, job_id)["top_lenders"]
+    assert len(chart) == 10
+    for row in chart:
+        mine = independent[row["lender"]]
+        assert (mine["users"], mine["eligible_users"]) == (row["users"], row["eligible_users"])

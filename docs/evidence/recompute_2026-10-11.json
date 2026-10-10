@@ -1,0 +1,191 @@
+{
+ "captured_utc": "2026-10-10T18:48Z",
+ "upload_job_id": "745637c2-4b70-40a4-b92b-1119e7f5ca1f",
+ "input": "data/users.csv (10,000 rows, not committed) + active loan_products + criteria_rules (compile_v1), exported read-only",
+ "command": ".venv/bin/python scripts/recompute_eligibility.py data/users.csv products.json --rules rules.json",
+ "lenders": [
+  {
+   "lender": "Axis Bank",
+   "script_users": 10000,
+   "script_eligible_users": 10000,
+   "engine_users": 10000,
+   "engine_eligible_users": 10000
+  },
+  {
+   "lender": "YES Bank",
+   "script_users": 6755,
+   "script_eligible_users": 6755,
+   "engine_users": 6755,
+   "engine_eligible_users": 6755
+  },
+  {
+   "lender": "IndusInd Bank",
+   "script_users": 10000,
+   "script_eligible_users": 6429,
+   "engine_users": 10000,
+   "engine_eligible_users": 6429
+  },
+  {
+   "lender": "IDFC FIRST Bank",
+   "script_users": 10000,
+   "script_eligible_users": 6095,
+   "engine_users": 10000,
+   "engine_eligible_users": 6095
+  },
+  {
+   "lender": "Bank Of India",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Central Bank Of India",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Federal Bank",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Punjab And Sind Bank",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "SBI",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Standard Chartered",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Union Bank",
+   "script_users": 10000,
+   "script_eligible_users": 0,
+   "engine_users": 10000,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "RBL Bank",
+   "script_users": 8303,
+   "script_eligible_users": 0,
+   "engine_users": 8303,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Bank of Baroda",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "HDB Financial Services",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "HDFC Bank",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "IIFL Finance",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Idbi",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Kotak Mahindra Bank",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Tata Capital",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Ujjivan",
+   "script_users": 6760,
+   "script_eligible_users": 0,
+   "engine_users": 6760,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "ICICI Bank",
+   "script_users": 6494,
+   "script_eligible_users": 0,
+   "engine_users": 6494,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Bank Of Maharashtra",
+   "script_users": 3389,
+   "script_eligible_users": 0,
+   "engine_users": 3389,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Canara Bank",
+   "script_users": 3389,
+   "script_eligible_users": 0,
+   "engine_users": 3389,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Indian Bank",
+   "script_users": 3389,
+   "script_eligible_users": 0,
+   "engine_users": 3389,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Punjab National Bank",
+   "script_users": 3389,
+   "script_eligible_users": 0,
+   "engine_users": 3389,
+   "engine_eligible_users": 0
+  },
+  {
+   "lender": "Uco",
+   "script_users": 3389,
+   "script_eligible_users": 0,
+   "engine_users": 3389,
+   "engine_eligible_users": 0
+  }
+ ],
+ "differences": 0
+}

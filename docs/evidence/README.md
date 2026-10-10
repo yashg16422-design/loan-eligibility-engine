@@ -44,10 +44,14 @@ migration `007_pipeline_notes.sql` applied the same rule to the cached compile r
 | 0 mismatches against the brute-force check of every pair | `correctness_ok` | true |
 | 103.6 s (includes rewriting ~33,000 tiers in place) | `seconds` | 103.6 |
 
-After the re-run, eligible users per lender were recomputed independently from `users.csv` and
-each product's published criteria (a separate Python script, not the engine): all 10 lenders in
-the analytics chart matched exactly (Axis Bank 10,000; IndusInd 6,429; YES Bank 6,755; IDFC FIRST
-6,095; Federal Bank 0). Known quirk: early product-mode run `c6b74e76` recorded
+Eligible users per lender are recomputed independently by
+[`scripts/recompute_eligibility.py`](../../scripts/recompute_eligibility.py): plain Python over
+`users.csv`, the active products and the compiled rules, with no database, no SQL and no classes.
+On the live upload `745637c2` (2026-10-10) it agreed with the engine for **all 26 lenders, 0
+differences** in both "users with an offer" and "eligible outright" (Axis Bank 10,000 / 10,000;
+YES Bank 6,755 / 6,755; IndusInd 10,000 / 6,429; IDFC FIRST 10,000 / 6,095; Federal Bank 10,000 /
+0): [`recompute_2026-10-11.json`](recompute_2026-10-11.json). The same check runs in CI on the
+synthetic file (`tests/integration/test_golden.py`). Known quirk: early product-mode run `c6b74e76` recorded
 `llm_cache_hits = -36`, a bad counter value from that run; it is not quoted anywhere.
 
 `docs/extras/mock/*.json` are earlier exports used as sample data for the front ends; this
