@@ -145,8 +145,11 @@ export const api = {
   upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`, {}, false, true).then((r) => r.body),
   uploads: () => request<UploadRecord[]>("/uploads", {}, false, true).then((r) => r.body),
   emailPreviews: (jobId: string) => request<EmailPreview[]>(`/uploads/${jobId}/emails`, {}, false, true).then((r) => r.body),
+  // Public: only the reference dataset. Signed in: one of my uploads (owner or admin), with the ID token.
   analytics: (jobId?: string | null) =>
     request<Analytics>(`/analytics${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`).then((r) => r.body),
+  uploadAnalytics: (jobId: string) =>
+    request<Analytics>(`/uploads/${encodeURIComponent(jobId)}/analytics`, {}, false, true).then((r) => r.body),
   account: () => request<Account>("/account", {}, false, true).then((r) => r.body),
   setDailyPicks: (daily_picks: boolean) =>
     request<Account>("/account", { method: "PUT", body: JSON.stringify({ daily_picks }) }, false, true).then((r) => r.body),

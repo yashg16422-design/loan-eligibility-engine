@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 *.pem
+# Public RDS CA certificates (no key material): the Lambdas verify RDS's certificate with it.
+!loan_engine/common/certs/rds-ap-southeast-2-bundle.pem
 *.key
 .aws/
 

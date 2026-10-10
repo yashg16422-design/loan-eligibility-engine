@@ -68,6 +68,7 @@ functions:
         - !Ref PrivateSubnetB
     environment:
       DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SSLMODE: verify-full # the RDS CA bundle ships in the package (rollback: require)
       # ARNs only: the Lambda reads the secret values at runtime via the VPC endpoint.
       MASTER_SECRET_ARN: !GetAtt Database.MasterUserSecret.SecretArn
       APP_INGEST_SECRET_ARN: !Ref AppIngestDbSecret
@@ -88,6 +89,7 @@ functions:
         - !Ref PrivateSubnetB
     environment:
       DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SSLMODE: verify-full # the RDS CA bundle ships in the package (rollback: require)
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       # Pluggable seams: change behaviour by config, not code.
       VALIDATION_RULES: "" # JSON overrides, e.g. '{"age_min": 21}'; empty = PLAN.md §9 defaults
@@ -101,6 +103,28 @@ functions:
           arn: !GetAtt IngestQueue.Arn
           batchSize: 1 # one file per invocation: simple, isolated failures
           maximumConcurrency: 2 # the minimum allowed; protects RDS connections
+
+  ingestDlq:
+    handler: loan_engine/ingest/dlq.handler
+    description: Dead-letter consumer - an upload whose ingest crashed 3 times is marked FAILED
+    role: IngestDlqRole
+    timeout: 20 # below the DLQ's default 30 s visibility timeout, so the DLQ itself is unchanged
+    memorySize: 256
+    vpc:
+      securityGroupIds:
+        - !Ref LambdaSG
+      subnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+    environment:
+      DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SSLMODE: verify-full # the RDS CA bundle ships in the package (rollback: require)
+      DB_SECRET_ARN: !Ref AppIngestDbSecret
+      POWERTOOLS_LOG_LEVEL: INFO
+    events:
+      - sqs:
+          arn: !GetAtt IngestDLQ.Arn
+          batchSize: 1
 
   api:
     handler: loan_engine/api/handler.handler
@@ -116,6 +140,7 @@ functions:
         - !Ref PrivateSubnetB
     environment:
       DB_HOST: !GetAtt Database.Endpoint.Address
+      DB_SSLMODE: verify-full # the RDS CA bundle ships in the package (rollback: require)
       DB_SECRET_ARN: !Ref AppIngestDbSecret
       DATA_BUCKET: ${self:custom.dataBucket}
       TOKEN_SECRET_ARN: !Ref DashboardTokenSecret
@@ -148,6 +173,10 @@ functions:
       - httpApi:
           method: GET
           path: /uploads/{job_id}/emails
+          authorizer: { name: cognito }
+      - httpApi:
+          method: GET
+          path: /uploads/{job_id}/analytics
           authorizer: { name: cognito }
       - httpApi: POST /check
       - httpApi: GET /me
@@ -582,6 +611,25 @@ resources:
         TreatMissingData: notBreaching
         AlarmActions: [!Ref AlarmTopic]
 
+    # The consumer removes dead-letter messages, so the queue-depth alarm above may never see
+    # one: alarm on the consumer running instead (every run = a crashed upload).
+    IngestDlqConsumedAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${sls:stage}-ingest-dlq-consumed
+        AlarmDescription: An upload crashed ingest hard 3 times and was marked FAILED from the DLQ; check its job and the ingest logs.
+        Namespace: AWS/Lambda
+        MetricName: Invocations
+        Dimensions:
+          - { Name: FunctionName, Value: !Ref IngestDlqLambdaFunction }
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmTopic]
+
     IngestErrorsAlarm:
       Type: AWS::CloudWatch::Alarm
       Properties:
@@ -1005,6 +1053,36 @@ resources:
                     - sqs:GetQueueAttributes
                     - sqs:ChangeMessageVisibility
                   Resource: !GetAtt IngestQueue.Arn
+
+    IngestDlqRole: # its DB login and the dead-letter queue, nothing else
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: ingest-dlq
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: OwnDbSecretOnly
+                  Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref AppIngestDbSecret
+                - Sid: ConsumeDeadLetterQueue
+                  Effect: Allow
+                  Action:
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:GetQueueAttributes
+                    - sqs:ChangeMessageVisibility
+                  Resource: !GetAtt IngestDLQ.Arn
 
     ApiRole:
       Type: AWS::IAM::Role

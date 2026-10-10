@@ -18,12 +18,13 @@ def create_job(
     filename: str | None,
     source: str = "csv",
     account_id: str | None = None,
+    requester_hash: str | None = None,
 ) -> None:
     """Register the upload ticket before any file can reach S3 for it (owned by an account)."""
     conn.execute(
-        "INSERT INTO upload_jobs (job_id, s3_key, original_filename, source, account_id)"
-        " VALUES (%s, %s, %s, %s, %s)",
-        (job_id, s3_key, filename, source, account_id),
+        "INSERT INTO upload_jobs (job_id, s3_key, original_filename, source, account_id,"
+        " requester_hash) VALUES (%s, %s, %s, %s, %s, %s)",
+        (job_id, s3_key, filename, source, account_id, requester_hash),
     )
 
 
@@ -35,11 +36,14 @@ def upload_owner(conn: psycopg.Connection, job_id: uuid.UUID) -> tuple[bool, str
     return (row is not None, row[0] if row else None)
 
 
-def csv_uploads_last_24h(conn: psycopg.Connection) -> int:
-    """Upload tickets issued in the last 24 h (each can trigger emails: the SES-quota guard)."""
+def csv_uploads_last_24h(conn: psycopg.Connection, account_id: str | None = None) -> int:
+    """Upload tickets issued in the last 24 h (each can trigger emails: the SES-quota guard),
+    for every account, or for one account when `account_id` is given."""
     row = conn.execute(
         "SELECT count(*) FROM upload_jobs"
         " WHERE source = 'csv' AND created_at > now() - interval '24 hours'"
+        " AND (%(account)s::text IS NULL OR account_id = %(account)s::text)",
+        {"account": account_id},
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -54,11 +58,14 @@ def awaiting_notification(conn: psycopg.Connection, user_ids: list[uuid.UUID]) -
     return {r[0] for r in rows}
 
 
-def instant_checks_last_24h(conn: psycopg.Connection) -> int:
-    """How many instant checks ran in the last 24 h (the SES-quota guard)."""
+def instant_checks_last_24h(conn: psycopg.Connection, requester: str | None = None) -> int:
+    """How many instant checks ran in the last 24 h (the SES-quota guard), in total or from one
+    requester (a salted hash of the source IP; the raw IP is never stored)."""
     row = conn.execute(
         "SELECT count(*) FROM upload_jobs"
         " WHERE source = 'instant_check' AND created_at > now() - interval '24 hours'"
+        " AND (%(requester)s::text IS NULL OR requester_hash = %(requester)s::text)",
+        {"requester": requester},
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -232,29 +239,54 @@ _RUN_COLUMNS = """
     matches_new, matches_superseded, matches_unchanged, correctness_ok,
     emails_sent, emails_failed, emails_skipped_demo,
     (SELECT j.purged_at IS NOT NULL FROM upload_jobs j
-       WHERE j.job_id = pipeline_runs.job_id) AS purged
+       WHERE j.job_id = pipeline_runs.job_id) AS purged,
+    (SELECT j.account_id IS NOT NULL FROM upload_jobs j
+       WHERE j.job_id = pipeline_runs.job_id) AS owned
 """
+
+# The public showcase dataset: the largest completed upload that belongs to no one or to an
+# admin (the operator), and whose customers are still stored. Another merchant's upload can
+# never become public this way, however large it is.
+_REFERENCE_RUN = f"""
+    SELECT {_RUN_COLUMNS} FROM pipeline_runs
+    WHERE mode = 'upload' AND status = 'done'
+      AND EXISTS (SELECT 1 FROM upload_jobs ref
+                  WHERE ref.job_id = pipeline_runs.job_id AND ref.source = 'csv'
+                    AND ref.purged_at IS NULL
+                    AND (ref.account_id IS NULL
+                         OR ref.account_id IN (SELECT account_id FROM accounts WHERE is_admin)))
+    ORDER BY users_in DESC NULLS LAST, started_at DESC LIMIT 1
+"""
+
+
+def reference_job(conn: psycopg.Connection) -> uuid.UUID | None:
+    """The job behind the public reference dataset (see _REFERENCE_RUN), if there is one."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        row = cur.execute(_REFERENCE_RUN).fetchone()
+    return row["job_id"] if row else None
 
 
 def ops_runs(conn: psycopg.Connection) -> list[dict[str, Any]]:
     """The latest matching runs: the measured Treasure Hunt funnel, no personal data.
 
-    The largest completed upload run (the full-file reference: 10,000 users x 59 products) is
-    always included and flagged `reference`, so newer small runs never push it out of view.
+    The reference run (_REFERENCE_RUN: the operator's full-file upload) is always included and
+    flagged `reference`, so newer small runs never push it out of view. This list is public:
+    a run whose upload belongs to a merchant keeps its counters but not its job_id, so nobody
+    can address another account's upload from here.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         runs = cur.execute(
             f"SELECT {_RUN_COLUMNS} FROM pipeline_runs ORDER BY started_at DESC LIMIT %s",
             (OPS_ROWS,),
         ).fetchall()
-        biggest = cur.execute(
-            f"SELECT {_RUN_COLUMNS} FROM pipeline_runs WHERE mode = 'upload' AND status = 'done'"
-            " ORDER BY users_in DESC NULLS LAST, started_at DESC LIMIT 1"
-        ).fetchone()
+        reference = cur.execute(_REFERENCE_RUN).fetchone()
     for run in runs:
-        run["reference"] = biggest is not None and run["run_id"] == biggest["run_id"]
-    if biggest is not None and not any(r["reference"] for r in runs):
-        runs.append({**biggest, "reference": True})
+        run["reference"] = reference is not None and run["run_id"] == reference["run_id"]
+    if reference is not None and not any(r["reference"] for r in runs):
+        runs.append({**reference, "reference": True})
+    for run in runs:
+        if run.pop("owned", False) and not run["reference"]:
+            run["job_id"] = None
     return runs
 
 
@@ -640,6 +672,15 @@ SELECT
              count(DISTINCT user_id) FILTER (WHERE tier = 'eligible')::int AS eligible_users
       FROM m GROUP BY lender ORDER BY 3 DESC, 2 DESC, 1 LIMIT 10) x) AS top_lenders
 """
+
+
+def analytics_version(conn: psycopg.Connection, job_id: uuid.UUID) -> tuple[Any, ...] | None:
+    """What an upload's analytics depend on: when it was last matched and whether its customers
+    were deleted. Unchanged version = unchanged charts (the api caches on it)."""
+    row = conn.execute(
+        "SELECT matched_at, purged_at FROM upload_jobs WHERE job_id = %s", (job_id,)
+    ).fetchone()
+    return tuple(row) if row else None
 
 
 def analytics(conn: psycopg.Connection, job_id: uuid.UUID | None) -> dict[str, Any]:

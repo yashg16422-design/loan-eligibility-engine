@@ -424,11 +424,18 @@ def test_data_reset_runs_as_app_ingest_and_keeps_history(db):
     )
     runs = repository.ops_runs(db)
     assert any(r["job_id"] == csv_job and r["purged"] for r in runs)
-    # Newer small runs never hide the full-file reference run.
+    # The reference run is the largest completed upload that belongs to no one or to an admin
+    # and still has its customers (computed independently here); a purged upload never is.
     refs = [r for r in runs if r["reference"]]
-    assert len(refs) == 1 and (refs[0]["users_in"] or 0) == max(
-        r["users_in"] or 0 for r in runs if r["mode"] == "upload" and r["status"] == "done"
-    )
+    expected = db.execute(
+        "SELECT r.run_id FROM pipeline_runs r JOIN upload_jobs j USING (job_id) "
+        "WHERE r.mode = 'upload' AND r.status = 'done' AND j.source = 'csv' "
+        "AND j.purged_at IS NULL AND (j.account_id IS NULL OR j.account_id IN "
+        "(SELECT account_id FROM accounts WHERE is_admin)) "
+        "ORDER BY r.users_in DESC NULLS LAST, r.started_at DESC LIMIT 1"
+    ).fetchone()
+    assert [r["run_id"] for r in refs] == ([expected[0]] if expected else [])
+    assert not any(r["reference"] and r["job_id"] == csv_job for r in runs)
     # The upload list shows the cleared upload as its own record, emptied but kept.
     records = {r["job_id"]: r for r in repository.list_uploads(db, None)}  # admin: all
     assert records[csv_job]["users_now"] == 0 and records[csv_job]["purged_at"] is not None
@@ -532,3 +539,40 @@ def test_prewrite_proof_stops_a_wrong_decision_before_any_match_is_written(db):
     assert db.execute(
         "SELECT prewrite_ok FROM pipeline_runs WHERE run_id = %s", (run,)
     ).fetchone() == (False,)
+
+
+def test_reference_dataset_is_never_another_merchants_upload(db):
+    """Public views (/analytics, /ops/runs) expose only the operator's reference upload."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "INSERT INTO accounts (account_id, email, is_admin) VALUES "
+        "('t4-admin', 't4-admin@example.org', true), ('t4-merchant', 't4-m@example.org', false)"
+    )
+    jobs = {}
+    for owner, users in (("t4-admin", 50_000), ("t4-merchant", 60_000)):
+        job = uuid.uuid4()
+        jobs[owner] = job
+        db.execute(
+            "INSERT INTO upload_jobs (job_id, s3_key, account_id, status) "
+            "VALUES (%s, %s, %s, 'COMPLETED')",
+            (job, f"raw/{job}.csv", owner),
+        )
+        db.execute(
+            "INSERT INTO pipeline_runs (mode, job_id, status, users_in, finished_at) "
+            "VALUES ('upload', %s, 'done', %s, now())",
+            (job, users),
+        )
+    # The merchant's upload is larger, but only the admin's can be the public reference.
+    assert repository.reference_job(db) == jobs["t4-admin"]
+    runs = repository.ops_runs(db)
+    by_job = {r["job_id"] for r in runs}
+    assert jobs["t4-admin"] in by_job and jobs["t4-merchant"] not in by_job
+    assert any(r["users_in"] == 60_000 and r["job_id"] is None for r in runs)  # counters stay
+    assert all("owned" not in r for r in runs)
+    # Caps count per account.
+    assert repository.csv_uploads_last_24h(db, "t4-merchant") == 1
+    assert repository.csv_uploads_last_24h(db) >= 2
+    # A purged reference upload stops being public.
+    db.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (jobs["t4-admin"],))
+    assert repository.reference_job(db) != jobs["t4-admin"]

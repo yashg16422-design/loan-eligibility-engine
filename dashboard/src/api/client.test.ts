@@ -52,13 +52,26 @@ describe("merchant calls carry the sign-in", () => {
     await api.upload("job-1");
     await api.createUpload("users.csv");
     await api.purgeUpload("job-1");
+    await api.uploadAnalytics("job-1");
+    await api.emailPreviews("job-1");
     const sent = fetch.mock.calls.map(([path, init]) => [path, new Headers((init as RequestInit).headers).get("authorization")]);
     expect(sent).toEqual([
       ["/uploads", "Bearer id-token"],
       ["/uploads/job-1", "Bearer id-token"],
       ["/uploads", "Bearer id-token"],
       ["/uploads/job-1", "Bearer id-token"],
+      ["/uploads/job-1/analytics", "Bearer id-token"],
+      ["/uploads/job-1/emails", "Bearer id-token"],
     ]);
+  });
+
+  it("asks the public analytics route for nothing but the reference dataset, without a token", async () => {
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(json(200, {})));
+    vi.stubGlobal("fetch", fetch);
+    await api.analytics("ref-job");
+    const [path, init] = fetch.mock.calls[0];
+    expect(path).toBe("/analytics?job_id=ref-job");
+    expect(new Headers((init as RequestInit).headers).get("authorization")).toBeNull();
   });
 
   it("turns the gateway's bare 401 into what to do next", async () => {

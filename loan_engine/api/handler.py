@@ -63,6 +63,7 @@ logger = Logger(service="api")
 
 # Each upload can email up to the demo cap of users; the SES sandbox allows 200 emails a day.
 MAX_UPLOADS_PER_DAY = 50
+MAX_UPLOADS_PER_ACCOUNT_PER_DAY = 10  # one merchant cannot use up everyone's daily budget
 MAX_EMAIL_TOKENS = 50  # Workflow C sends at most a handful per run (SES sandbox)
 ADMIN_GROUP = "admin"  # a Cognito user pool group (serverless.yml AdminGroup)
 
@@ -386,6 +387,9 @@ def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
     with db(deps) as conn:
         if repository.csv_uploads_last_24h(conn) >= MAX_UPLOADS_PER_DAY:
             raise TooManyChecksError
+        mine = repository.csv_uploads_last_24h(conn, who.account_id)
+        if not who.is_admin and mine >= MAX_UPLOADS_PER_ACCOUNT_PER_DAY:
+            raise TooManyChecksError
         repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
     # Local signing with the Lambda role's credentials: no network call.
@@ -424,7 +428,7 @@ def get_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]:
 
 
 @app.post("/check", status_code=201)
-def create_check(body: Body, deps: Deps) -> dict[str, str]:
+def create_check(request: Request, body: Body, deps: Deps) -> dict[str, str]:
     """One person's check through the SAME pipeline as a bulk upload (S3 -> SQS -> ingest)."""
     user_id = uuid.uuid4()
     try:
@@ -434,11 +438,22 @@ def create_check(body: Body, deps: Deps) -> dict[str, str]:
 
     job_id = uuid.uuid4()
     key = raw_key_for(job_id)
+    event = request.scope.get("aws.event") or {}
+    source_ip = ((event.get("requestContext") or {}).get("http") or {}).get("sourceIp")
+    requester = instant_check.requester_hash(source_ip, token_key(deps.token_secret_arn))
     with db(deps) as conn:
         if repository.instant_checks_last_24h(conn) >= instant_check.MAX_CHECKS_PER_DAY:
             raise TooManyChecksError
+        if (
+            requester
+            and repository.instant_checks_last_24h(conn, requester)
+            >= instant_check.MAX_CHECKS_PER_REQUESTER_PER_DAY
+        ):
+            raise TooManyChecksError
         # The job row first: ingest only accepts files for known jobs.
-        repository.create_job(conn, job_id, key, "instant-check.csv", source="instant_check")
+        repository.create_job(
+            conn, job_id, key, "instant-check.csv", source="instant_check", requester_hash=requester
+        )
     deps.s3.put_object(
         Bucket=deps.bucket, Key=key, Body=instant_check.to_csv(row), ContentType="text/csv"
     )
@@ -530,10 +545,35 @@ def get_ops_errors(deps: Deps) -> list[dict[str, Any]]:
         return repository.ops_errors(conn)
 
 
+# Analytics of a 10,000-user upload aggregate ~250k matches (seconds on a t4g.micro); the
+# answer only changes when the upload is re-matched or deleted, so each container keeps it.
+_ANALYTICS_CACHE: dict[tuple[uuid.UUID, tuple[Any, ...]], dict[str, Any]] = {}
+_ANALYTICS_CACHE_SIZE = 32
+
+
+def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, Any]:
+    """repository.analytics, reused while the upload's (matched_at, purged_at) is unchanged."""
+    version = repository.analytics_version(conn, job_id)
+    if version is None:
+        return repository.analytics(conn, job_id)
+    key = (job_id, version)
+    if key not in _ANALYTICS_CACHE:
+        if len(_ANALYTICS_CACHE) >= _ANALYTICS_CACHE_SIZE:
+            _ANALYTICS_CACHE.pop(next(iter(_ANALYTICS_CACHE)))  # oldest first
+        _ANALYTICS_CACHE[key] = repository.analytics(conn, job_id)
+    return _ANALYTICS_CACHE[key]
+
+
 @app.get("/analytics")
 def get_analytics(deps: Deps, job_id: uuid.UUID | None = None) -> dict[str, Any]:
+    """Public: ONLY the reference dataset (the operator's full-file upload), so signed-out
+    visitors see a real example. Any other upload's analytics need its owner's sign-in:
+    GET /uploads/{job_id}/analytics."""
     with db(deps) as conn:
-        return repository.analytics(conn, job_id)
+        reference = repository.reference_job(conn)
+        if reference is None or (job_id is not None and job_id != reference):
+            raise NotFoundError("dataset not found")
+        return cached_analytics(conn, reference)
 
 
 @app.post("/internal/email-tokens")
@@ -670,6 +710,14 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
         counts = repository.purge_csv_uploads(conn, None if scope == "all" else who.account_id)
     logger.info("uploads purged", scope=scope, **counts)
     return counts
+
+
+@app.get("/uploads/{job_id}/analytics")
+def get_upload_analytics(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]:
+    """Charts for one of my uploads (owner or admin): aggregates only."""
+    with db(deps) as conn:
+        own_upload(conn, job_id, who)
+        return cached_analytics(conn, job_id)
 
 
 @app.get("/uploads/{job_id}/emails")

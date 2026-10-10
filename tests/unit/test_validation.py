@@ -248,3 +248,14 @@ def test_header_spelling_variants_match_by_name():
         "credit_score",
         "employment_status",
     ]
+
+
+def test_db_tls_is_verified_when_configured():
+    from loan_engine.common import db
+
+    assert db.tls_options({}) == {"sslmode": "require"}  # local tests and CI
+    full = db.tls_options({"DB_SSLMODE": "verify-full"})
+    assert full == {"sslmode": "verify-full", "sslrootcert": str(db.RDS_CA_BUNDLE)}
+    assert db.RDS_CA_BUNDLE.read_text().count("BEGIN CERTIFICATE") >= 1  # shipped in the package
+    custom = db.tls_options({"DB_SSLMODE": "verify-ca", "DB_SSLROOTCERT": "/tmp/ca.pem"})
+    assert custom["sslrootcert"] == "/tmp/ca.pem"

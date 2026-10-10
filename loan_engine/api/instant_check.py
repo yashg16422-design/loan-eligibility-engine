@@ -11,6 +11,8 @@ No real email is ever collected. The row carries a reserved, undeliverable addre
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 import re
 import uuid
@@ -33,6 +35,7 @@ CSV_HEADER = (
     "age",
 )
 MAX_CHECKS_PER_DAY = 100  # SES sandbox sends 200 emails/day; leave room for real uploads
+MAX_CHECKS_PER_REQUESTER_PER_DAY = 20  # one visitor cannot use up everyone's daily budget
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 # Friendly messages for the validator's reason codes (the API returns them as-is).
@@ -102,3 +105,14 @@ def to_csv(row: UserRow) -> bytes:
         ]
     )
     return out.getvalue().encode("utf-8")
+
+
+def requester_hash(source_ip: str | None, key: bytes) -> str | None:
+    """A keyed hash of the caller's IP for the per-requester cap; the raw IP is never stored.
+
+    Keyed (HMAC) rather than a plain hash: the IPv4 space is small enough to brute-force an
+    unkeyed hash back to the address.
+    """
+    if not source_ip:
+        return None
+    return hmac.new(key, source_ip.strip().encode(), hashlib.sha256).hexdigest()[:32]

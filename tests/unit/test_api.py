@@ -211,7 +211,9 @@ class TestCreateUploadRoute:
         monkeypatch.setattr(api, "token_key", lambda arn: b"k" * 32)
         monkeypatch.setattr(api, "cached_db_credentials", lambda arn: None)
         monkeypatch.setattr(api, "connect", lambda *a, **k: FakeConn())
-        monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn: 0)  # under the cap
+        monkeypatch.setattr(
+            api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0
+        )  # under the cap
         monkeypatch.setattr(
             api.repository,
             "upsert_account",

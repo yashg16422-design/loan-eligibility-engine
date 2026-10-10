@@ -1,5 +1,6 @@
 """Unit tests for the borrower-dashboard API: tokens, instant check, preferences, static, routes."""
 
+import dataclasses
 import json
 import re
 import time
@@ -216,18 +217,25 @@ def call(route, lambda_context, body=None, token=None):
 class TestCheckRoute:
     def test_queues_a_job_and_returns_a_token(self, deps, monkeypatch, lambda_context):
         jobs = []
-        monkeypatch.setattr(api.repository, "instant_checks_last_24h", lambda conn: 0)
+        monkeypatch.setattr(
+            api.repository, "instant_checks_last_24h", lambda conn, requester=None: 0
+        )
         monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: jobs.append((a, k)))
         status, body = call("POST /check", lambda_context, CHECK_BODY)
         assert status == 201
         assert tokens.verify(body["token"], KEY, int(time.time())) == uuid.UUID(body["user_id"])
-        assert jobs[0][1] == {"source": "instant_check"}
+        # The requester is stored only as a keyed hash of the source IP, never the IP itself.
+        expected = instant_check.requester_hash("203.0.113.7", KEY)
+        assert jobs[0][1] == {"source": "instant_check", "requester_hash": expected}
+        assert "203.0.113.7" not in repr(jobs)
         put = deps.s3.puts[0]
         assert put["Key"] == f"raw/{body['job_id']}.csv"  # the same key a CSV upload uses
         assert body["user_id"].encode() in put["Body"]
 
     def test_daily_cap(self, deps, monkeypatch, lambda_context):
-        monkeypatch.setattr(api.repository, "instant_checks_last_24h", lambda conn: 10**6)
+        monkeypatch.setattr(
+            api.repository, "instant_checks_last_24h", lambda conn, requester=None: 10**6
+        )
         status, _ = call("POST /check", lambda_context, CHECK_BODY)
         assert status == 429
         assert deps.s3.puts == []
@@ -499,7 +507,7 @@ def test_upload_tickets_have_a_daily_cap(deps, monkeypatch, lambda_context):
     monkeypatch.setattr(api, "connect", lambda *a, **k: contextmanager(lambda: (yield object()))())
     monkeypatch.setattr(api, "cached_db_credentials", lambda arn: None)
     monkeypatch.setattr(
-        api.repository, "csv_uploads_last_24h", lambda conn: api.MAX_UPLOADS_PER_DAY
+        api.repository, "csv_uploads_last_24h", lambda conn, account=None: api.MAX_UPLOADS_PER_DAY
     )
     res = invoke(
         {
@@ -742,3 +750,108 @@ def test_email_previews_are_private_to_the_upload_owner(deps, monkeypatch, lambd
     assert (
         res["statusCode"] == 200 and json.loads(res["body"])[0]["alias_email"] == "x+one@gmail.com"
     )
+
+
+# ---------------------------------------------------------------- account isolation (T4)
+
+
+def test_requester_hash_is_keyed_and_never_the_ip():
+    one = instant_check.requester_hash("203.0.113.7", KEY)
+    assert one == instant_check.requester_hash(" 203.0.113.7 ", KEY) and len(one) == 32
+    assert "203" not in one
+    assert one != instant_check.requester_hash("203.0.113.7", b"other-key" * 4)
+    assert instant_check.requester_hash("", KEY) is None
+    assert instant_check.requester_hash(None, KEY) is None
+
+
+def test_one_visitor_cannot_use_up_the_daily_checks(deps, monkeypatch, lambda_context):
+    seen = []
+
+    def checks(conn, requester=None):
+        seen.append(requester)
+        return instant_check.MAX_CHECKS_PER_REQUESTER_PER_DAY if requester else 0
+
+    monkeypatch.setattr(api.repository, "instant_checks_last_24h", checks)
+    status, _ = call("POST /check", lambda_context, CHECK_BODY)
+    assert status == 429 and deps.s3.puts == []
+    assert seen == [None, instant_check.requester_hash("203.0.113.7", KEY)]
+
+
+def test_upload_cap_is_per_account_and_admins_are_exempt(deps, monkeypatch, lambda_context):
+    def uploads(conn, account=None):
+        return api.MAX_UPLOADS_PER_ACCOUNT_PER_DAY if account == MERCHANT["sub"] else 0
+
+    monkeypatch.setattr(api.repository, "csv_uploads_last_24h", uploads)
+    monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: None)
+
+    class S3:
+        def generate_presigned_post(self, **kw):
+            return {"url": "https://s3", "fields": {}}
+
+    with_s3 = dataclasses.replace(deps, s3=S3())
+    monkeypatch.setattr(api, "dependencies", lambda: with_s3)
+    event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
+    assert invoke({**event, "requestContext": signed_in_as(MERCHANT)})["statusCode"] == 429
+    other = {**MERCHANT, "sub": "another-merchant", "email": "b@example.com"}
+    assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 201
+    boss = {**ADMIN, "sub": MERCHANT["sub"]}  # the same account, as an admin: not capped
+    assert invoke({**event, "requestContext": signed_in_as(boss)})["statusCode"] == 201
+
+
+class TestAnalyticsIsolation:
+    REF = uuid.UUID("745637c2-4b70-40a4-b92b-1119e7f5ca1f")
+    OWNED = uuid.UUID("0b7f9c1e-2a51-4f6e-9d3c-3f5d8a1c2b4e")
+
+    @pytest.fixture(autouse=True)
+    def stubs(self, deps, monkeypatch):
+        owners = {self.REF: "admin-sub", self.OWNED: "merchant-sub"}
+        monkeypatch.setattr(api.repository, "reference_job", lambda conn: self.REF)
+        monkeypatch.setattr(
+            api.repository, "upload_owner", lambda conn, j: (j in owners, owners.get(j))
+        )
+        monkeypatch.setattr(api.repository, "analytics", lambda conn, j: {"job": str(j)})
+        monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: ("v1", None))
+        monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
+
+    def public(self, job_id=None):
+        query = {"job_id": str(job_id)} if job_id else None
+        res = invoke({"routeKey": "GET /analytics", "queryStringParameters": query})
+        return res["statusCode"], json.loads(res["body"])
+
+    def test_signed_out_visitors_see_only_the_reference_dataset(self):
+        assert self.public() == (200, {"job": str(self.REF)})
+        assert self.public(self.REF) == (200, {"job": str(self.REF)})
+        # Another account's upload: not served, not even confirmed to exist.
+        assert self.public(self.OWNED)[0] == 404
+        assert self.public(uuid.uuid4())[0] == 404
+
+    def test_no_reference_dataset_means_nothing_public(self, monkeypatch):
+        monkeypatch.setattr(api.repository, "reference_job", lambda conn: None)
+        assert self.public()[0] == 404
+
+    def test_upload_analytics_are_for_the_owner_or_an_admin(self):
+        event = {
+            "routeKey": "GET /uploads/{job_id}/analytics",
+            "pathParameters": {"job_id": str(self.OWNED)},
+        }
+        other = {**MERCHANT, "sub": "someone-else"}
+        assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 404
+        for who in (MERCHANT, ADMIN):
+            res = invoke({**event, "requestContext": signed_in_as(who)})
+            assert (res["statusCode"], json.loads(res["body"])) == (200, {"job": str(self.OWNED)})
+
+
+def test_analytics_are_cached_until_the_upload_is_rematched_or_deleted(monkeypatch):
+    calls = []
+    version = {"v": ("2026-10-10T13:36", None)}
+    monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: version["v"])
+    monkeypatch.setattr(
+        api.repository, "analytics", lambda conn, j: calls.append(j) or {"n": len(calls)}
+    )
+    monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
+    job = uuid.uuid4()
+    assert api.cached_analytics(object(), job) == api.cached_analytics(object(), job) == {"n": 1}
+    version["v"] = ("2026-10-11T02:00", None)  # re-matched: fresh numbers
+    assert api.cached_analytics(object(), job) == {"n": 2}
+    version["v"] = ("2026-10-11T02:00", "2026-10-11T03:00")  # customers deleted
+    assert api.cached_analytics(object(), job) == {"n": 3}

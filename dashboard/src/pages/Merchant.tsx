@@ -170,7 +170,7 @@ export function Merchant() {
           <div className="mt-10">
             {chartJob ? (
               <>
-                <Charts jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} onLoaded={onChartsLoaded} />
+                <Charts jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} signedIn={!!email} onLoaded={onChartsLoaded} />
                 {email && <EmailPreviews jobId={chartJob} />}
               </>
             ) : email && uploads !== null ? (
@@ -465,20 +465,19 @@ function Readouts({ title, cells, cols }: { title: string; cells: Cell[]; cols: 
   );
 }
 
-function Charts({ jobId, name, onLoaded }: { jobId: string; name: string; onLoaded: () => void }) {
+function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: string; signedIn: boolean; onLoaded: () => void }) {
   const [data, setData] = useState<{ jobId: string; analytics: Analytics } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   useEffect(() => {
     let gone = false;
     setFailed(null);
-    api
-      .analytics(jobId)
+    (signedIn ? api.uploadAnalytics(jobId) : api.analytics(jobId))
       .then((a) => !gone && setData({ jobId, analytics: a }))
       .catch((err) => !gone && setFailed(err instanceof Error ? err.message : "The charts could not be loaded."));
     return () => {
       gone = true;
     };
-  }, [jobId]);
+  }, [jobId, signedIn]);
   const ready = data?.jobId === jobId;
   useEffect(() => {
     if (ready) onLoaded();

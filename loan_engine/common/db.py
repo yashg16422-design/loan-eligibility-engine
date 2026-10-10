@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Mapping
+from pathlib import Path
 
 import psycopg
 
@@ -10,6 +13,22 @@ from loan_engine.common.secrets import DbCredentials
 
 CONNECT_ATTEMPTS = 2  # one retry: seen live, a single connect timed out while RDS was idle
 RETRY_PAUSE_SECONDS = 0.3
+# Amazon's RDS CA bundle for ap-southeast-2 (https://truststore.pki.rds.amazonaws.com), shipped
+# inside the package so verification needs no network call.
+RDS_CA_BUNDLE = Path(__file__).with_name("certs") / "rds-ap-southeast-2-bundle.pem"
+
+
+def tls_options(env: Mapping[str, str]) -> dict[str, str]:
+    """libpq TLS settings from the environment.
+
+    DB_SSLMODE=verify-full (the deployed Lambdas): encrypted AND the server certificate must be
+    signed by the RDS CA and match the hostname. Unset = `require` (encrypted, not verified),
+    which local tests and CI use with their self-signed Postgres. Rollback = set it to require.
+    """
+    mode = env.get("DB_SSLMODE", "require")
+    if mode in ("verify-ca", "verify-full"):
+        return {"sslmode": mode, "sslrootcert": env.get("DB_SSLROOTCERT", str(RDS_CA_BUNDLE))}
+    return {"sslmode": mode}
 
 
 def connect(
@@ -21,11 +40,8 @@ def connect(
     autocommit: bool = False,
     application_name: str = "loan-engine",
 ) -> psycopg.Connection:
-    """Open a TLS connection to RDS.
+    """Open a TLS connection to RDS (see tls_options: verify-full in the deployed Lambdas).
 
-    sslmode=require: RDS (PG >= 15) refuses non-TLS connections anyway
-    (rds.force_ssl=1). Certificate verification (verify-full + the RDS CA
-    bundle) is a listed hardening step; traffic never leaves the private VPC.
     A failed connect is retried once (a transient network blip must not fail a request).
     """
     for attempt in range(1, CONNECT_ATTEMPTS + 1):
@@ -36,7 +52,7 @@ def connect(
                 dbname=dbname,
                 user=creds.username,
                 password=creds.password,
-                sslmode="require",
+                **tls_options(os.environ),
                 connect_timeout=5,  # fail fast: a hanging connect would burn the Lambda timeout
                 autocommit=autocommit,
                 application_name=application_name,
