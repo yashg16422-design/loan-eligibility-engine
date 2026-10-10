@@ -18,9 +18,22 @@ ssm() { # run shell commands on the instance, wait, print stdout (and stderr on 
   id="$(aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
     --timeout-seconds 900 --parameters "$(python3 -c 'import json,sys; print(json.dumps({"commands": sys.argv[1:], "executionTimeout": ["900"]}))' "$@")" \
     --query Command.CommandId --output text)"
-  # Poll (the AWS waiter gives up after ~100 s; a crawl takes longer).
-  while [[ "$(aws ssm get-command-invocation --region "$REGION" --command-id "$id" --instance-id "$INSTANCE" \
-             --query Status --output text 2>/dev/null)" =~ ^(Pending|InProgress|Delayed)?$ ]]; do sleep 5; done
+  # Poll (the AWS waiter gives up after ~100 s; a crawl takes longer). A failed status call
+  # (expired AWS session, no network) stops the script instead of looping forever.
+  local status tries=0
+  while true; do
+    if ! status="$(aws ssm get-command-invocation --region "$REGION" --command-id "$id" \
+                   --instance-id "$INSTANCE" --query Status --output text 2>/dev/null)"; then
+      tries=$((tries + 1))
+      if (( tries >= 6 )); then
+        echo "cannot read the SSM command status (AWS session expired?); command id $id" >&2
+        exit 1
+      fi
+      sleep 5; continue  # the invocation can take a moment to appear right after send-command
+    fi
+    [[ "$status" =~ ^(Pending|InProgress|Delayed)$ ]] || break
+    sleep 5
+  done
   aws ssm get-command-invocation --region "$REGION" --command-id "$id" --instance-id "$INSTANCE" \
     --query '[Status, StandardOutputContent, StandardErrorContent]' --output text
 }
