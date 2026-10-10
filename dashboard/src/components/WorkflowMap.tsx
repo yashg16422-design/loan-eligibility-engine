@@ -67,7 +67,7 @@ const STATUS_LABEL: Record<Status, string> = { waiting: "Waiting", active: "In p
 export function WorkflowMap({ state }: { state: UploadState }) {
   const nodes = stages(state);
   return (
-    <ol className="grid gap-4 lg:grid-cols-4 lg:gap-0" aria-label="Pipeline for this upload">
+    <ol className="grid gap-4 lg:grid-cols-4 lg:gap-0 [&>li]:min-w-0" aria-label="Pipeline for this upload">
       {nodes.map((node, i) => (
         <li key={node.key} className="relative lg:pr-6">
           {i < nodes.length - 1 && (

@@ -1,5 +1,8 @@
 # Evidence: measured Treasure Hunt runs
 
+For the whole required path (upload, n8n workflows A/B/C/E executions, crawl results, emails,
+credentials, CI) see [`REQUIRED_PATH.md`](REQUIRED_PATH.md). This page covers the Treasure Hunt numbers.
+
 `pipeline_runs_2026-10-10.json` is a direct export of the `pipeline_runs` table from the live
 RDS database (exported 2026-10-09 20:50 UTC, every completed run). Every number in README §8
 traces to a field here; the headline run is `e7115e09-6bc3-4a23-ada2-f15f0de31d02` (the real

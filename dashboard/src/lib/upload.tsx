@@ -58,7 +58,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     setState({ phase: "sending", name: file.name, bytes: file.size });
     try {
       // Checked here first, so a wrong file never costs an upload ticket.
-      if (!/\.csv$/i.test(file.name)) throw new ApiError(400, `"${file.name}" is not a CSV. Choose a .csv file.`);
+      if (!/\.csv$/i.test(file.name)) throw new ApiError(400, "This is not a CSV file. Choose a .csv file.");
       if (file.size === 0) throw new ApiError(400, "That file is empty.");
       if (file.size > MAX_BYTES) throw new ApiError(413, `That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is 50 MB.`);
       const ticket = await api.createUpload(file.name);

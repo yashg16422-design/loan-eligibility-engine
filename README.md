@@ -12,6 +12,7 @@ products they are likely eligible for, and emails each matched user their best o
 | **n8n** | self-hosted 2.42.5 on EC2, **not exposed to the internet**: reached through an SSM tunnel |
 | **LLM** | Amazon Bedrock · Nova Pro (temperature 0), via n8n with **no AWS access keys** |
 | **Email** | Amazon SES via n8n's **AWS SES node**, to the owner's test `+aliases` only |
+| **Proof** | [`docs/evidence/REQUIRED_PATH.md`](docs/evidence/REQUIRED_PATH.md): each required path checked on the live stack (n8n execution log, RDS rows, emails, CI) · [screenshots](docs/screenshots/) |
 
 **Headline result (measured, not estimated):** matching 10,000 users against 59 crawled
 products would be **590,000** user×product evaluations for a naive LLM approach. The
@@ -41,7 +42,7 @@ then **0 calls** on every later run, and a brute-force check proves the optimize
 
 ## 1. What happens end to end
 
-1. **Upload**: the user opens the upload page and picks a CSV. The page asks the API for an
+1. **Upload**: the merchant signs in to the upload page and picks a CSV. The page asks the API for an
    upload ticket (a **presigned POST**), then sends the file **straight to S3**: the API never
    handles the file, so API Gateway's request size and time limits do not apply.
 2. **Ingest**: S3 drops an event on an **SQS queue**; the **ingest Lambda** (inside the VPC)
@@ -198,7 +199,7 @@ aws lambda invoke --function-name loan-engine-dev-migrate --payload '{}' /tmp/ou
 ```
 - Step 3 can only run after step 2 (it reads the bucket name from the stack). The EC2 instance
   created in step 2 simply waits, retrying every 15 s, until the boot script appears.
-- Step 4 (`migrate`) applies `sql/001…006` once each, creates the three database roles with
+- Step 4 (`migrate`) applies `sql/001…009` once each, creates the three database roles with
   passwords generated in Secrets Manager, re-applies `sql/R__grants.sql`, and creates n8n's
   database and its `n8n_meta` role. n8n becomes healthy only after this step.
 - Confirm the SNS email ("AWS Notification - Subscription Confirmation") sent to the alarm alias,
@@ -334,7 +335,7 @@ Lambda security group on the private network.
 
 ## 6. Workflows A / B / C node by node
 
-All five workflows are in [`n8n/workflows/`](n8n/workflows/). Each opens with a sticky note
+All seven workflows (A, A1, B, B1, C, E and the E1 drill) are in [`n8n/workflows/`](n8n/workflows/). Each opens with a sticky note
 that explains it inside the editor.
 
 ### A · Loan product discovery (crawler), daily 06:00 IST + manual run
@@ -598,16 +599,17 @@ published criteria**, never an approval probability.
 
 - **Python 3.12**, type hints everywhere, small pure functions with I/O at the edges, docstrings
   and comments that explain *why*; **ruff** (lint + format) clean.
-- **291 Python tests, 0 skipped**:
+- **300 Python tests, 0 skipped**:
   - unit tests
   - **workflow lint**: every connection resolves, no orphan nodes, every workflow reports to E,
     sub-workflow ids exist, webhooks are authenticated, credentials are references only,
     **no secrets** in the exports, and every Code node compiles
-  - **18 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
+  - **22 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
     10k users (the real CSV locally; a deterministic synthetic twin in CI, since the real file
     is never committed), and the Treasure Hunt in upload and **product** mode, each with its
-    brute-force proof, and the data reset run as the least-privilege api role
-- **49 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
+    brute-force proof, the data reset run as the least-privilege api role, upload ownership
+    (each account sees only its own uploads; a second account starts fresh), and the email previews
+- **50 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
   what runs inside n8n.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push, three jobs:
   `test` (ruff → Node tests → Python unit + integration tests on a Postgres 17 container with TLS →

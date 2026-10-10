@@ -145,6 +145,10 @@ functions:
           method: GET
           path: /uploads/{job_id}
           authorizer: { name: cognito }
+      - httpApi:
+          method: GET
+          path: /uploads/{job_id}/emails
+          authorizer: { name: cognito }
       - httpApi: POST /check
       - httpApi: GET /me
       - httpApi: GET /me/matches

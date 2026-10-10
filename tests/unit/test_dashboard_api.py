@@ -728,3 +728,17 @@ def test_admin_belongs_to_the_account_not_one_sign_in_method(deps, monkeypatch, 
         }
     )
     assert invoke({**every, "requestContext": signed_in_as(google)})["statusCode"] == 200
+
+
+def test_email_previews_are_private_to_the_upload_owner(deps, monkeypatch, lambda_context):
+    job = uuid.uuid4()
+    monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (True, "merchant-sub"))
+    preview = [{"user_id": USER, "name": "A", "alias_email": "x+one@gmail.com", "picks": []}]
+    monkeypatch.setattr(api.repository, "email_previews", lambda conn, j: preview)
+    event = {"routeKey": "GET /uploads/{job_id}/emails", "pathParameters": {"job_id": str(job)}}
+    other = {**MERCHANT, "sub": "someone-else", "email": "other@example.org"}
+    assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 404
+    res = invoke({**event, "requestContext": signed_in_as(MERCHANT)})
+    assert (
+        res["statusCode"] == 200 and json.loads(res["body"])[0]["alias_email"] == "x+one@gmail.com"
+    )

@@ -212,3 +212,21 @@ export interface UploadRecord {
   matches: number;
   emails_sent: number;
 }
+
+/** One email as Workflow C wrote it for a customer of an upload (GET /uploads/{id}/emails). */
+export interface EmailPreview {
+  user_id: string;
+  name: string | null;
+  alias_email: string | null; // the test inbox it went to; null = held by the demo cap
+  sent_at: string | null;
+  matches_total: number;
+  lenders_total: number;
+  picks: {
+    lender: string;
+    channel: "direct" | "bankbazaar" | "paisabazaar";
+    tier: "eligible" | "conditional";
+    requirements: string | null;
+    interest_rate_min: number | null;
+    interest_rate_max: number | null;
+  }[];
+}

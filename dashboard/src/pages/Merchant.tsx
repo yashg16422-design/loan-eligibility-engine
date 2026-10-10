@@ -7,6 +7,7 @@ import { auth } from "../api/auth";
 import { api } from "../api/client";
 import type { Analytics, CrawlHealth, Run, UploadRecord, WorkflowError } from "../api/types";
 import { AnalyticsGrid } from "../components/AnalyticsGrid";
+import { EmailPreviews } from "../components/EmailPreviews";
 import { WorkflowMap } from "../components/WorkflowMap";
 import { CHANNEL_LABEL } from "../lib/offers";
 import { useUpload } from "../lib/upload";
@@ -112,7 +113,7 @@ export function Merchant() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-[1480px] px-5 pt-14 pb-20 sm:px-10 lg:pt-24 xl:grid xl:grid-cols-[minmax(0,1fr)_190px] xl:gap-20 xl:px-16">
+    <div className="mx-auto max-w-[1480px] px-5 pt-14 pb-20 sm:px-10 lg:pt-24 xl:grid xl:grid-cols-[minmax(0,1fr)_200px] xl:gap-16 xl:px-16">
       <div className="min-w-0">
         <header className="max-w-[900px]">
           <h1 className="text-[2.75rem] sm:text-[4.25rem]">Merchant console</h1>
@@ -168,7 +169,10 @@ export function Merchant() {
           </div>
           <div className="mt-10">
             {chartJob ? (
-              <Charts jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} onLoaded={onChartsLoaded} />
+              <>
+                <Charts jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} onLoaded={onChartsLoaded} />
+                {email && <EmailPreviews jobId={chartJob} />}
+              </>
             ) : email && uploads !== null ? (
               <div className="border border-dashed border-line-hi p-10">
                 <p className="text-xl font-light">Your analytics appear here after your first upload.</p>
@@ -236,7 +240,7 @@ function Workspace({ email, admin, records }: { email: string; admin: boolean; r
   // `records` is the "Your uploads" row (collapsible), rendered under the bulk tool.
   const [tool, setTool] = useState<"bulk" | "single">("bulk");
   return (
-    <div className="border border-line">
+    <div className="min-w-0 border border-line">
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-line px-6 sm:px-8">
         <div role="tablist" aria-label="Tool" className="flex gap-8">
           {([["bulk", "Bulk upload"], ["single", "Single lookup"]] as const).map(([key, label]) => (
@@ -257,7 +261,7 @@ function Workspace({ email, admin, records }: { email: string; admin: boolean; r
       </div>
       <div className="p-6 sm:p-8">
         {tool === "bulk" ? (
-          <div className="grid gap-12">
+          <div className="grid gap-12 [&>*]:min-w-0">
             <Bulk />
             <div className="border-t border-line">{records}</div>
           </div>
@@ -289,11 +293,11 @@ function Bulk() {
   const p = upload.state.phase === "tracking" ? upload.state.progress : undefined;
   const run = p?.match_run;
   return (
-    <div className="grid gap-8">
+    <div className="grid gap-8 [&>*]:min-w-0">
       <DropZone />
       <WorkflowMap state={upload.state} />
       {p && (
-        <div className="grid gap-px border border-line bg-line lg:grid-cols-2" aria-live="polite">
+        <div className="grid gap-px border border-line bg-line lg:grid-cols-2 [&>*]:min-w-0" aria-live="polite">
           <section className="bg-bg p-7">
             <h3 className="label">Rows in this file</h3>
             <div className="mt-6">

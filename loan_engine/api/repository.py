@@ -410,6 +410,60 @@ _BUSY = (
 )
 
 
+EMAIL_PREVIEWS = 3
+
+
+def email_previews(conn: psycopg.Connection, job_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Up to 3 of an upload's customers as Workflow C emails them: the customers who were sent
+    an email first (with the test inbox it went to), each with the same top picks C chose
+    (best offer per lender, ranked by tier, fit score, then rate)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            """
+            WITH who AS (
+                SELECT u.user_id, u.name, n.alias_email, n.created_at AS sent_at
+                FROM users u
+                LEFT JOIN LATERAL (
+                    SELECT alias_email, created_at FROM notifications
+                    WHERE user_id = u.user_id AND status = 'sent'
+                    ORDER BY created_at DESC LIMIT 1
+                ) n ON true
+                WHERE u.upload_job_id = %(job)s
+                  AND EXISTS (SELECT 1 FROM matches m
+                              WHERE m.user_id = u.user_id AND m.status = 'active')
+                ORDER BY n.created_at IS NULL, u.user_id
+                LIMIT %(n)s
+            ), active AS (
+                SELECT m.user_id, m.tier, m.requirements, m.fit_score, p.lender, p.lender_key,
+                       p.channel, p.product_name, p.interest_rate_min, p.interest_rate_max
+                FROM matches m JOIN loan_products p USING (product_id) JOIN who USING (user_id)
+                WHERE m.status = 'active' AND p.is_active
+            ), best AS (
+                SELECT DISTINCT ON (user_id, lender_key) * FROM active
+                ORDER BY user_id, lender_key, (tier = 'eligible') DESC, fit_score DESC,
+                         interest_rate_min NULLS LAST, product_name
+            ), ranked AS (
+                SELECT *, row_number() OVER (PARTITION BY user_id ORDER BY (tier = 'eligible') DESC,
+                       fit_score DESC, interest_rate_min NULLS LAST, product_name) AS rnk
+                FROM best
+            )
+            SELECT w.user_id, w.name, w.alias_email, w.sent_at,
+                   (SELECT count(*) FROM active a
+                     WHERE a.user_id = w.user_id)::int AS matches_total,
+                   (SELECT count(DISTINCT lender_key) FROM active a
+                     WHERE a.user_id = w.user_id)::int AS lenders_total,
+                   coalesce((SELECT json_agg(json_build_object(
+                        'lender', r.lender, 'channel', r.channel, 'tier', r.tier,
+                        'requirements', r.requirements, 'interest_rate_min', r.interest_rate_min,
+                        'interest_rate_max', r.interest_rate_max) ORDER BY r.rnk)
+                     FROM ranked r WHERE r.user_id = w.user_id AND r.rnk <= 5), '[]') AS picks
+            FROM who w
+            ORDER BY w.sent_at IS NULL, w.user_id
+            """,
+            {"job": job_id, "n": EMAIL_PREVIEWS},
+        ).fetchall()
+
+
 UPLOADS_SHOWN = 20
 
 

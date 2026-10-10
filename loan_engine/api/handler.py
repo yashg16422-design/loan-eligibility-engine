@@ -9,6 +9,7 @@ and FastAPI picks the endpoint below. Interactive docs: GET /api/docs.
     GET  /uploads             (Cognito) my bulk uploads, one record each (admins: everyone's)
     POST /uploads             (Cognito) create a job I own + presigned POST for raw/<job_id>.csv
     GET  /uploads/{job_id}    (Cognito, owner or admin) status, counts, rejects, progress
+    GET  /uploads/{job_id}/emails  (Cognito, owner or admin) up to 3 emails as C sent them
     POST /check               instant check: 4 numbers -> the real pipeline -> a token
     GET  /me, /me/matches     (dashboard token) profile, matching state, matches
     GET|PUT /me/preferences   (dashboard token) shortlist, top 3, hidden, alerts
@@ -669,6 +670,14 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
         counts = repository.purge_csv_uploads(conn, None if scope == "all" else who.account_id)
     logger.info("uploads purged", scope=scope, **counts)
     return counts
+
+
+@app.get("/uploads/{job_id}/emails")
+def get_email_previews(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> list[dict[str, Any]]:
+    """Up to 3 of this upload's emails as Workflow C wrote them (owner or admin)."""
+    with db(deps) as conn:
+        own_upload(conn, job_id, who)
+        return repository.email_previews(conn, job_id)
 
 
 @app.delete("/uploads/{job_id}")

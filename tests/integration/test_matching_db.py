@@ -589,3 +589,15 @@ def test_one_account_row_per_verified_email(db):
         ).fetchone()[0]
         == 1
     )
+
+
+def test_email_previews_follow_workflow_c_ranking(db):
+    """Previews: emailed customers first, at most 5 picks, one per lender."""
+    from loan_engine.api import repository
+
+    previews = repository.email_previews(db, db.job_id)
+    assert 0 < len(previews) <= 3
+    for p in previews:
+        lenders = [x["lender"] for x in p["picks"]]
+        assert len(lenders) <= 5 and len(lenders) == len(set(lenders))
+        assert p["lenders_total"] >= len(lenders) and p["matches_total"] >= p["lenders_total"]

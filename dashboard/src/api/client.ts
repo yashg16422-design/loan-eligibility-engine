@@ -12,6 +12,7 @@ import type {
   Run,
   UploadProgress,
   UploadRecord,
+  EmailPreview,
   WorkflowError,
 } from "./types";
 
@@ -143,6 +144,7 @@ export const api = {
     ).then((r) => r.body),
   upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`, {}, false, true).then((r) => r.body),
   uploads: () => request<UploadRecord[]>("/uploads", {}, false, true).then((r) => r.body),
+  emailPreviews: (jobId: string) => request<EmailPreview[]>(`/uploads/${jobId}/emails`, {}, false, true).then((r) => r.body),
   analytics: (jobId?: string | null) =>
     request<Analytics>(`/analytics${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`).then((r) => r.body),
   account: () => request<Account>("/account", {}, false, true).then((r) => r.body),
