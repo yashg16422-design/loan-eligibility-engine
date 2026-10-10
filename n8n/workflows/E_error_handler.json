@@ -77,9 +77,9 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "-- Store the failure; alert only if this workflow had no error in the last\n-- 30 minutes (prev is read from the snapshot BEFORE this insert).\nWITH prev AS (\n  SELECT max(created_at) AS last_at FROM workflow_errors WHERE workflow = $1\n), ins AS (\n  INSERT INTO workflow_errors (workflow, node, message, execution_id)\n  VALUES ($1, nullif($2, ''), $3, nullif($4, ''))\n  RETURNING id\n)\nSELECT (SELECT id FROM ins) AS error_id,\n       coalesce((SELECT last_at FROM prev) < now() - interval '30 minutes', true) AS should_alert",
+        "query": "-- Store the failure; alert only if this workflow had no error in the last\n-- 30 minutes (prev is read from the snapshot BEFORE this insert).\n-- One JSON parameter: error messages can hold newlines, which n8n's plain query\n-- parameters do not survive (found live in Workflow C).\nWITH e AS (\n  SELECT * FROM jsonb_to_record($1::jsonb)\n         AS r(workflow text, node text, message text, execution_id text)\n), prev AS (\n  SELECT max(created_at) AS last_at FROM workflow_errors\n  WHERE workflow = (SELECT workflow FROM e)\n), ins AS (\n  INSERT INTO workflow_errors (workflow, node, message, execution_id)\n  SELECT workflow, nullif(node, ''), message, nullif(execution_id, '') FROM e\n  RETURNING id\n)\nSELECT (SELECT id FROM ins) AS error_id,\n       coalesce((SELECT last_at FROM prev) < now() - interval '30 minutes', true) AS should_alert",
         "options": {
-          "queryReplacement": "={{ [ $json.workflow, $json.node || '', $json.message, $json.execution_id || '' ] }}"
+          "queryReplacement": "={{ [ JSON.stringify({ workflow: $json.workflow, node: $json.node || '', message: $json.message, execution_id: String($json.execution_id || '') }) ] }}"
         }
       },
       "name": "Record error",

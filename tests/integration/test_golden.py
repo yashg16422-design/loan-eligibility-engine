@@ -204,11 +204,18 @@ def test_workflow_c_records_each_send_so_a_rerun_never_emails_twice(db, first_up
     def record(user_id: str, status: str) -> dict:
         msg = "ses-1" if status == "sent" else ""
         err = "" if status == "sent" else "throttled"
-        return run_sql(
-            db,
-            "notify_record_send.sql",
-            *(run_id, user_id, "a+one@gmail.com", status, msg, err, "Subject", "Body"),
-        )
+        record = {
+            "run_id": run_id,
+            "user_id": user_id,
+            "alias_email": "a+one@gmail.com",
+            "status": status,
+            "ses_message_id": msg,
+            "error": err,
+            "subject": "Subject, with a comma",
+            # A real email body: commas, newlines, quotes, rupees (what broke n8n's parameters).
+            "body_text": "Hi A, here are your matches.\nProfile: ₹1,31,000/month, 'quoted'",
+        }
+        return run_sql(db, "notify_record_send.sql", json.dumps(record))
 
     first = users_to_email()
     assert len(first) == 5
@@ -217,7 +224,10 @@ def test_workflow_c_records_each_send_so_a_rerun_never_emails_twice(db, first_up
         "SELECT subject, body_text FROM notifications WHERE run_id = %s AND user_id = %s",
         (run_id, first[0]),
     ).fetchone()
-    assert stored == ("Subject", "Body")  # the sent email itself is kept
+    assert stored == (
+        "Subject, with a comma",
+        "Hi A, here are your matches.\nProfile: ₹1,31,000/month, 'quoted'",
+    )  # the sent email itself is kept, intact
     record(first[1], "sent")
     # n8n dies here. The re-run picks only the remaining quota, and never the two emailed users.
     again = users_to_email()

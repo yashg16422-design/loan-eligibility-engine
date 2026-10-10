@@ -1815,9 +1815,10 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
         2.5,
         pg_query(
             sql_file("notify_record_send.sql"),
-            "={{ [ $('Users to email').first().json.run_id, $json.user_id, $json.alias_email, "
-            "$json.status, $json.ses_message_id || '', $json.error || '', $json.subject || '', "
-            "$json.text || '' ] }}",
+            "={{ [ JSON.stringify({ run_id: $('Users to email').first().json.run_id, "
+            "user_id: $json.user_id, alias_email: $json.alias_email, status: $json.status, "
+            "ses_message_id: $json.ses_message_id || '', error: $json.error || '', "
+            "subject: $json.subject || '', body_text: $json.text || '' }) ] }}",
         ),
         (1540, 100),
         credentials=PG,
@@ -2034,17 +2035,24 @@ return [{ json: { ...rec, ...composeAlert(rec) } }];
             """
 -- Store the failure; alert only if this workflow had no error in the last
 -- 30 minutes (prev is read from the snapshot BEFORE this insert).
-WITH prev AS (
-  SELECT max(created_at) AS last_at FROM workflow_errors WHERE workflow = $1
+-- One JSON parameter: error messages can hold newlines, which n8n's plain query
+-- parameters do not survive (found live in Workflow C).
+WITH e AS (
+  SELECT * FROM jsonb_to_record($1::jsonb)
+         AS r(workflow text, node text, message text, execution_id text)
+), prev AS (
+  SELECT max(created_at) AS last_at FROM workflow_errors
+  WHERE workflow = (SELECT workflow FROM e)
 ), ins AS (
   INSERT INTO workflow_errors (workflow, node, message, execution_id)
-  VALUES ($1, nullif($2, ''), $3, nullif($4, ''))
+  SELECT workflow, nullif(node, ''), message, nullif(execution_id, '') FROM e
   RETURNING id
 )
 SELECT (SELECT id FROM ins) AS error_id,
        coalesce((SELECT last_at FROM prev) < now() - interval '30 minutes', true) AS should_alert
 """,
-            "={{ [ $json.workflow, $json.node || '', $json.message, $json.execution_id || '' ] }}",
+            "={{ [ JSON.stringify({ workflow: $json.workflow, node: $json.node || '', "
+            "message: $json.message, execution_id: String($json.execution_id || '') }) ] }}",
         ),
         (660, 40),
         credentials=PG,

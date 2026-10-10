@@ -194,3 +194,15 @@ def test_c_composes_every_users_email_in_bounded_batches_and_c1_never_sends():
     condition = json.dumps(guard["parameters"])
     assert "remaining" in condition and "composed" in condition and "$runIndex < 200" in condition
     assert not any(n["type"] == "n8n-nodes-base.awsSes" for n in c1["nodes"])  # never sends
+
+
+def test_free_text_reaches_postgres_only_as_json():
+    """n8n's plain query parameters break on text with newlines (an email body, a multi-line
+    error): every parameter is an id, a number, a constant or a JSON.stringify(...)."""
+    risky = re.compile(r"\$json\.(message|text|subject|body|html|error)\b")
+    for name, wf in WORKFLOWS.items():
+        for node in wf["nodes"]:
+            params = (node.get("parameters", {}).get("options") or {}).get("queryReplacement", "")
+            for part in params.strip("={} []").split(", "):
+                if risky.search(part):
+                    assert "JSON.stringify" in params, f"{name} > {node['name']}: {part}"

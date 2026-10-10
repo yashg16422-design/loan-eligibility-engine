@@ -1,13 +1,18 @@
 -- Workflow C · Record ONE send, right after SES answers (inside the send loop).
--- Params: $1 run_id, $2 user_id, $3 alias_email, $4 status ('sent'|'failed'),
---         $5 ses_message_id ('' if none), $6 error ('' if none), $7 subject, $8 text body.
+-- Param: $1 = one JSON object {run_id, user_id, alias_email, status ('sent'|'failed'),
+--         ses_message_id, error, subject, body_text}.
+-- One JSON parameter, not eight: n8n's query parameters break on free text with newlines
+-- (the email body), while a JSON string is passed through intact (found live).
 -- Recording each send immediately means a crash mid-loop never emails anyone twice: the
 -- re-run's "Users to email" skips users whose matches are already notified, and its demo cap
 -- counts the sends already recorded. A failed send stays un-notified for a later retry.
 WITH s AS (
-    SELECT $1::uuid AS run_id, $2::uuid AS user_id, $3::text AS alias_email, $4::text AS status,
-           nullif($5::text, '') AS ses_message_id, nullif($6::text, '') AS error,
-           nullif($7::text, '') AS subject, nullif($8::text, '') AS body_text
+    SELECT run_id, user_id, alias_email, status, nullif(ses_message_id, '') AS ses_message_id,
+           nullif(error, '') AS error, nullif(subject, '') AS subject,
+           nullif(body_text, '') AS body_text
+    FROM jsonb_to_record($1::jsonb) AS r(run_id uuid, user_id uuid, alias_email text, status text,
+                                         ses_message_id text, error text, subject text,
+                                         body_text text)
 ), ins AS (
     INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error,
                                subject, body_text)
