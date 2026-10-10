@@ -2,7 +2,6 @@
 
 import base64
 import json
-import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -13,7 +12,7 @@ import pytest
 from loan_engine.api import handler as api
 from loan_engine.api.presign import MAX_UPLOAD_BYTES, clean_filename, post_policy_for
 from loan_engine.api.status import derive_status, to_json_safe
-from tests.unit.apigw import invoke
+from tests.unit.apigw import MERCHANT, invoke, signed_in_as
 
 JOB = uuid.UUID("1ed10381-ea5b-4a02-8715-c0146261aa06")
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
@@ -64,6 +63,11 @@ class TestDeriveStatus:
     def test_never_arrived_becomes_expired(self):
         assert derive_status("AWAITING_UPLOAD", 0, NOW - timedelta(minutes=16), NOW) == "EXPIRED"
 
+    def test_first_attempt_in_flight_is_processing_not_retrying(self):
+        # Seen live: a 10,000-row upload showed "RETRYING" while its first attempt ran.
+        assert derive_status("AWAITING_UPLOAD", 1, NOW - timedelta(seconds=20), NOW) == "PROCESSING"
+        assert derive_status("AWAITING_UPLOAD", 2, NOW - timedelta(seconds=20), NOW) == "RETRYING"
+
     def test_failed_attempt_is_retrying_not_expired(self):
         # Even when old: attempts > 0 means the file arrived and SQS is retrying.
         assert derive_status("AWAITING_UPLOAD", 1, NOW - timedelta(hours=1), NOW) == "RETRYING"
@@ -92,7 +96,14 @@ class TestRequestParsing:
         monkeypatch.setattr(api, "dependencies", lambda: None)
         monkeypatch.setattr(api, "parse_json", lambda raw: seen.append(raw) or {})
         raw = base64.b64encode(b'{"filename": "u.csv"}').decode()
-        invoke({"routeKey": "POST /uploads", "body": raw, "isBase64Encoded": True}, lambda_context)
+        invoke(
+            {
+                "routeKey": "POST /check",
+                "body": raw,
+                "isBase64Encoded": True,
+            },
+            lambda_context,
+        )
         assert seen == [b'{"filename": "u.csv"}']
 
 
@@ -104,23 +115,35 @@ class TestRouting:
         res = invoke({"routeKey": "DELETE /everything"}, lambda_context)
         assert res["statusCode"] == 405 and "error" in json.loads(res["body"])
 
-    def test_ui_is_served_as_html(self, monkeypatch, lambda_context):
+    def test_old_upload_page_moved_to_the_merchant_console(self, monkeypatch, lambda_context):
         monkeypatch.setattr(api, "dependencies", lambda: None)
         res = invoke({"routeKey": "GET /upload"}, lambda_context)
-        assert res["statusCode"] == 200
-        assert res["headers"]["content-type"].startswith("text/html")
-        assert res["headers"]["x-frame-options"] == "DENY"
-        assert "Loan Eligibility Engine" in res["body"]
+        assert res["statusCode"] == 302
+        assert res["headers"]["location"] == "/app/merchant"
 
     @pytest.mark.parametrize(
         "event",
         [
-            {"routeKey": "GET /uploads/{job_id}", "pathParameters": {"job_id": "nope"}},
+            {
+                "routeKey": "GET /uploads/{job_id}",
+                "pathParameters": {"job_id": "nope"},
+                "requestContext": signed_in_as(MERCHANT),
+            },
             {"routeKey": "GET /analytics", "queryStringParameters": {"job_id": "nope"}},
         ],
     )
     def test_bad_input_is_400_not_500(self, monkeypatch, lambda_context, event):
+        @contextmanager
+        def fake_db(_deps):
+            yield object()
+
         monkeypatch.setattr(api, "dependencies", lambda: None)
+        monkeypatch.setattr(api, "db", fake_db)
+        monkeypatch.setattr(
+            api.repository,
+            "upsert_account",
+            lambda conn, sub, email, admin=False: {"account_id": sub, "email": email},
+        )
         res = invoke(event, lambda_context)
         assert (res["statusCode"], json.loads(res["body"])) == (
             400,
@@ -191,25 +214,33 @@ class TestCreateUploadRoute:
         monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn: 0)  # under the cap
         monkeypatch.setattr(
             api.repository,
+            "upsert_account",
+            lambda conn, sub, email, admin=False: {"account_id": sub, "email": email},
+        )
+        monkeypatch.setattr(
+            api.repository,
             "create_job",
-            lambda conn, job_id, key, name: created.append((job_id, key, name)),
+            lambda conn, job_id, key, name, account_id: created.append(
+                (job_id, key, name, account_id)
+            ),
         )
 
-        event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "C:\\x\\users.csv"})}
+        event = {
+            "routeKey": "POST /uploads",
+            "body": json.dumps({"filename": "C:\\x\\users.csv"}),
+            "requestContext": signed_in_as(MERCHANT),
+        }
+        assert invoke({**event, "requestContext": {}}, lambda_context)["statusCode"] == 401
         res = invoke(event, lambda_context)
 
         assert res["statusCode"] == 201, res["body"]
         body = json.loads(res["body"])
         job_id = uuid.UUID(body["job_id"])
-        assert created == [(job_id, f"raw/{job_id}.csv", "users.csv")]  # row BEFORE signing
+        # The row exists BEFORE signing, owned by the signed-in merchant.
+        assert created == [(job_id, f"raw/{job_id}.csv", "users.csv", "merchant-sub")]
         assert signed["Key"] == f"raw/{job_id}.csv"
         assert signed["Conditions"] == post_policy_for(job_id).conditions
         assert body["upload"]["url"].startswith("https://b.s3.ap-southeast-2")
-        # The browser that created the upload gets a key that proves it may delete it.
-        from loan_engine.api import tokens
-
-        owner = tokens.verify(body["delete_key"], api.upload_key(deps), int(time.time()))
-        assert owner == job_id
 
 
 class TestDatabaseBlips:

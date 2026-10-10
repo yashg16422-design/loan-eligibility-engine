@@ -1,4 +1,4 @@
-import { ArrowRight, SignOut, WarningCircle } from "@phosphor-icons/react";
+import { ArrowRight, GoogleLogo, SignOut, WarningCircle } from "@phosphor-icons/react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { auth, AuthError } from "../api/auth";
 import { api, session } from "../api/client";
@@ -13,19 +13,44 @@ export function Account() {
   return email ? <SignedIn email={email} /> : <SignInFlow />;
 }
 
-type Step = { mode: "signin" | "signup" } | { mode: "confirm"; email: string; password: string };
+type Step =
+  | { mode: "signin" | "signup" | "forgot" }
+  | { mode: "confirm"; email: string; password: string }
+  | { mode: "reset"; email: string };
 
-function SignInFlow() {
+const TITLES: Record<Step["mode"], [string, string]> = {
+  signin: ["Sign in.", "Your saved checks open from any device, and your top picks are refreshed every morning."],
+  signup: ["Create your account.", "Save results and uploads to an account you can open from any device."],
+  confirm: ["Check your email.", "Enter the code we emailed you to finish creating your account."],
+  forgot: ["Reset your password.", "We will email you a code to choose a new password."],
+  reset: ["Choose a new password.", "Enter the code from the email and your new password."],
+};
+
+/**
+ * Cognito sign-in, sign-up (email code), forgot / reset password, and "Continue with Google".
+ * `embedded` renders just the form (merchant console); `onDone` runs after a successful sign-in.
+ */
+export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; onDone?: () => void }) {
   const [step, setStep] = useState<Step>({ mode: pendingSave.peek() ? "signup" : "signin" });
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [google, setGoogle] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  useEffect(() => void auth.googleEnabled().then(setGoogle), []);
 
-  const afterSignIn = () => navigate(pendingSave.peek() ? "dashboard" : "account");
+  const afterSignIn = () => (onDone ? onDone() : navigate(pendingSave.peek() ? "dashboard" : "account"));
+  const go = (next: Step, message: string | null = null) => {
+    setStep(next);
+    setError(null);
+    setNotice(message);
+  };
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
+    const email = String(f.get("email") ?? "").trim().toLowerCase();
+    const password = String(f.get("password") ?? "");
     setError(null);
     setNotice(null);
     setBusy(true);
@@ -34,24 +59,24 @@ function SignInFlow() {
         await auth.confirm(step.email, String(f.get("code")));
         await auth.signIn(step.email, step.password);
         afterSignIn();
+      } else if (step.mode === "signup") {
+        await auth.signUp(email, password);
+        go({ mode: "confirm", email, password }, `We sent a 6-digit code to ${email}. It comes from no-reply@verificationemail.com; check spam if it is not in your inbox within a minute.`);
+      } else if (step.mode === "forgot") {
+        await auth.forgotPassword(email);
+        go({ mode: "reset", email }, `If an account exists for ${email}, a reset code is on its way (from no-reply@verificationemail.com; check spam).`);
+      } else if (step.mode === "reset") {
+        await auth.resetPassword(step.email, String(f.get("code")), password);
+        await auth.signIn(step.email, password);
+        afterSignIn();
       } else {
-        const email = String(f.get("email")).trim().toLowerCase();
-        const password = String(f.get("password"));
-        if (step.mode === "signup") {
-          await auth.signUp(email, password);
-          setStep({ mode: "confirm", email, password });
-          setNotice(`We sent a 6-digit code to ${email}. It comes from no-reply@verificationemail.com.`);
-        } else {
-          await auth.signIn(email, password);
-          afterSignIn();
-        }
+        await auth.signIn(email, password);
+        afterSignIn();
       }
     } catch (err) {
       if (err instanceof AuthError && err.code === "UserNotConfirmedException" && step.mode === "signin") {
-        const email = String(f.get("email")).trim().toLowerCase();
-        setStep({ mode: "confirm", email, password: String(f.get("password")) });
         await auth.resend(email).catch(() => {});
-        setNotice(`Confirm your email first: we sent a new code to ${email}.`);
+        go({ mode: "confirm", email, password }, `Confirm your email first: we sent a new code to ${email}.`);
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
       }
@@ -61,79 +86,119 @@ function SignInFlow() {
   }
 
   const resend = async () => {
-    if (step.mode !== "confirm") return;
+    if (step.mode !== "confirm" && step.mode !== "reset") return;
     setError(null);
     try {
-      await auth.resend(step.email);
+      if (step.mode === "confirm") await auth.resend(step.email);
+      else await auth.forgotPassword(step.email);
       setNotice(`A new code is on its way to ${step.email}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not send a new code.");
     }
   };
 
+  const tabs = step.mode === "signin" || step.mode === "signup";
+  const newPassword = step.mode === "signup" || step.mode === "reset";
+  const label = { signin: "Sign in", signup: "Create account", confirm: "Confirm and sign in", forgot: "Email me a code", reset: "Save password and sign in" }[step.mode];
+
+  const form = (
+    <>
+      {tabs && (
+        <div role="tablist" aria-label="Account" className="grid grid-cols-2 border border-line">
+          {(["signin", "signup"] as const).map((m) => (
+            <button key={m} role="tab" type="button" aria-selected={step.mode === m} onClick={() => go({ mode: m })}
+              className={`h-11 text-sm ${step.mode === m ? "bg-fg text-bg" : "text-mute hover:text-fg"}`}>
+              {m === "signin" ? "Sign in" : "Create account"}
+            </button>
+          ))}
+        </div>
+      )}
+      {embedded && !tabs && <p className="text-lg font-light">{TITLES[step.mode][0]}</p>}
+
+      {tabs && google && (
+        <>
+          <button type="button" onClick={() => void auth.signInWithGoogle(window.location.pathname)}
+            className="btn btn-ghost mt-4 w-full">
+            <GoogleLogo size={18} weight="bold" aria-hidden /> Continue with Google
+          </button>
+          <p className="label my-4 flex items-center gap-3 before:h-px before:flex-1 before:bg-line after:h-px after:flex-1 after:bg-line">or with email</p>
+        </>
+      )}
+
+      <form onSubmit={submit} className={`box grid gap-5 p-6 ${tabs && google ? "" : "mt-4"}`}>
+        {(step.mode === "signin" || step.mode === "signup" || step.mode === "forgot") && (
+          <label className="grid gap-2">
+            <span className="text-sm">Email</span>
+            <input name="email" type="email" required autoComplete={step.mode === "signup" ? "email" : "username"} className="field font-sans" />
+          </label>
+        )}
+        {(step.mode === "confirm" || step.mode === "reset") && (
+          <label className="grid gap-2">
+            <span className="text-sm">Code from the email</span>
+            <input name="code" required inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" className="field tracking-[0.4em]" />
+          </label>
+        )}
+        {(step.mode === "signin" || step.mode === "signup" || step.mode === "reset") && (
+          <label className="grid gap-2">
+            <span className="flex items-center justify-between text-sm">
+              {step.mode === "reset" ? "New password" : "Password"}
+              <button type="button" onClick={() => setShowPassword((v) => !v)} className="text-xs text-mute hover:text-fg">
+                {showPassword ? "Hide" : "Show"}
+              </button>
+            </span>
+            <input name="password" type={showPassword ? "text" : "password"} required minLength={newPassword ? 10 : undefined}
+              autoComplete={newPassword ? "new-password" : "current-password"} className="field font-sans" />
+            {newPassword && <span className="text-xs text-mute">At least 10 characters, with a lowercase letter and a number.</span>}
+          </label>
+        )}
+        <button type="submit" disabled={busy} className="btn btn-primary">{busy ? "One moment" : label}</button>
+        <p className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+          {step.mode === "signin" && <button type="button" onClick={() => go({ mode: "forgot" })} className="text-mute underline underline-offset-4 hover:text-fg">Forgot password?</button>}
+          {(step.mode === "confirm" || step.mode === "reset") && <button type="button" onClick={resend} className="text-mute underline underline-offset-4 hover:text-fg">Send a new code</button>}
+          {!tabs && <button type="button" onClick={() => go({ mode: "signin" })} className="text-mute underline underline-offset-4 hover:text-fg">Back to sign in</button>}
+        </p>
+        {notice && <p role="status" className="text-sm text-acc">{notice}</p>}
+        {error && <p role="alert" className="flex items-start gap-2 text-sm text-coral"><WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden /> {error}</p>}
+      </form>
+    </>
+  );
+  if (embedded) return form;
+
   return (
     <div className="mx-auto grid max-w-[1480px] gap-12 px-5 pt-14 pb-12 sm:px-10 xl:px-16 lg:grid-cols-[minmax(0,480px)_minmax(0,1fr)] lg:gap-24 lg:pt-20">
       <section aria-labelledby="acc-title">
-        <h1 id="acc-title" className="text-3xl sm:text-4xl">
-          {step.mode === "confirm" ? "Check your email." : step.mode === "signup" ? "Save your results." : "Sign in."}
-        </h1>
-        <p className="mt-3 text-mute">
-          {step.mode === "confirm"
-            ? "Enter the code we emailed you to finish creating your account."
-            : "Your saved checks open from any device, and your top picks are refreshed every morning."}
-        </p>
-
-        {step.mode !== "confirm" && (
-          <div role="tablist" aria-label="Account" className="mt-8 grid grid-cols-2 border border-line">
-            {(["signin", "signup"] as const).map((m) => (
-              <button key={m} role="tab" type="button" aria-selected={step.mode === m} onClick={() => (setStep({ mode: m }), setError(null))}
-                className={`h-11 text-sm ${step.mode === m ? "bg-acc-deep text-fg" : "text-mute hover:text-fg"}`}>
-                {m === "signin" ? "Sign in" : "Create account"}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <form onSubmit={submit} className="box mt-4 grid gap-5 p-7">
-          {step.mode === "confirm" ? (
-            <label className="grid gap-2">
-              <span className="text-sm">Verification code</span>
-              <input name="code" required inputMode="numeric" autoComplete="one-time-code" maxLength={6} pattern="[0-9]{6}" className="field tracking-[0.4em]" />
-            </label>
-          ) : (
-            <>
-              <label className="grid gap-2">
-                <span className="text-sm">Email</span>
-                <input name="email" type="email" required autoComplete="email" className="field font-sans" />
-              </label>
-              <label className="grid gap-2">
-                <span className="text-sm">Password</span>
-                <input name="password" type="password" required minLength={step.mode === "signup" ? 10 : undefined}
-                  autoComplete={step.mode === "signup" ? "new-password" : "current-password"} className="field font-sans" />
-                {step.mode === "signup" && <span className="text-xs text-mute">At least 10 characters, with a lowercase letter and a number.</span>}
-              </label>
-            </>
-          )}
-          <button type="submit" disabled={busy} className="btn btn-primary">
-            {busy ? "One moment" : step.mode === "confirm" ? "Confirm and sign in" : step.mode === "signup" ? "Create account" : "Sign in"}
-          </button>
-          {step.mode === "confirm" && (
-            <p className="flex flex-wrap gap-x-4 text-sm">
-              <button type="button" onClick={resend} className="text-mute underline">Send a new code</button>
-              <button type="button" onClick={() => setStep({ mode: "signup" })} className="text-mute underline">Use a different email</button>
-            </p>
-          )}
-          {notice && <p role="status" className="text-sm text-acc">{notice}</p>}
-          {error && <p role="alert" className="flex items-start gap-2 text-sm text-coral"><WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden /> {error}</p>}
-        </form>
+        <h1 id="acc-title" className="text-3xl sm:text-4xl">{TITLES[step.mode][0]}</h1>
+        <p className="mt-3 mb-8 text-mute">{TITLES[step.mode][1]}</p>
+        {form}
       </section>
 
       <aside className="grid content-start gap-4 text-sm text-mute lg:pt-24">
         <h2 className="text-lg text-fg">How your account works</h2>
         <p>Accounts run on Amazon Cognito. Your password goes only to Cognito; ClickPar Match never sees or stores it.</p>
-        <p>Your saved checks are linked to your account in our database, so you can reopen them from any device.</p>
+        <p>Sign in with email or Google: the same email is the same account, so your saved checks and uploads follow you.</p>
         <p>Every morning at 06:00 the crawler re-reads lenders' sites. Lenders that change their rules are re-matched against everyone, so your top picks stay current.</p>
       </aside>
+    </div>
+  );
+}
+
+/** Back from Google: swap the code for tokens, then return to where sign-in started. */
+export function AuthCallback() {
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    auth
+      .finishGoogle(new URLSearchParams(window.location.search))
+      .then((to) => {
+        window.history.replaceState(null, "", to);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Google sign-in failed."));
+  }, []);
+  return (
+    <div className="mx-auto max-w-[620px] px-5 pt-24 sm:px-10" role={error ? "alert" : "status"}>
+      <h1 className="text-3xl">{error ? "Sign-in did not finish." : "Signing you in."}</h1>
+      <p className="mt-3 text-mute">{error ?? "One moment while we finish signing you in with Google."}</p>
+      {error && <button type="button" onClick={() => navigate("merchant")} className="btn btn-ghost mt-6">Back to the console</button>}
     </div>
   );
 }

@@ -62,3 +62,18 @@ def v2_event(event: dict[str, Any]) -> dict[str, Any]:
 def invoke(event: dict[str, Any], context: object | None = None) -> dict[str, Any]:
     """The Lambda response for a short test event (status, headers, body as API Gateway sees)."""
     return api.handler(v2_event(event), context or FakeLambdaContext())
+
+
+# A verified Cognito ID token's claims, as API Gateway's JWT authorizer passes them on.
+MERCHANT = {
+    "sub": "merchant-sub",
+    "email": "merchant@example.org",
+    "email_verified": "true",
+    "token_use": "id",
+}
+ADMIN = {**MERCHANT, "sub": "admin-sub", "cognito:groups": "[admin]"}
+
+
+def signed_in_as(claims: dict[str, str]) -> dict[str, Any]:
+    """The requestContext fragment for a request that passed the Cognito authorizer."""
+    return {"authorizer": {"jwt": {"claims": claims}}}

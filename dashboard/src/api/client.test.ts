@@ -41,3 +41,30 @@ describe("API client retries", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("merchant calls carry the sign-in", () => {
+  it("sends the Cognito ID token on every /uploads call (the gateway refuses them otherwise)", async () => {
+    const { auth } = await import("./auth");
+    vi.spyOn(auth, "idToken").mockResolvedValue("id-token");
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(json(200, [])));
+    vi.stubGlobal("fetch", fetch);
+    await api.uploads();
+    await api.upload("job-1");
+    await api.createUpload("users.csv");
+    await api.purgeUpload("job-1");
+    const sent = fetch.mock.calls.map(([path, init]) => [path, new Headers((init as RequestInit).headers).get("authorization")]);
+    expect(sent).toEqual([
+      ["/uploads", "Bearer id-token"],
+      ["/uploads/job-1", "Bearer id-token"],
+      ["/uploads", "Bearer id-token"],
+      ["/uploads/job-1", "Bearer id-token"],
+    ]);
+  });
+
+  it("turns the gateway's bare 401 into what to do next", async () => {
+    const { explain } = await import("./client");
+    expect(explain(401, "Unauthorized")).toBe("Your sign-in has expired. Sign in again to continue.");
+    expect(explain(429)).toMatch(/daily limit/);
+    expect(explain(400, "body must be JSON")).toBe("body must be JSON");
+  });
+});

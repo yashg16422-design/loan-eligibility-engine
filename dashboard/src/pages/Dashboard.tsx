@@ -1,4 +1,4 @@
-import { BookmarkSimple, Lightbulb, Scales, WarningCircle } from "@phosphor-icons/react";
+import { BookmarkSimple, Lightbulb, Minus, Plus, Scales, WarningCircle } from "@phosphor-icons/react";
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError, session } from "../api/client";
 import type { CatalogProduct, Me, Profile } from "../api/types";
@@ -60,8 +60,8 @@ export function Dashboard() {
             </ol>
           </section>
 
-          <OfferSection id="eligible" title="Also eligible" note="You meet every rule these lenders publish" offers={eligible} profile={profile} actions={actions} />
-          <OfferSection id="maybe" title="May qualify" note="You pass the checkable rules; the lender asks for more" offers={conditional} profile={profile} actions={actions} />
+          <OfferSection id="eligible" title="Also eligible" note="You meet every rule these lenders publish" offers={eligible} profile={profile} actions={actions} defaultOpen />
+          <OfferSection id="maybe" title="May qualify" note="You pass the checkable rules; the lender asks for more (or publishes no criteria)" offers={conditional} profile={profile} actions={actions} />
           <NotEligible catalog={catalog} profile={profile} reachable={new Set(offers.map((o) => o.lender_key))} />
 
           <section aria-labelledby="tips-title">
@@ -115,7 +115,7 @@ function Summary({ me, outright, possible }: { me: Me; outright: number; possibl
         <span className="num text-fg">{me.credit_score}</span>, {EMPLOYMENT_LABEL[me.employment_status].toLowerCase()}, age{" "}
         <span className="num text-fg">{me.age}</span>.
         {me.best_rate != null && <> Rates from <span className="num text-fg">{me.best_rate}%</span>, loans up to <span className="num whitespace-nowrap text-fg">{rupeesShort(me.max_amount)}</span>.</>}{" "}
-        <Link to="check" className="text-fg underline decoration-line-hi hover:decoration-acc">Run a new check</Link>
+        <Link to="check" className="text-fg underline decoration-line-hi hover:decoration-fg">Run a new check</Link>
       </p>
     </section>
   );
@@ -192,23 +192,44 @@ function TopPick({ rank, offer, actions }: { rank: number; offer: LenderOffer; a
       <div className="-ml-2 flex items-center justify-between">
         <Actions actions={actions} />
         {m.product_url && /^https?:\/\//.test(m.product_url) && (
-          <a href={m.product_url} target="_blank" rel="noopener noreferrer" className="text-sm underline decoration-line-hi hover:decoration-acc">View offer</a>
+          <a href={m.product_url} target="_blank" rel="noopener noreferrer" className="text-sm underline decoration-line-hi hover:decoration-fg">View offer</a>
         )}
       </div>
     </li>
   );
 }
 
-function OfferSection({ id, title, note, offers, profile, actions }: {
-  id: string; title: string; note: string; offers: LenderOffer[]; profile: Profile; actions: (o: LenderOffer) => RowActions;
+function OfferSection({ id, title, note, offers, profile, actions, defaultOpen = false }: {
+  id: string; title: string; note: string; offers: LenderOffer[]; profile: Profile; actions: (o: LenderOffer) => RowActions; defaultOpen?: boolean;
 }) {
   if (!offers.length) return null;
   return (
-    <section aria-labelledby={`${id}-title`} className="@container">
-      <SectionHead id={`${id}-title`} title={`${title} (${offers.length})`} note={note} />
-      <ul className="mt-8 border border-line bg-panel">
+    <Collapsible id={id} title={title} count={offers.length} note={note} defaultOpen={defaultOpen}>
+      <ul className="@container border border-line bg-panel">
         {offers.map((o) => <OfferRow key={o.lender_key} offer={o} profile={profile} actions={actions(o)} />)}
       </ul>
+    </Collapsible>
+  );
+}
+
+/** A results section whose list opens on demand: the count and the meaning are always visible. */
+function Collapsible({ id, title, count, note, defaultOpen, children }: {
+  id: string; title: string; count: number; note: string; defaultOpen: boolean; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section aria-labelledby={`${id}-title`}>
+      <button type="button" aria-expanded={open} aria-controls={`${id}-panel`} onClick={() => setOpen((o) => !o)}
+        className="group flex w-full items-end justify-between gap-6 border-b border-line pb-5 text-left">
+        <span>
+          <h2 id={`${id}-title`} className="text-2xl">{title} <span className="num text-mute">{count}</span></h2>
+          <span className="mt-2 block text-sm text-mute">{note}</span>
+        </span>
+        <span aria-hidden className="grid size-9 shrink-0 place-items-center border border-line-hi text-mute transition-colors duration-150 group-hover:border-fg group-hover:text-fg">
+          {open ? <Minus size={14} /> : <Plus size={14} />}
+        </span>
+      </button>
+      <div id={`${id}-panel`} hidden={!open} className="pt-8">{open && children}</div>
     </section>
   );
 }
@@ -229,9 +250,8 @@ function NotEligible({ catalog, profile, reachable }: { catalog: CatalogProduct[
   if (!rows.length) return null;
   const shown = all ? rows : rows.slice(0, 6);
   return (
-    <section aria-labelledby="no-title">
-      <SectionHead id="no-title" title={`Not eligible yet (${rows.length})`} note="The exact published rule you miss, so you know what to change" />
-      <ul className="mt-8 grid gap-px border border-line bg-line sm:grid-cols-2">
+    <Collapsible id="no" title="Not eligible yet" count={rows.length} note="The exact published rule you miss, so you know what to change" defaultOpen={false}>
+      <ul className="grid gap-px border border-line bg-line sm:grid-cols-2">
         {shown.map((r) => (
           <li key={r.lender} className="bg-panel p-6">
             <p className="flex items-center justify-between gap-3"><span className="font-medium">{r.lender}</span><TierBadge tier="not_eligible" /></p>
@@ -240,11 +260,11 @@ function NotEligible({ catalog, profile, reachable }: { catalog: CatalogProduct[
         ))}
       </ul>
       {rows.length > 6 && (
-        <button type="button" onClick={() => setAll((a) => !a)} className="mt-3 text-sm text-mute underline">
+        <button type="button" onClick={() => setAll((a) => !a)} className="mt-3 text-sm text-mute underline underline-offset-4">
           {all ? "Show fewer" : `Show all ${rows.length}`}
         </button>
       )}
-    </section>
+    </Collapsible>
   );
 }
 

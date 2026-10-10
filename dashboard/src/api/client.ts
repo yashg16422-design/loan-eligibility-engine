@@ -81,8 +81,21 @@ async function request<T>(
   }
   const res = await fetchWithRetry(path, { ...init, headers });
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new ApiError(res.status, body.error ?? `Request failed (${res.status})`);
+  if (!res.ok) throw new ApiError(res.status, explain(res.status, body.error ?? (body as { message?: string }).message));
   return { status: res.status, body };
+}
+
+/** The server's sentence when it gave one; otherwise what the status means for the person. */
+export function explain(status: number, message?: string): string {
+  // API Gateway's own 401 says only "Unauthorized": say what to do instead.
+  if (status === 401) return message && message !== "Unauthorized" ? message : "Your sign-in has expired. Sign in again to continue.";
+  if (message) return message;
+  if (status === 403) return "Your account is not allowed to do that.";
+  if (status === 404) return "That item no longer exists.";
+  if (status === 413) return "That file is too large: the limit is 50 MB.";
+  if (status === 429) return "The daily limit is reached. Try again tomorrow.";
+  if (status >= 500) return "The service had a problem. Try again in a moment.";
+  return `The request failed (${status}). Try again.`;
 }
 
 // Reads (GET) are retried twice on a network error or a 5xx: one dropped request while polling
@@ -120,17 +133,16 @@ export const api = {
   runs: () => request<Run[]>("/ops/runs").then((r) => r.body),
   crawl: () => request<CrawlHealth>("/ops/crawl").then((r) => r.body),
   errors: () => request<WorkflowError[]>("/ops/errors").then((r) => r.body),
+  // Bulk uploads belong to the signed-in merchant: every /uploads call carries the ID token.
   createUpload: (filename: string) =>
-    request<{ job_id: string; upload: { url: string; fields: Record<string, string> }; max_bytes: number; delete_key: string }>(
+    request<{ job_id: string; upload: { url: string; fields: Record<string, string> }; max_bytes: number }>(
       "/uploads",
       { method: "POST", body: JSON.stringify({ filename }) },
+      false,
+      true,
     ).then((r) => r.body),
-  upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`).then((r) => r.body),
-  uploads: () => request<UploadRecord[]>("/uploads").then((r) => r.body),
-  deleteMyUpload: (jobId: string, key: string) =>
-    request<{ deleted_users: number }>(`/uploads/${jobId}/users`, { method: "DELETE", headers: { "x-upload-key": key } }).then(
-      (r) => r.body,
-    ),
+  upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`, {}, false, true).then((r) => r.body),
+  uploads: () => request<UploadRecord[]>("/uploads", {}, false, true).then((r) => r.body),
   analytics: (jobId?: string | null) =>
     request<Analytics>(`/analytics${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`).then((r) => r.body),
   account: () => request<Account>("/account", {}, false, true).then((r) => r.body),
@@ -156,6 +168,7 @@ export const api = {
     ).then((r) => r.body),
   purgeUpload: (jobId: string) =>
     request<{ deleted_users: number }>(`/uploads/${jobId}`, { method: "DELETE" }, false, true).then((r) => r.body),
-  purgeAllUploads: () =>
-    request<{ deleted_users: number; uploads: number }>("/uploads", { method: "DELETE" }, false, true).then((r) => r.body),
+  /** "mine" resets this account's workspace; "all" (admins) clears every account's uploads. */
+  purgeUploads: (scope: "mine" | "all") =>
+    request<{ deleted_users: number; uploads: number }>(`/uploads?scope=${scope}`, { method: "DELETE" }, false, true).then((r) => r.body),
 };

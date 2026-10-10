@@ -38,7 +38,7 @@ export function HBars({ rows, log = false, unit = "" }: { rows: BarRow[]; log?: 
 }
 
 /** Vertical columns for a distribution (income bands, score bands, ages, matches per user). */
-export function Columns({ bands, color = "var(--color-acc)", height = 168 }: { bands: { label: string; n: number }[]; color?: string; height?: number }) {
+export function Columns({ bands, color = "var(--color-acc-2)", height = 168 }: { bands: { label: string; n: number }[]; color?: string; height?: number }) {
   const max = Math.max(...bands.map((b) => b.n), 1);
   const total = bands.reduce((s, b) => s + b.n, 0);
   return (
@@ -53,7 +53,7 @@ export function Columns({ bands, color = "var(--color-acc)", height = 168 }: { b
       </div>
       <figcaption className="mt-3 grid gap-3" style={{ gridTemplateColumns: `repeat(${bands.length}, minmax(0, 1fr))` }}>
         {bands.map((b) => (
-          <span key={b.label} className="label text-center leading-tight">
+          <span key={b.label} className="text-center font-mono text-[0.68rem] leading-tight whitespace-nowrap text-mute">
             {b.label}
           </span>
         ))}

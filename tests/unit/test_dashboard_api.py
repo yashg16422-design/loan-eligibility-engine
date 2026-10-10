@@ -15,7 +15,7 @@ from loan_engine.api import handler as api
 from loan_engine.api import instant_check, static, tokens
 from loan_engine.api.preferences import PreferencesError, parse_preferences
 from loan_engine.common.validation import DEFAULT_RULES, validate_csv
-from tests.unit.apigw import invoke
+from tests.unit.apigw import ADMIN, MERCHANT, invoke, signed_in_as
 
 KEY = b"k" * 32
 USER = uuid.UUID("33f22eb9-6487-4c15-8e43-5ff59be31a9b")
@@ -194,6 +194,12 @@ def deps(monkeypatch):
     monkeypatch.setattr(api, "dependencies", lambda: d)
     monkeypatch.setattr(api, "db", fake_db)
     monkeypatch.setattr(api, "token_key", lambda arn: KEY)
+    # Every signed-in route resolves the account row first (one per verified email).
+    monkeypatch.setattr(
+        api.repository,
+        "upsert_account",
+        lambda conn, sub, email, admin=False: {"account_id": sub, "email": email},
+    )
     return d
 
 
@@ -288,8 +294,8 @@ def test_every_route_is_wired_in_serverless_yml():
 def test_account_routes_require_the_cognito_authorizer():
     text = (ROOT / "serverless.yml").read_text()
     guarded = re.findall(r"method: (\S+)\n\s+path: (\S+)\n\s+authorizer: \{ name: cognito \}", text)
-    admin_only = {"DELETE /uploads", "DELETE /uploads/{job_id}"}
-    expected = {r for r in route_keys() if " /account" in r or r in admin_only}
+    # Accounts, and every bulk-upload route (uploads belong to a signed-in merchant).
+    expected = {r for r in route_keys() if " /account" in r or " /uploads" in r}
     assert {f"{m} {p}" for m, p in guarded} == expected
 
 
@@ -382,7 +388,11 @@ class TestAccounts:
         self, deps, monkeypatch, lambda_context, outcome, status
     ):
         seen = {}
-        monkeypatch.setattr(api.repository, "upsert_account", lambda conn, sub, email: {})
+        monkeypatch.setattr(
+            api.repository,
+            "upsert_account",
+            lambda conn, sub, email, admin=False: {"account_id": sub, "email": email},
+        )
         monkeypatch.setattr(
             api.repository,
             "claim_profile",
@@ -438,7 +448,7 @@ class TestAccounts:
             ),
         )
         body = json.loads(invoke({"routeKey": "GET /auth/config"}, lambda_context)["body"])
-        assert set(body) == {"region", "user_pool_id", "client_id"}
+        assert set(body) == {"region", "user_pool_id", "client_id", "domain", "google"}
 
 
 class TestSite:
@@ -453,15 +463,11 @@ class TestSite:
         assert static.resolve("dashboard", tmp_path, spa=False) is None  # not silently the landing
         assert static.resolve("../handler.py", tmp_path, spa=False) is None
 
-    def test_home_falls_back_to_the_upload_page_when_the_landing_is_not_built(
-        self, monkeypatch, lambda_context
-    ):
+    def test_home_goes_to_the_app_when_the_landing_is_not_built(self, monkeypatch, lambda_context):
         monkeypatch.setattr(api, "dependencies", lambda: None)
         monkeypatch.setattr(static, "SITE_DIR", Path("/nonexistent"))
         res = invoke({"routeKey": "GET /"}, lambda_context)
-        assert "Loan Eligibility Engine" in res["body"]
-        upload = invoke({"routeKey": "GET /upload"}, lambda_context)
-        assert "Loan Eligibility Engine" in upload["body"]
+        assert (res["statusCode"], res["headers"]["location"]) == (302, "/app/")
 
 
 def test_email_tokens_only_for_users_about_to_be_emailed(deps, monkeypatch, lambda_context):
@@ -496,7 +502,12 @@ def test_upload_tickets_have_a_daily_cap(deps, monkeypatch, lambda_context):
         api.repository, "csv_uploads_last_24h", lambda conn: api.MAX_UPLOADS_PER_DAY
     )
     res = invoke(
-        {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}, lambda_context
+        {
+            "routeKey": "POST /uploads",
+            "body": json.dumps({"filename": "u.csv"}),
+            "requestContext": signed_in_as(MERCHANT),
+        },
+        lambda_context,
     )
     assert res["statusCode"] == 429
 
@@ -524,43 +535,60 @@ class TestDataReset:
     def test_cognito_groups_claim(self, raw, groups):
         assert api.cognito_groups(raw) == groups
 
-    def test_deleting_uploads_needs_the_admin_group(self, deps, monkeypatch, lambda_context):
-        calls = []
+    def test_owner_or_admin_deletes_an_upload_and_only_admins_delete_all(
+        self, deps, monkeypatch, lambda_context
+    ):
+        purged = []
+        owners = {self.JOB: "merchant-sub"}
         monkeypatch.setattr(
-            api.repository, "purge_upload", lambda conn, job: calls.append(job) or 7
+            api.repository, "upload_owner", lambda conn, j: (j in owners, owners.get(j))
         )
+        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, j: purged.append(j) or 7)
         monkeypatch.setattr(
             api.repository,
             "purge_csv_uploads",
-            lambda conn: calls.append("all") or {"deleted_users": 9, "uploads": 2},
+            lambda conn, account=None: purged.append(account or "all")
+            or {"deleted_users": 9, "uploads": 2},
         )
-        path = {"job_id": str(self.JOB)}
-        for route, p in (("DELETE /uploads/{job_id}", path), ("DELETE /uploads", None)):
-            res = invoke(self.event(route, self.CLAIMS, path=p), lambda_context)
-            assert res["statusCode"] == 403
-        assert calls == []  # nothing was deleted for a non-admin
-
-        one = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
-        assert (one["statusCode"], json.loads(one["body"])["deleted_users"]) == (200, 7)
-        every = invoke(self.event("DELETE /uploads", self.ADMIN), lambda_context)
-        assert json.loads(every["body"]) == {"deleted_users": 9, "uploads": 2}
-        assert calls == [self.JOB, "all"]
+        one = {"routeKey": "DELETE /uploads/{job_id}", "pathParameters": {"job_id": str(self.JOB)}}
+        other = {**MERCHANT, "sub": "someone-else"}
+        # Another merchant cannot delete it, or even learn that it exists.
+        res = invoke({**one, "requestContext": signed_in_as(other)}, lambda_context)
+        assert res["statusCode"] == 404 and purged == []
+        for who in (MERCHANT, ADMIN):  # the owner, and an admin
+            res = invoke({**one, "requestContext": signed_in_as(who)}, lambda_context)
+            assert (res["statusCode"], json.loads(res["body"])["deleted_users"]) == (200, 7)
+        every = {"routeKey": "DELETE /uploads", "queryStringParameters": {"scope": "all"}}
+        assert invoke({**every, "requestContext": signed_in_as(MERCHANT)})["statusCode"] == 403
+        res = invoke({**every, "requestContext": signed_in_as(ADMIN)}, lambda_context)
+        assert json.loads(res["body"]) == {"deleted_users": 9, "uploads": 2}
+        # Any merchant may reset its OWN workspace (no scope = mine).
+        mine = {"routeKey": "DELETE /uploads", "requestContext": signed_in_as(MERCHANT)}
+        assert invoke(mine, lambda_context)["statusCode"] == 200
+        assert purged == [self.JOB, self.JOB, "all", "merchant-sub"]
 
     def test_purge_of_a_missing_or_busy_job(self, deps, monkeypatch, lambda_context):
-        path = {"job_id": str(self.JOB)}
-        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, job: None)
-        res = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
-        assert res["statusCode"] == 404
+        event = {
+            "routeKey": "DELETE /uploads/{job_id}",
+            "pathParameters": {"job_id": str(self.JOB)},
+            "requestContext": signed_in_as(ADMIN),
+        }
+        monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (False, None))
+        assert invoke(event, lambda_context)["statusCode"] == 404
 
         def busy(conn, job):
             raise api.repository.JobBusyError
 
+        monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (True, None))
         monkeypatch.setattr(api.repository, "purge_upload", busy)
-        res = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
-        assert res["statusCode"] == 409
+        assert invoke(event, lambda_context)["statusCode"] == 409
 
     def test_account_says_whether_it_is_an_admin(self, deps, monkeypatch, lambda_context):
-        monkeypatch.setattr(api.repository, "upsert_account", lambda conn, sub, email: {})
+        monkeypatch.setattr(
+            api.repository,
+            "upsert_account",
+            lambda conn, sub, email, admin=False: {"account_id": sub, "email": email},
+        )
         monkeypatch.setattr(api.repository, "account_profiles", lambda conn, sub: [])
         for claims, admin in ((self.CLAIMS, False), (self.ADMIN, True)):
             res = invoke(self.event("GET /account", claims), lambda_context)
@@ -601,34 +629,102 @@ class TestDataReset:
 class TestUploadRecords:
     JOB = uuid.UUID("5d1c6a3e-9b0f-4f61-8d2a-7c3b9e1f0a42")
 
-    def test_list_of_uploads(self, deps, monkeypatch, lambda_context):
+    def test_each_merchant_lists_only_its_own_uploads(self, deps, monkeypatch, lambda_context):
+        seen = []
         rows = [{"job_id": self.JOB, "original_filename": "users.csv", "users_now": 4}]
-        monkeypatch.setattr(api.repository, "list_uploads", lambda conn: rows)
-        status, body = call("GET /uploads", lambda_context)
-        assert status == 200 and body == [{**rows[0], "job_id": str(self.JOB)}]
-
-    def test_uploader_deletes_with_its_key_and_nobody_else_can(
-        self, deps, monkeypatch, lambda_context
-    ):
-        purged = []
-        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, j: purged.append(j) or 4)
-        good = tokens.sign(self.JOB, int(time.time()) + 60, api.upload_key(deps))
-        other_job = tokens.sign(uuid.uuid4(), int(time.time()) + 60, api.upload_key(deps))
-        dashboard_link = tokens.sign(self.JOB, int(time.time()) + 60, KEY)  # wrong purpose
-        path = {"job_id": str(self.JOB)}
-        for key in (None, "a.b.c", other_job, dashboard_link):
-            event = {"routeKey": "DELETE /uploads/{job_id}/users", "pathParameters": path}
-            if key:
-                event["headers"] = {"x-upload-key": key}
-            assert invoke(event, lambda_context)["statusCode"] == 403
-        assert purged == []
-        res = invoke(
-            {
-                "routeKey": "DELETE /uploads/{job_id}/users",
-                "pathParameters": path,
-                "headers": {"x-upload-key": good},
-            },
-            lambda_context,
+        monkeypatch.setattr(
+            api.repository, "list_uploads", lambda conn, account: seen.append(account) or rows
         )
-        assert res["statusCode"] == 200 and json.loads(res["body"])["deleted_users"] == 4
-        assert purged == [self.JOB]
+        assert invoke({"routeKey": "GET /uploads"}, lambda_context)["statusCode"] == 401
+        res = invoke({"routeKey": "GET /uploads", "requestContext": signed_in_as(MERCHANT)})
+        assert json.loads(res["body"]) == [{**rows[0], "job_id": str(self.JOB)}]
+        invoke({"routeKey": "GET /uploads", "requestContext": signed_in_as(ADMIN)})
+        assert seen == ["merchant-sub", None]  # an admin sees every account's uploads
+
+    def test_upload_progress_is_private_to_its_owner(self, deps, monkeypatch, lambda_context):
+        monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (True, "merchant-sub"))
+        monkeypatch.setattr(
+            api.repository,
+            "get_job_progress",
+            lambda conn, j: {
+                "job": {
+                    "status": "COMPLETED",
+                    "attempts": 1,
+                    "created_at": None,
+                    "db_now": None,
+                },
+                "rejects": [],
+            },
+        )
+        event = {"routeKey": "GET /uploads/{job_id}", "pathParameters": {"job_id": str(self.JOB)}}
+        other = {**MERCHANT, "sub": "someone-else"}
+        assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 404
+        assert invoke({**event, "requestContext": signed_in_as(MERCHANT)})["statusCode"] == 200
+
+
+def test_one_account_per_verified_email_whatever_the_sign_in_method(
+    deps, monkeypatch, lambda_context
+):
+    """A Google sign-in (its own Cognito sub) lands on the account of the same email."""
+    rows = {"merchant@example.org": "password-sub"}  # created by an email+password sign-up
+    monkeypatch.setattr(
+        api.repository,
+        "upsert_account",
+        lambda conn, sub, email, admin=False: {
+            "account_id": rows.setdefault(email, sub),
+            "email": email,
+        },
+    )
+    seen = []
+    monkeypatch.setattr(
+        api.repository, "list_uploads", lambda conn, account: seen.append(account) or []
+    )
+    google = {**MERCHANT, "sub": "google-sub", "identities": "[google]"}
+    invoke({"routeKey": "GET /uploads", "requestContext": signed_in_as(google)}, lambda_context)
+    assert seen == ["password-sub"]
+
+
+def test_auth_config_offers_google_only_when_enabled(deps, monkeypatch, lambda_context):
+    for enabled, domain in ((False, ""), (True, "d.auth.example")):
+        monkeypatch.setattr(
+            api,
+            "dependencies",
+            lambda enabled=enabled: api.Dependencies(
+                db_host="h",
+                db_secret_arn="a",
+                bucket="b",
+                s3=None,
+                auth_domain="d.auth.example",
+                google_sign_in=enabled,
+            ),
+        )
+        body = json.loads(invoke({"routeKey": "GET /auth/config"}, lambda_context)["body"])
+        assert (body["google"], body["domain"]) == (enabled, domain)
+
+
+def test_admin_belongs_to_the_account_not_one_sign_in_method(deps, monkeypatch, lambda_context):
+    """Admin recorded from the password login carries to a Google login of the same email."""
+    accounts = {}  # email -> row
+
+    def upsert(conn, sub, email, admin=False):
+        row = accounts.setdefault(email, {"account_id": sub, "email": email, "is_admin": False})
+        row["is_admin"] = row["is_admin"] or admin
+        return row
+
+    monkeypatch.setattr(api.repository, "upsert_account", upsert)
+    monkeypatch.setattr(
+        api.repository,
+        "purge_csv_uploads",
+        lambda conn, account=None: {"deleted_users": 0, "uploads": 0},
+    )
+    monkeypatch.setattr(api.repository, "list_uploads", lambda conn, account: [])
+    google = {**MERCHANT, "sub": "google-sub"}  # not in the Cognito admin group
+    every = {"routeKey": "DELETE /uploads", "queryStringParameters": {"scope": "all"}}
+    assert invoke({**every, "requestContext": signed_in_as(google)})["statusCode"] == 403
+    invoke(
+        {
+            "routeKey": "GET /uploads",
+            "requestContext": signed_in_as({**ADMIN, "email": MERCHANT["email"]}),
+        }
+    )
+    assert invoke({**every, "requestContext": signed_in_as(google)})["statusCode"] == 200

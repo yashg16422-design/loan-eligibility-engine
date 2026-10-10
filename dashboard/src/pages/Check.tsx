@@ -3,9 +3,9 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, ApiError, session } from "../api/client";
 import type { Employment } from "../api/types";
 import { EMPLOYMENT_LABEL } from "../lib/format";
-import { navigate } from "../router";
+import { Link, navigate } from "../router";
 
-type Stage = "idle" | "queued" | "loaded" | "matched" | "failed";
+export type Stage = "idle" | "queued" | "loaded" | "matched" | "failed";
 
 // The real path one check travels: the same one a 10,000-row upload takes.
 const STEPS: { key: Exclude<Stage, "idle" | "failed">; title: string; detail: string }[] = [
@@ -15,13 +15,18 @@ const STEPS: { key: Exclude<Stage, "idle" | "failed">; title: string; detail: st
 ];
 const ORDER: Stage[] = ["idle", "queued", "loaded", "matched"];
 
-export function Check() {
-  const [stage, setStage] = useState<Stage>("idle");
+/** The four-number check, shared by the consumer page and the merchant's single lookup. */
+export function CheckForm({ onStage, submitLabel = "Check my eligibility" }: { onStage?: (s: Stage) => void; submitLabel?: string }) {
+  const [stage, setStageState] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [employment, setEmployment] = useState<Employment>("salaried");
   const [elapsed, setElapsed] = useState(0);
   const started = useRef(0);
   const busy = stage !== "idle" && stage !== "failed";
+  const setStage = (s: Stage) => {
+    setStageState(s);
+    onStage?.(s);
+  };
 
   useEffect(() => {
     if (!busy) return;
@@ -54,6 +59,54 @@ export function Check() {
   }
 
   return (
+    <form onSubmit={submit} className="box" aria-describedby={error ? "check-error" : undefined}>
+      <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
+        <span className="label">/check</span>
+        <span className="label">ClickPar Match</span>
+      </div>
+      <fieldset disabled={busy} className="grid gap-5 p-4 sm:grid-cols-2">
+        <Field label="Monthly income" hint="Take-home, in rupees">
+          <input name="income" required inputMode="numeric" autoComplete="off" placeholder="₹48,000" className="field" />
+        </Field>
+        <Field label="Credit score" hint="CIBIL, 300 to 900">
+          <input name="score" required inputMode="numeric" autoComplete="off" placeholder="742" className="field" />
+        </Field>
+        <Field label="Age" hint="In years">
+          <input name="age" required inputMode="numeric" autoComplete="off" placeholder="29" className="field" />
+        </Field>
+        <Field label="First name" hint="Optional, to greet you">
+          <input name="name" maxLength={60} autoComplete="given-name" className="field font-sans" />
+        </Field>
+        <div className="sm:col-span-2">
+          <span id="earn" className="text-sm">How you earn</span>
+          <div role="radiogroup" aria-labelledby="earn" className="mt-2 grid grid-cols-3 border border-line">
+            {(Object.keys(EMPLOYMENT_LABEL) as Employment[]).map((value) => (
+              <button key={value} type="button" role="radio" aria-checked={employment === value}
+                onClick={() => setEmployment(value)}
+                className={`h-11 border-r border-line text-sm last:border-r-0 transition-colors duration-150 ${
+                  employment === value ? "bg-fg text-bg" : "text-mute hover:text-fg"
+                }`}>
+                {EMPLOYMENT_LABEL[value]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <button type="submit" className="btn btn-primary h-12 sm:col-span-2">
+          {busy ? `Checking, ${elapsed.toFixed(1)} s` : submitLabel}
+        </button>
+      </fieldset>
+      {error && (
+        <p id="check-error" role="alert" className="flex items-start gap-2 border-t border-line px-4 py-3 text-sm text-coral">
+          <WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden /> {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+export function Check() {
+  const [stage, setStage] = useState<Stage>("idle");
+  return (
     <div className="mx-auto grid max-w-[1480px] gap-12 px-5 pt-14 pb-12 sm:px-10 xl:px-16 lg:grid-cols-[minmax(0,560px)_minmax(0,1fr)] lg:gap-24 lg:pt-20">
       <section aria-labelledby="check-title">
         <h1 id="check-title" className="text-3xl sm:text-4xl">Know your yes before you apply.</h1>
@@ -61,48 +114,12 @@ export function Check() {
           Four numbers, checked against every lender's published rules. No email, no phone number, no credit enquiry.
         </p>
 
-        <form onSubmit={submit} className="box mt-8" aria-describedby={error ? "check-error" : undefined}>
-          <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
-            <span className="label">/check</span>
-            <span className="label">ClickPar Match</span>
-          </div>
-          <fieldset disabled={busy} className="grid gap-5 p-4 sm:grid-cols-2">
-            <Field label="Monthly income" hint="Take-home, in rupees">
-              <input name="income" required inputMode="numeric" autoComplete="off" placeholder="₹48,000" className="field" />
-            </Field>
-            <Field label="Credit score" hint="CIBIL, 300 to 900">
-              <input name="score" required inputMode="numeric" autoComplete="off" placeholder="742" className="field" />
-            </Field>
-            <Field label="Age" hint="In years">
-              <input name="age" required inputMode="numeric" autoComplete="off" placeholder="29" className="field" />
-            </Field>
-            <Field label="First name" hint="Optional, to greet you">
-              <input name="name" maxLength={60} autoComplete="given-name" className="field font-sans" />
-            </Field>
-            <div className="sm:col-span-2">
-              <span id="earn" className="text-sm">How you earn</span>
-              <div role="radiogroup" aria-labelledby="earn" className="mt-2 grid grid-cols-3 border border-line">
-                {(Object.keys(EMPLOYMENT_LABEL) as Employment[]).map((value) => (
-                  <button key={value} type="button" role="radio" aria-checked={employment === value}
-                    onClick={() => setEmployment(value)}
-                    className={`h-11 border-r border-line text-sm last:border-r-0 transition-colors duration-150 ${
-                      employment === value ? "bg-acc-deep text-fg" : "text-mute hover:text-fg"
-                    }`}>
-                    {EMPLOYMENT_LABEL[value]}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <button type="submit" className="btn btn-primary h-12 sm:col-span-2">
-              {busy ? `Checking, ${elapsed.toFixed(1)} s` : "Check my eligibility"}
-            </button>
-          </fieldset>
-          {error && (
-            <p id="check-error" role="alert" className="flex items-start gap-2 border-t border-line px-4 py-3 text-sm text-coral">
-              <WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden /> {error}
-            </p>
-          )}
-        </form>
+        <div className="mt-8">
+          <CheckForm onStage={setStage} />
+        </div>
+        <p className="mt-6 text-sm text-mute">
+          Checking customers for a lender or a business? <Link to="merchant" className="text-fg underline decoration-line-hi underline-offset-4 hover:decoration-fg">Open the merchant console</Link>
+        </p>
       </section>
 
       <aside aria-label="What happens when you check" className="lg:pt-24">

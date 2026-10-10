@@ -75,7 +75,7 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
               {rows.map(({ m }) =>
                 m.product_url ? (
                   <a key={m.product_id} href={m.product_url} target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 underline decoration-line-hi hover:decoration-acc">
+                    className="inline-flex items-center gap-1 underline decoration-line-hi hover:decoration-fg">
                     Apply on {CHANNEL_LABEL[m.channel]} <ArrowUpRight size={14} aria-hidden />
                   </a>
                 ) : "-",

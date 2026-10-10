@@ -4,7 +4,8 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { api, ApiError } from "../api/client";
 import type { UploadProgress } from "../api/types";
 import { navigate } from "../router";
-import { uploadKeys } from "./uploadKeys";
+
+export const MAX_BYTES = 50 * 1024 * 1024; // same limit the S3 upload policy enforces
 
 export type UploadState =
   | { phase: "idle" }
@@ -40,20 +41,27 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       try {
         const progress = await api.upload(state.jobId);
         setState((s) => (s.phase === "tracking" ? { ...s, progress, finished: isFinished(progress) } : s));
-      } catch {
-        setState((s) => ({ ...s })); // transient: poll again
+      } catch (err) {
+        // Signed out / no longer yours: stop and say so. Anything else is transient: poll again.
+        if (err instanceof ApiError && [401, 403, 404].includes(err.status)) {
+          setState((s) => (s.phase === "tracking" ? { phase: "error", name: s.name, message: err.message } : s));
+        } else {
+          setState((s) => ({ ...s }));
+        }
       }
     }, 1500);
     return () => window.clearTimeout(id);
   }, [state]);
 
   const start = useCallback(async (file: File) => {
-    navigate("overview");
+    navigate("merchant");
     setState({ phase: "sending", name: file.name, bytes: file.size });
     try {
-      if (!/\.csv$/i.test(file.name)) throw new ApiError(400, "Choose a .csv file.");
+      // Checked here first, so a wrong file never costs an upload ticket.
+      if (!/\.csv$/i.test(file.name)) throw new ApiError(400, `"${file.name}" is not a CSV. Choose a .csv file.`);
+      if (file.size === 0) throw new ApiError(400, "That file is empty.");
+      if (file.size > MAX_BYTES) throw new ApiError(413, `That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is 50 MB.`);
       const ticket = await api.createUpload(file.name);
-      uploadKeys.set(ticket.job_id, ticket.delete_key); // lets this browser delete it later
       if (file.size > ticket.max_bytes) throw new ApiError(413, "That file is larger than 50 MB.");
       const form = new FormData();
       Object.entries(ticket.upload.fields).forEach(([k, v]) => form.append(k, v));

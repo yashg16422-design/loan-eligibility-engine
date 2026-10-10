@@ -78,6 +78,10 @@ html[data-intro="play"] #curtain { display: grid; }
 .nav ul a { display: grid; place-items: center; min-height: 44px; padding: 0 12px; color: #CFCFCF; text-decoration: none; font-size: .95rem; font-weight: 400; letter-spacing: -0.01em; transition: color .2s; }
 .nav ul a:hover { color: var(--fg); }
 .nav .btn { justify-self: end; min-height: 46px; padding: 0 20px; font-size: .92rem; }
+.nav-end { justify-self: end; display: flex; align-items: center; gap: 20px; }
+.nav-merchant { color: #CFCFCF; text-decoration: none; font-size: .9rem; letter-spacing: -0.01em; padding: 10px 0; border-bottom: 1px solid transparent; transition: color .2s, border-color .2s; white-space: nowrap; }
+.nav-merchant:hover { color: var(--fg); border-bottom-color: var(--fg); }
+@media (max-width: 520px) { .nav-end { gap: 12px; } .nav-merchant { font-size: .8rem; } }
 
 /* ---------- section rail (collapsible) ---------- */
 .rn { position: fixed; z-index: 29; left: 18px; top: 50%; transform: translateY(-50%); display: grid; gap: 10px; padding: 10px; border: 1px solid transparent; transition: background-color .3s, border-color .3s; }

@@ -24,6 +24,12 @@ provider:
           - !Ref UserPoolClient
 
 custom:
+  # "Continue with Google" (on; GOOGLE_SIGN_IN=false turns it off). The OAuth client lives in Secrets Manager as
+  # loan-engine/<stage>/google-oauth = {"client_id": ..., "client_secret": ...} (README §14).
+  googleSignIn: ${env:GOOGLE_SIGN_IN, 'true'}
+  # Managed-login domain (OAuth code flow). Google's "Authorized redirect URI" is
+  # https://<authDomain>.auth.<region>.amazoncognito.com/oauth2/idpresponse
+  authDomain: ${self:service}-${sls:stage}-${aws:accountId}
   # Built as a plain string (not !Ref) to break the bucket <-> queue-policy cycle;
   # the account id makes the name globally unique.
   dataBucket: ${self:service}-${sls:stage}-data-${aws:accountId}
@@ -116,6 +122,8 @@ functions:
       N8N_WEBHOOK_SECRET_ARN: !Ref N8nWebhookSecret # verifies Workflow C's token requests
       USER_POOL_ID: !Ref UserPool
       USER_POOL_CLIENT_ID: !Ref UserPoolClient
+      AUTH_DOMAIN: ${self:custom.authDomain}.auth.${aws:region}.amazoncognito.com
+      GOOGLE_SIGN_IN: ${self:custom.googleSignIn}
       COMPILE_PROMPT_VERSION: compile_v1 # = COMPILE_PROMPT_VERSION in n8n/build_workflows.py
       VALIDATION_RULES: "" # keep equal to the ingest function's: one set of rules
       POWERTOOLS_LOG_LEVEL: INFO
@@ -123,10 +131,20 @@ functions:
       - httpApi: GET /
       - httpApi: GET /upload
       - httpApi: GET /{proxy+} # landing assets; every more specific route wins over it
-      - httpApi: GET /uploads
-      - httpApi: POST /uploads
-      - httpApi: DELETE /uploads/{job_id}/users # uploader's delete key, checked in the Lambda
-      - httpApi: GET /uploads/{job_id}
+      # Bulk uploads belong to a signed-in (merchant) account: every /uploads route is behind
+      # the Cognito authorizer; ownership is checked in the Lambda.
+      - httpApi:
+          method: GET
+          path: /uploads
+          authorizer: { name: cognito }
+      - httpApi:
+          method: POST
+          path: /uploads
+          authorizer: { name: cognito }
+      - httpApi:
+          method: GET
+          path: /uploads/{job_id}
+          authorizer: { name: cognito }
       - httpApi: POST /check
       - httpApi: GET /me
       - httpApi: GET /me/matches
@@ -178,6 +196,8 @@ functions:
           authorizer: { name: cognito }
 
 resources:
+  Conditions:
+    GoogleSignIn: !Equals ["${self:custom.googleSignIn}", "true"]
   Resources:
     # ------------------------------------------------------------------
     # VPC + Internet Gateway
@@ -717,7 +737,7 @@ resources:
       Properties:
         UserPoolId: !Ref UserPool
         ClientName: ${self:service}-${sls:stage}-web
-        GenerateSecret: false # a browser app cannot keep a secret
+        GenerateSecret: false # a browser app cannot keep a secret (the OAuth flow uses PKCE)
         ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
         PreventUserExistenceErrors: ENABLED # sign-in errors never reveal whether an email exists
         EnableTokenRevocation: true
@@ -728,6 +748,41 @@ resources:
           IdToken: hours
           AccessToken: hours
           RefreshToken: days
+        # OAuth 2.0 authorization-code flow with PKCE, for "Continue with Google".
+        AllowedOAuthFlowsUserPoolClient: true
+        AllowedOAuthFlows: [code]
+        AllowedOAuthScopes: [openid, email, profile]
+        SupportedIdentityProviders: !If [GoogleSignIn, [COGNITO, !Ref GoogleIdentityProvider], [COGNITO]]
+        CallbackURLs:
+          - !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/app/auth/callback
+          - http://localhost:5173/app/auth/callback
+        LogoutURLs:
+          - !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/app/merchant
+          - http://localhost:5173/app/merchant
+
+    UserPoolDomain:
+      Type: AWS::Cognito::UserPoolDomain
+      Properties:
+        UserPoolId: !Ref UserPool
+        Domain: ${self:custom.authDomain}
+
+    # Google as an identity provider. The client secret is a Secrets Manager dynamic reference:
+    # resolved by CloudFormation at deploy time, never in the repo or the template.
+    GoogleIdentityProvider:
+      Type: AWS::Cognito::UserPoolIdentityProvider
+      Condition: GoogleSignIn
+      Properties:
+        UserPoolId: !Ref UserPool
+        ProviderName: Google
+        ProviderType: Google
+        ProviderDetails:
+          client_id: "{{resolve:secretsmanager:loan-engine/${sls:stage}/google-oauth:SecretString:client_id}}"
+          client_secret: "{{resolve:secretsmanager:loan-engine/${sls:stage}/google-oauth:SecretString:client_secret}}"
+          authorize_scopes: openid email profile
+        AttributeMapping:
+          email: email
+          email_verified: email_verified # the API only accepts verified emails
+          name: name
 
     # Members may delete uploaded data from the app (DELETE /uploads). Membership is granted
     # by hand, never by sign-up: aws cognito-idp admin-add-user-to-group (README §14).

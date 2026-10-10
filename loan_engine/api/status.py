@@ -9,6 +9,8 @@ from decimal import Decimal
 # A ticket whose file never arrived is reported EXPIRED after this long.
 # The presigned POST itself expires after 10 minutes; 15 leaves slack for slow uploads.
 EXPIRE_AFTER = timedelta(minutes=15)
+# A 10,000-row load takes seconds; a first attempt still "waiting" after this has failed.
+FIRST_ATTEMPT_MAX = timedelta(minutes=3)
 
 
 def derive_status(status: str, attempts: int, created_at: datetime, now: datetime) -> str:
@@ -17,12 +19,19 @@ def derive_status(status: str, attempts: int, created_at: datetime, now: datetim
     - EXPIRED: still waiting, no recorded ingest attempt, and older than 15 minutes: the
       browser never uploaded the file, or ingest crashed before it could record an attempt
       (that message is in the DLQ and the DLQ alarm has fired).
-    - RETRYING: still waiting but at least one ingest attempt failed; SQS will redeliver.
+    - PROCESSING: the first ingest attempt is running (its counter is already committed).
+    - RETRYING: still waiting after a failed attempt; SQS will redeliver.
     """
     if status != "AWAITING_UPLOAD":
         return status
-    if attempts > 0:
+    # The attempt counter is committed BEFORE the load transaction, so "1 attempt, still
+    # waiting" also describes a first attempt that is running right now (seen live on a
+    # 10,000-row file). Only a second attempt, or a first one older than any real load, means
+    # an attempt failed and SQS is redelivering.
+    if attempts > 1 or (attempts == 1 and now - created_at > FIRST_ATTEMPT_MAX):
         return "RETRYING"
+    if attempts == 1:
+        return "PROCESSING"
     if now - created_at > EXPIRE_AFTER:
         return "EXPIRED"
     return status

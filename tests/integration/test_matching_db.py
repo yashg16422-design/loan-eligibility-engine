@@ -525,7 +525,67 @@ def test_data_reset_runs_as_app_ingest_and_keeps_history(db):
         r["users_in"] or 0 for r in runs if r["mode"] == "upload" and r["status"] == "done"
     )
     # The upload list shows the cleared upload as its own record, emptied but kept.
-    records = {r["job_id"]: r for r in repository.list_uploads(db)}
+    records = {r["job_id"]: r for r in repository.list_uploads(db, None)}  # admin: all
     assert records[csv_job]["users_now"] == 0 and records[csv_job]["purged_at"] is not None
     assert records[csv_job]["emails_sent"] == 0  # its email rows went with the users
     assert check_job not in records  # instant checks are not bulk uploads
+    # Migration 008: a merchant sees only its own uploads.
+    owned = uuid.uuid4()
+    repository.create_job(db, owned, f"raw/{owned}.csv", "mine.csv", account_id="sub-reset")
+    assert repository.upload_owner(db, owned) == (True, "sub-reset")
+    assert repository.upload_owner(db, csv_job) == (True, None)  # older upload: no owner
+    assert repository.upload_owner(db, check_job) == (False, None)  # not a bulk upload
+    mine = [r["job_id"] for r in repository.list_uploads(db, "sub-reset")]
+    assert owned in mine and csv_job not in mine
+    assert repository.list_uploads(db, "nobody") == []
+    # "Reset my workspace" touches only that account's uploads.
+    assert repository.purge_csv_uploads(db, "nobody") == {"deleted_users": 0, "uploads": 0}
+    assert repository.purge_csv_uploads(db, "sub-reset")["uploads"] == 1  # only "mine.csv"
+
+
+def test_pipeline_note_fix_makes_unpublished_criteria_conditional(db):
+    """Migration 007: a compiled text carrying our "criteria not published" note gains it as a
+    requirement (so Stage 1 says "may qualify"); running it again changes nothing."""
+    note = "Eligibility criteria not published: confirm with the lender"
+    text = f"Salary account preferred; {note}"
+    product = uuid.uuid4()
+    db.execute(
+        "INSERT INTO loan_products (product_id, lender, lender_key, channel, source_url,"
+        " product_name, other_criteria_text, criteria_hash)"
+        " VALUES (%s, 'Note Bank', 'note-bank', 'direct', 'https://example.org/n', 'PL', %s, 'x')",
+        (product, text),
+    )
+    db.execute(
+        "INSERT INTO criteria_rules (criteria_text_hash, prompt_version, rules, requirements,"
+        " model_id) VALUES (encode(sha256(convert_to(%s, 'UTF8')), 'hex'), %s, '[]',"
+        " '[\"Salary account preferred\"]', 'test')",
+        (text, PROMPT_VERSION),
+    )
+    fix = (ROOT / "sql" / "007_pipeline_notes.sql").read_text()
+    db.execute(fix)
+    db.execute(fix)  # idempotent
+    reqs = db.execute(
+        "SELECT requirements FROM criteria_rules"
+        " WHERE criteria_text_hash = encode(sha256(convert_to(%s, 'UTF8')), 'hex')",
+        (text,),
+    ).fetchone()[0]
+    assert reqs == ["Salary account preferred", note]
+    db.execute("DELETE FROM loan_products WHERE product_id = %s", (product,))
+
+
+def test_one_account_row_per_verified_email(db):
+    """A second Cognito user (e.g. Google) with the same email resolves to the first account."""
+    from loan_engine.api import repository
+
+    first = repository.upsert_account(db, "pw-sub-1", "Same.Person@example.org", admin=True)
+    again = repository.upsert_account(db, "google-sub-1", "same.person@example.org")
+    assert first["account_id"] == again["account_id"] == "pw-sub-1"
+    assert again["is_admin"] is True  # recorded once, carried to the other sign-in method
+    other = repository.upsert_account(db, "google-sub-2", "someone.else@example.org")
+    assert other["account_id"] == "google-sub-2"
+    assert (
+        db.execute(
+            "SELECT count(*) FROM accounts WHERE lower(email) = 'same.person@example.org'"
+        ).fetchone()[0]
+        == 1
+    )

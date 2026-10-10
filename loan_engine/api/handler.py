@@ -4,12 +4,11 @@ API Gateway still owns the edge (routes, throttling, the Cognito JWT authorizer)
 serverless.yml forwards to this one function, Mangum turns the Lambda event into an ASGI request,
 and FastAPI picks the endpoint below. Interactive docs: GET /api/docs.
 
-    GET  /                    the landing page (web/), or the upload UI if not built
-    GET  /upload              the minimal upload UI (same origin = no API CORS)
-    GET  /uploads             recent bulk uploads, one record each (counts only)
-    POST /uploads             create a job + presigned POST + this browser's delete key
-    GET  /uploads/{job_id}    status, counts, rejects, match/notify progress
-    DELETE /uploads/{job_id}/users  (X-Upload-Key) the uploader deletes its own upload's users
+    GET  /                    the landing page (web/)
+    GET  /upload              moved: redirects to the merchant console (/app/merchant)
+    GET  /uploads             (Cognito) my bulk uploads, one record each (admins: everyone's)
+    POST /uploads             (Cognito) create a job I own + presigned POST for raw/<job_id>.csv
+    GET  /uploads/{job_id}    (Cognito, owner or admin) status, counts, rejects, progress
     POST /check               instant check: 4 numbers -> the real pipeline -> a token
     GET  /me, /me/matches     (dashboard token) profile, matching state, matches
     GET|PUT /me/preferences   (dashboard token) shortlist, top 3, hidden, alerts
@@ -22,7 +21,8 @@ and FastAPI picks the endpoint below. Interactive docs: GET /api/docs.
     POST /account/profiles[/{user_id}/open]  (Cognito) save a check / reopen it
     DELETE /me                (dashboard token) delete my own instant check
     DELETE /account/profiles[/{user_id}]     (Cognito) remove saved checks; account stays
-    DELETE /uploads[/{job_id}]               (Cognito `admin` group) delete uploaded users
+    DELETE /uploads/{job_id}  (Cognito, owner or admin) delete that upload's users
+    DELETE /uploads           (Cognito) reset my workspace; ?scope=all (admin) every account
     GET  /app, /app/{proxy}   the built dashboard (single-page app)
     GET  /{proxy}             the landing's assets (registered last: every route above wins)
 """
@@ -36,7 +36,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from functools import cache
-from pathlib import Path
 from typing import Annotated, Any
 
 import boto3
@@ -45,7 +44,7 @@ from aws_lambda_powertools import Logger
 from botocore.config import Config
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from mangum import Mangum
 from starlette.exceptions import HTTPException
@@ -60,8 +59,6 @@ from loan_engine.common.secrets import cached_db_credentials
 from loan_engine.common.validation import rules_from_json
 
 logger = Logger(service="api")
-
-UI_HTML = (Path(__file__).with_name("ui.html")).read_text(encoding="utf-8")
 
 # Each upload can email up to the demo cap of users; the SES sandbox allows 200 emails a day.
 MAX_UPLOADS_PER_DAY = 50
@@ -210,6 +207,8 @@ class Dependencies:
     user_pool_client_id: str = ""
     compile_prompt_version: str = "compile_v1"
     validation_rules: str = ""
+    auth_domain: str = ""
+    google_sign_in: bool = False
 
 
 @cache
@@ -225,6 +224,8 @@ def dependencies() -> Dependencies:
         user_pool_client_id=os.environ.get("USER_POOL_CLIENT_ID", ""),
         compile_prompt_version=os.environ.get("COMPILE_PROMPT_VERSION", "compile_v1"),
         validation_rules=os.environ.get("VALIDATION_RULES", ""),
+        auth_domain=os.environ.get("AUTH_DOMAIN", ""),
+        google_sign_in=os.environ.get("GOOGLE_SIGN_IN", "") == "true",
         # Regional virtual-hosted endpoint: the browser POSTs to
         # https://<bucket>.s3.<region>.amazonaws.com directly. The global endpoint can
         # answer a new bucket with a 307 redirect, which breaks a CORS upload.
@@ -319,71 +320,72 @@ def signed_in(request: Request) -> Account:
     )
 
 
-def admin(who: Annotated[Account, Depends(signed_in)]) -> Account:
-    if not who.is_admin:
-        raise ForbiddenError
-    return who
+def member(
+    who: Annotated[Account, Depends(signed_in)], deps: Annotated[Dependencies, Depends(get_deps)]
+) -> Account:
+    """The signed-in person's account: one row per verified email, however they signed in
+    (password or Google), so uploads and saved checks follow the person, not the method."""
+    with db(deps) as conn:
+        row = repository.upsert_account(conn, who.account_id, who.email, admin=who.is_admin)
+    return Account(
+        account_id=str(row["account_id"]),
+        email=str(row["email"]),
+        is_admin=who.is_admin or bool(row.get("is_admin")),  # admin is the person's, any method
+    )
 
 
 # Short names for the route signatures below.
 Deps = Annotated[Dependencies, Depends(get_deps)]
 Body = Annotated[dict[str, Any], Depends(json_body)]
 Borrower = Annotated[uuid.UUID, Depends(borrower)]
-SignedIn = Annotated[Account, Depends(signed_in)]
-Admin = Annotated[Account, Depends(admin)]
+SignedIn = Annotated[Account, Depends(member)]
 
 
 # ---------------------------------------------------------------- pages
 
 
-def html(page: str) -> HTMLResponse:
-    return HTMLResponse(
-        page,
-        headers={
-            "x-content-type-options": "nosniff",
-            "x-frame-options": "DENY",
-            "referrer-policy": "no-referrer",
-        },
-    )
-
-
 @app.get("/", include_in_schema=False)
 def get_home() -> Response:
-    """The landing page when it is built into the package, else the minimal upload page."""
+    """The landing page (built into the package); without it, straight to the app."""
     file = static.resolve("", static.SITE_DIR, spa=False)
-    return static.response(file) if file else html(UI_HTML)
+    return static.response(file) if file else RedirectResponse("/app/", status_code=302)
 
 
 @app.get("/upload", include_in_schema=False)
-def get_ui() -> HTMLResponse:
-    """The original minimal upload page (the assignment's required UI), kept at /upload."""
-    return html(UI_HTML)
+def get_ui() -> RedirectResponse:
+    """The first minimal upload page moved into the merchant console (uploads need sign-in)."""
+    return RedirectResponse("/app/merchant", status_code=302)
 
 
 # ---------------------------------------------------------------- bulk upload
 
 
-def upload_key(deps: Dependencies) -> bytes:
-    """Signs the delete key handed to the browser that created an upload."""
-    return tokens.derived_key(token_key(deps.token_secret_arn), b"upload-owner")
-
-
 @app.get("/uploads")
-def get_uploads(deps: Deps) -> list[dict[str, Any]]:
+def get_uploads(who: SignedIn, deps: Deps) -> list[dict[str, Any]]:
+    """My uploads as records; an admin sees every account's."""
     with db(deps) as conn:
-        return repository.list_uploads(conn)
+        return repository.list_uploads(conn, None if who.is_admin else who.account_id)
+
+
+def own_upload(conn: psycopg.Connection, job_id: uuid.UUID, who: Account) -> None:
+    """404 unless the signed-in account owns this upload (or is an admin): other merchants'
+    uploads are not even confirmed to exist."""
+    exists, owner = repository.upload_owner(conn, job_id)
+    if not exists or (owner != who.account_id and not who.is_admin):
+        raise NotFoundError("job not found")
 
 
 @app.post("/uploads", status_code=201)
-def create_upload(body: Body, deps: Deps) -> dict[str, Any]:
-    """Create the job row FIRST, then sign: S3 can only receive files for known jobs."""
+def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
+    """Create the job row FIRST (owned by the signed-in account), then sign: S3 can only
+    receive files for known jobs."""
     filename = clean_filename(body.get("filename"))
     job_id = uuid.uuid4()
     policy = post_policy_for(job_id)
     with db(deps) as conn:
         if repository.csv_uploads_last_24h(conn) >= MAX_UPLOADS_PER_DAY:
             raise TooManyChecksError
-        repository.create_job(conn, job_id, policy.key, filename)
+        repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
     # Local signing with the Lambda role's credentials: no network call.
     post = deps.s3.generate_presigned_post(
@@ -395,22 +397,18 @@ def create_upload(body: Body, deps: Deps) -> dict[str, Any]:
     )
     # Not `filename=`: that name is reserved by Python logging (LogRecord.filename).
     logger.info("upload ticket created", job_id=str(job_id), upload_filename=filename)
-    # Whoever holds this key (the uploading browser) may delete this upload's users later.
-    delete_key = tokens.sign(
-        job_id, int(time.time()) + tokens.UPLOAD_KEY_TTL_SECONDS, upload_key(deps)
-    )
     return {
         "job_id": str(job_id),
         "upload": {"url": post["url"], "fields": post["fields"]},
         "max_bytes": MAX_UPLOAD_BYTES,
         "expires_in": policy.expires_in,
-        "delete_key": delete_key,
     }
 
 
 @app.get("/uploads/{job_id}")
-def get_upload(job_id: uuid.UUID, deps: Deps) -> dict[str, Any]:
+def get_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]:
     with db(deps) as conn:
+        own_upload(conn, job_id, who)  # rejected rows can contain personal data
         progress = repository.get_job_progress(conn, job_id)
     if progress is None:
         raise NotFoundError("job not found")
@@ -576,13 +574,16 @@ def get_auth_config(deps: Deps) -> dict[str, str]:
         "region": os.environ.get("AWS_REGION", ""),
         "user_pool_id": deps.user_pool_id,
         "client_id": deps.user_pool_client_id,
+        # Managed-login domain for the OAuth code flow (Google); empty = Google not offered.
+        "domain": deps.auth_domain if deps.google_sign_in else "",
+        "google": deps.google_sign_in,
     }
 
 
 @app.get("/account")
 def get_account(who: SignedIn, deps: Deps) -> dict[str, Any]:
     with db(deps) as conn:
-        account = repository.upsert_account(conn, who.account_id, who.email)
+        account = repository.upsert_account(conn, who.account_id, who.email, admin=who.is_admin)
         account["profiles"] = repository.account_profiles(conn, who.account_id)
     account["is_admin"] = who.is_admin
     return account
@@ -594,7 +595,6 @@ def put_account(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
     if not isinstance(daily, bool):
         raise BadRequestError("daily_picks must be true or false")
     with db(deps) as conn:
-        repository.upsert_account(conn, who.account_id, who.email)
         repository.set_daily_picks(conn, who.account_id, daily)
     return get_account(who, deps)
 
@@ -620,7 +620,6 @@ def save_profile(who: SignedIn, body: Body, deps: Deps) -> JSON:
     except tokens.InvalidTokenError:
         raise BadRequestError("that results link is invalid or expired; run a new check") from None
     with db(deps) as conn:
-        repository.upsert_account(conn, who.account_id, who.email)
         outcome = repository.claim_profile(conn, who.account_id, user_id)
     status, message = SAVE_MESSAGES[outcome]
     logger.info("profile save", outcome=outcome)
@@ -659,42 +658,29 @@ def clear_profile(user_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, in
 
 
 @app.delete("/uploads")
-def purge_all_uploads(who: Admin, deps: Deps) -> dict[str, int]:
-    """Delete every user that came from a CSV upload (instant checks stay)."""
+def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, int]:
+    """Reset my workspace: delete the customers of every upload I made. `?scope=all` deletes
+    every account's uploaded customers and needs the admin group. Instant checks stay."""
+    if scope not in ("mine", "all"):
+        raise BadRequestError("scope must be mine or all")
+    if scope == "all" and not who.is_admin:
+        raise ForbiddenError
     with db(deps) as conn:
-        counts = repository.purge_csv_uploads(conn)
-    logger.info("all uploads purged", **counts)
+        counts = repository.purge_csv_uploads(conn, None if scope == "all" else who.account_id)
+    logger.info("uploads purged", scope=scope, **counts)
     return counts
 
 
-def purge(job_id: uuid.UUID, deps: Dependencies, by: str) -> dict[str, Any]:
-    """Delete one upload's users so the same file can be uploaded again as a new record."""
+@app.delete("/uploads/{job_id}")
+def purge_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]:
+    """Delete one upload's users (owner or admin), so the file can be uploaded again as new."""
     with db(deps) as conn:
+        own_upload(conn, job_id, who)
         deleted = repository.purge_upload(conn, job_id)
     if deleted is None:
         raise NotFoundError("job not found")
-    logger.info("upload purged", job_id=str(job_id), deleted_users=deleted, by=by)
+    logger.info("upload purged", job_id=str(job_id), deleted_users=deleted, admin=who.is_admin)
     return {"job_id": str(job_id), "deleted_users": deleted}
-
-
-@app.delete("/uploads/{job_id}")
-def purge_upload(job_id: uuid.UUID, who: Admin, deps: Deps) -> dict[str, Any]:
-    """Admin: delete any upload's users."""
-    return purge(job_id, deps, by="admin")
-
-
-@app.delete("/uploads/{job_id}/users")
-def purge_my_upload(job_id: uuid.UUID, request: Request, deps: Deps) -> dict[str, Any]:
-    """The uploader deletes its own upload, proven by the delete key POST /uploads returned."""
-    try:
-        owner = tokens.verify(
-            request.headers.get("x-upload-key", ""), upload_key(deps), int(time.time())
-        )
-    except tokens.InvalidTokenError:
-        owner = None
-    if owner != job_id:
-        raise ForbiddenError("only the browser that uploaded this file (or an admin) can delete it")
-    return purge(job_id, deps, by="uploader")
 
 
 # ---------------------------------------------------------------- built front ends (last)

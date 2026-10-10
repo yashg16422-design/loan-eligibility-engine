@@ -34,6 +34,7 @@ from loan_engine.common.validation import (
     MissingColumnsError,
     ValidationRules,
     rules_from_json,
+    scope_to_account,
     validate_csv,
 )
 from loan_engine.ingest import repository
@@ -118,7 +119,10 @@ def process_upload(upload: UploadRef, receive_count: int, deps: Dependencies) ->
                     logger.warning("job failed: bad file", reason=reason)
                     return Outcome.BAD_FILE
 
-                counts = repository.load_users(conn, job_id, result.valid)
+                # An owned upload's customers belong to that account: same file, fresh rows.
+                owner = repository.job_account(conn, job_id)
+                valid = scope_to_account(result.valid, owner) if owner else result.valid
+                counts = repository.load_users(conn, job_id, valid)
                 repository.save_rejects(conn, job_id, result.rejects)
                 repository.complete_job(
                     conn,

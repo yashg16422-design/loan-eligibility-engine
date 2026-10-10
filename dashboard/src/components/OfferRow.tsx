@@ -126,7 +126,7 @@ function Source({ match }: { match: Match }) {
         {seen && `, checked ${seen}`}.
       </p>
       {match.product_url && /^https?:\/\//.test(match.product_url) && (
-        <a href={match.product_url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 underline decoration-line-hi hover:decoration-acc">
+        <a href={match.product_url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 underline decoration-line-hi hover:decoration-fg">
           View on {CHANNEL_LABEL[match.channel]} <ArrowUpRight size={14} aria-hidden />
         </a>
       )}

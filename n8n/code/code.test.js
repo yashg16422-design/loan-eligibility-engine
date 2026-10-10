@@ -528,3 +528,16 @@ test('compile: the LLM sees only verified text; an invented rule is impossible; 
   const none = C.parseCompileResponse({ output: { message: { content: [{ text: '[]' }] } } }, [{ text_id: 'u', text: only }]);
   assert.deepEqual(none.byId.u, { rules: [], requirements: [only] });
 });
+
+test('compile: a lender that publishes no criteria is "may qualify", never plainly eligible', () => {
+  // Live bug: Federal Bank (Paisabazaar) publishes nothing; the note was filtered out, the text
+  // compiled to no rules and no requirements, and all 10,000 users showed as eligible.
+  const note = 'Eligibility criteria not published: confirm with the lender';
+  const r = C.validateCompiled({ rules: [], requirements: [] }, note);
+  assert.deepEqual(r, { rules: [], requirements: [note] });
+  const mixed = C.validateCompiled({ rules: [], requirements: ['Salary account needed'] },
+    `Salary account needed; ${note}`);
+  assert.deepEqual(mixed.requirements, ['Salary account needed', note]);
+  assert.deepEqual(C.pipelineNotes('a; Eligibility details could not be verified automatically: confirm with the lender'),
+    ['Eligibility details could not be verified automatically: confirm with the lender']);
+});

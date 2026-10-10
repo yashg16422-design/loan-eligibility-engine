@@ -17,13 +17,22 @@ def create_job(
     s3_key: str,
     filename: str | None,
     source: str = "csv",
+    account_id: str | None = None,
 ) -> None:
-    """Register the upload ticket before any file can reach S3 for it."""
+    """Register the upload ticket before any file can reach S3 for it (owned by an account)."""
     conn.execute(
-        "INSERT INTO upload_jobs (job_id, s3_key, original_filename, source)"
-        " VALUES (%s, %s, %s, %s)",
-        (job_id, s3_key, filename, source),
+        "INSERT INTO upload_jobs (job_id, s3_key, original_filename, source, account_id)"
+        " VALUES (%s, %s, %s, %s, %s)",
+        (job_id, s3_key, filename, source, account_id),
     )
+
+
+def upload_owner(conn: psycopg.Connection, job_id: uuid.UUID) -> tuple[bool, str | None]:
+    """(exists, owning account) for a bulk upload."""
+    row = conn.execute(
+        "SELECT account_id FROM upload_jobs WHERE job_id = %s AND source = 'csv'", (job_id,)
+    ).fetchone()
+    return (row is not None, row[0] if row else None)
 
 
 def csv_uploads_last_24h(conn: psycopg.Connection) -> int:
@@ -291,17 +300,34 @@ def ops_errors(conn: psycopg.Connection) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------- accounts (Cognito)
 
 
-def upsert_account(conn: psycopg.Connection, account_id: str, email: str) -> dict[str, Any]:
-    """Create the account on first sight (Cognito `sub` + verified email), touch it after."""
+def upsert_account(
+    conn: psycopg.Connection, account_id: str, email: str, admin: bool = False
+) -> dict[str, Any]:
+    """The account row for a signed-in person: ONE per verified email.
+
+    Cognito gives each sign-in method its own user (`sub`): a password account and a Google
+    sign-in with the same address are two users. Both emails are verified (by code, or by
+    Google), so the address is the person: an existing row with that email is reused, and its
+    account_id is returned for ownership. A new email creates a row keyed by this sub.
+    `admin` (a Cognito admin group member) is recorded on the row and never cleared here.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         return cur.execute(
             """
-            INSERT INTO accounts (account_id, email) VALUES (%s, %s)
-            ON CONFLICT (account_id) DO UPDATE
-                SET email = EXCLUDED.email, last_seen_at = now()
-            RETURNING account_id, email, daily_picks, created_at
+            WITH found AS (
+                UPDATE accounts SET last_seen_at = now(), is_admin = is_admin OR %(admin)s
+                WHERE lower(email) = lower(%(email)s)
+                RETURNING account_id, email, daily_picks, created_at, is_admin
+            ), created AS (
+                INSERT INTO accounts (account_id, email, is_admin)
+                SELECT %(sub)s, %(email)s, %(admin)s WHERE NOT EXISTS (SELECT 1 FROM found)
+                ON CONFLICT (account_id) DO UPDATE SET email = EXCLUDED.email, last_seen_at = now(),
+                    is_admin = accounts.is_admin OR EXCLUDED.is_admin
+                RETURNING account_id, email, daily_picks, created_at, is_admin
+            )
+            SELECT * FROM found UNION ALL SELECT * FROM created
             """,
-            (account_id, email),
+            {"sub": account_id, "email": email, "admin": admin},
         ).fetchone()
 
 
@@ -387,8 +413,9 @@ _BUSY = (
 UPLOADS_SHOWN = 20
 
 
-def list_uploads(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    """Recent bulk uploads, one record each: counts only, no personal data.
+def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[str, Any]]:
+    """Recent bulk uploads of one account (None = every account, for admins), one record each:
+    counts only, no personal data.
 
     `users_now` is how many of the users this file added or changed are still in the database
     (0 after a delete); tickets whose file never arrived are left out after 15 minutes.
@@ -401,6 +428,7 @@ def list_uploads(conn: psycopg.Connection) -> list[dict[str, Any]]:
                        inserted, updated, unchanged, rejected, match_status, matched_at, purged_at
                 FROM upload_jobs
                 WHERE source = 'csv'
+                  AND (%s::text IS NULL OR account_id = %s::text)
                   AND (status <> 'AWAITING_UPLOAD' OR created_at > now() - interval '15 minutes')
                 ORDER BY created_at DESC LIMIT %s
             )
@@ -413,7 +441,7 @@ def list_uploads(conn: psycopg.Connection) -> list[dict[str, Any]]:
                      WHERE n.job_id = j.job_id AND n.status = 'sent')::int AS emails_sent
             FROM j ORDER BY j.created_at DESC
             """,
-            (UPLOADS_SHOWN,),
+            (account_id, account_id, UPLOADS_SHOWN),
         ).fetchall()
 
 
@@ -436,25 +464,32 @@ def purge_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> int | None:
     return deleted
 
 
-def purge_csv_uploads(conn: psycopg.Connection) -> dict[str, int]:
-    """Delete every user that came from a bulk CSV upload.
+def purge_csv_uploads(conn: psycopg.Connection, account_id: str | None = None) -> dict[str, int]:
+    """Delete the customers of one account's uploads ("reset my workspace"), or of every
+    bulk upload when account_id is None (admins).
 
     Instant checks stay: they belong to the people who ran them, who can delete their own.
     """
+    mine = "(%(a)s::text IS NULL OR account_id = %(a)s::text)"
     with conn.transaction():
         busy = conn.execute(
             f"SELECT bool_or({_BUSY}) FROM"
             " (SELECT status, match_status, matched_at FROM upload_jobs"
-            " WHERE source = 'csv' FOR UPDATE) j"
+            f" WHERE source = 'csv' AND {mine} FOR UPDATE) j",
+            {"a": account_id},
         ).fetchone()
         if busy and busy[0]:
             raise JobBusyError
         deleted = conn.execute(
             "DELETE FROM users u USING upload_jobs j"
             " WHERE j.job_id = u.upload_job_id AND j.source = 'csv'"
+            " AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)",
+            {"a": account_id},
         ).rowcount
         uploads = conn.execute(
-            "UPDATE upload_jobs SET purged_at = now() WHERE source = 'csv' AND purged_at IS NULL"
+            "UPDATE upload_jobs SET purged_at = now()"
+            f" WHERE source = 'csv' AND purged_at IS NULL AND {mine}",
+            {"a": account_id},
         ).rowcount
     return {"deleted_users": deleted, "uploads": uploads}
 

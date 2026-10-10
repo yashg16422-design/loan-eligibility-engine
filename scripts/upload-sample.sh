@@ -4,14 +4,18 @@
 #   2. multipart POST to S3     -> the file goes straight to S3, never through the API
 #   3. GET /uploads/{job_id}    -> poll the status every 3 s
 # Usage: scripts/upload-sample.sh <api-base-url> [csv-path]
+# Uploads belong to a signed-in merchant account: set ID_TOKEN first, e.g.
+#   export ID_TOKEN="$(scripts/id-token.sh you@example.com)"
 set -euo pipefail
 
 API="${1:?usage: $0 <api-base-url> [csv-path]}"
 API="${API%/}"
 CSV="${2:-data/users.csv}"
 [[ -f "$CSV" ]] || { echo "no such file: $CSV" >&2; exit 1; }
+: "${ID_TOKEN:?set ID_TOKEN (scripts/id-token.sh <email>): uploads need a merchant account}"
+AUTH="authorization: Bearer ${ID_TOKEN}"
 
-ticket="$(curl -sS --fail-with-body -X POST "$API/uploads" \
+ticket="$(curl -sS --fail-with-body -X POST "$API/uploads" -H "$AUTH" \
   -H 'content-type: application/json' -d "{\"filename\": \"$(basename "$CSV")\"}")"
 job_id="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_id"])' <<<"$ticket")"
 url="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["upload"]["url"])' <<<"$ticket")"
@@ -27,7 +31,7 @@ curl -sS --fail-with-body -o /dev/null -w "S3 answered HTTP %{http_code} in %{ti
 
 for _ in $(seq 1 60); do
   sleep 3
-  line="$(curl -sS --fail-with-body "$API/uploads/$job_id" | python3 -c 'import json,sys
+  line="$(curl -sS --fail-with-body -H "$AUTH" "$API/uploads/$job_id" | python3 -c 'import json,sys
 j = json.load(sys.stdin)["job"]
 print(j["status"], "| rows", j["total_rows"], "| inserted", j["inserted"], "| updated", j["updated"],
       "| unchanged", j["unchanged"], "| rejected", j["rejected"], "| attempts", j["attempts"])')"

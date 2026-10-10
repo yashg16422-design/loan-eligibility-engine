@@ -1,11 +1,15 @@
-// Accounts via Amazon Cognito, called directly from the browser (no SDK: five JSON calls).
-// Passwords go only to Cognito over HTTPS; our API and database never see them. API calls
-// carry the Cognito ID token, which API Gateway's JWT authorizer verifies before our code.
+// Accounts via Amazon Cognito, called directly from the browser (no SDK): email + password
+// (sign up, confirm, sign in, forgot / reset password) and "Continue with Google" through
+// Cognito's OAuth 2.0 code flow with PKCE. Passwords go only to Cognito over HTTPS; our API and
+// database never see them. API calls carry the Cognito ID token, which API Gateway's JWT
+// authorizer verifies before our code runs.
 
 interface AuthConfig {
   region: string;
   user_pool_id: string;
   client_id: string;
+  domain: string; // managed-login domain for OAuth; "" when Google is off
+  google: boolean;
 }
 
 interface Session {
@@ -36,6 +40,8 @@ const MESSAGES: Record<string, string> = {
   NotAuthorizedException: "Email or password is incorrect.",
   UserNotConfirmedException: "Confirm your email first: enter the code we sent.",
   LimitExceededException: "Too many attempts. Wait a few minutes and try again.",
+  UserNotFoundException: "Email or password is incorrect.",
+  PasswordResetRequiredException: "Reset your password first: choose \"Forgot password\".",
   TooManyRequestsException: "Too many attempts. Wait a few minutes and try again.",
   InvalidParameterException: "Check the email address and try again.",
 };
@@ -91,6 +97,16 @@ function load(): Session | null {
   }
 }
 
+/** Session from an OAuth token response (Google via Cognito). */
+function fromTokens(t: { id_token: string; refresh_token?: string }): Session {
+  const c = claims(t.id_token);
+  return { idToken: t.id_token, refreshToken: t.refresh_token ?? "", email: String(c.email ?? ""), expiresAt: Number(c.exp ?? 0) };
+}
+
+const OAUTH = "clickpar-oauth"; // PKCE verifier + state + where to return, for one round trip
+const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const callbackUrl = () => `${window.location.origin}/app/auth/callback`;
+
 function fromResult(r: { AuthenticationResult: { IdToken: string; RefreshToken?: string } }, refresh?: string): Session {
   const c = claims(r.AuthenticationResult.IdToken);
   return {
@@ -139,6 +155,71 @@ export const auth = {
 
   signOut() {
     store(null);
+  },
+
+  /** Is "Continue with Google" available on this deployment? */
+  async googleEnabled(): Promise<boolean> {
+    try {
+      const c = await getConfig();
+      return c.google && !!c.domain;
+    } catch {
+      return false;
+    }
+  },
+
+  /** Leave for Google (via Cognito); `returnTo` is the app path to come back to. */
+  async signInWithGoogle(returnTo: string): Promise<void> {
+    const { domain, client_id } = await getConfig();
+    const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+    const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+    const challenge = b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
+    sessionStorage.setItem(OAUTH, JSON.stringify({ verifier, state, returnTo }));
+    const q = new URLSearchParams({
+      identity_provider: "Google",
+      response_type: "code",
+      client_id,
+      redirect_uri: callbackUrl(),
+      scope: "openid email profile",
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    });
+    window.location.assign(`https://${domain}/oauth2/authorize?${q}`);
+  },
+
+  /** On /app/auth/callback: swap the code for tokens. Returns the path to go back to. */
+  async finishGoogle(params: URLSearchParams): Promise<string> {
+    const saved = JSON.parse(sessionStorage.getItem(OAUTH) ?? "null") as { verifier: string; state: string; returnTo: string } | null;
+    sessionStorage.removeItem(OAUTH);
+    const error = params.get("error_description") ?? params.get("error");
+    if (error) throw new AuthError("OAuth", `Google sign-in was cancelled or refused (${error}).`);
+    if (!saved || params.get("state") !== saved.state) throw new AuthError("OAuth", "That sign-in link is stale. Try again.");
+    const { domain, client_id } = await getConfig();
+    const res = await fetch(`https://${domain}/oauth2/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id,
+        code: params.get("code") ?? "",
+        redirect_uri: callbackUrl(),
+        code_verifier: saved.verifier,
+      }),
+    });
+    if (!res.ok) throw new AuthError("OAuth", "Google sign-in could not be completed. Try again.");
+    store(fromTokens((await res.json()) as { id_token: string; refresh_token?: string }));
+    return saved.returnTo || "/app/merchant";
+  },
+
+  /** Email a reset code (always "succeeds": Cognito never reveals whether an email exists). */
+  async forgotPassword(email: string): Promise<void> {
+    const { client_id } = await getConfig();
+    await cognito("ForgotPassword", { ClientId: client_id, Username: email });
+  },
+
+  async resetPassword(email: string, code: string, password: string): Promise<void> {
+    const { client_id } = await getConfig();
+    await cognito("ConfirmForgotPassword", { ClientId: client_id, Username: email, ConfirmationCode: code.trim(), Password: password });
   },
 
   /** A valid ID token, refreshed when it is within a minute of expiry; null when signed out. */

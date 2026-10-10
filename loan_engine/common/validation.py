@@ -338,3 +338,22 @@ def _to_record(header: list[str], values: list[str]) -> Record:
     if len(values) > len(header):
         record[None] = values[len(header) :]
     return record
+
+
+# Fixed namespace for account-scoped customer ids (never change it: ids would change with it).
+ACCOUNT_SCOPE_NAMESPACE = uuid.UUID("9b1f6a52-3c7e-4d2a-8f0b-6e5d4c3b2a19")
+
+
+def scope_to_account(users: list[UserRow], account_id: str) -> list[UserRow]:
+    """Give an account's uploaded customers ids of their own.
+
+    `users.user_id` is the database key, and CSV user_ids repeat across accounts (every
+    reviewer uploads the same sample file). Without scoping, a second account's upload would
+    find all its rows "unchanged" and nothing would be matched or emailed. The id becomes a
+    UUIDv5 of (account, CSV user_id): stable, so the same file uploaded twice by one account
+    is still idempotent, and distinct, so every account starts fresh.
+    """
+    return [
+        replace(u, user_id=str(uuid.uuid5(ACCOUNT_SCOPE_NAMESPACE, f"{account_id}:{u.user_id}")))
+        for u in users
+    ]

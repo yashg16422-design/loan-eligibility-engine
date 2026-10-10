@@ -47,6 +47,12 @@ def bump_attempts(conn: psycopg.Connection, job_id: uuid.UUID) -> None:
     )
 
 
+def job_account(conn: psycopg.Connection, job_id: uuid.UUID) -> str | None:
+    """The merchant account that owns an upload (None: an instant check or an older upload)."""
+    row = conn.execute("SELECT account_id FROM upload_jobs WHERE job_id = %s", (job_id,)).fetchone()
+    return row[0] if row else None
+
+
 def claim_job(conn: psycopg.Connection, job_id: uuid.UUID) -> bool:
     """Lock the job for this transaction and mark it PROCESSING.
 

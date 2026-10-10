@@ -76,7 +76,7 @@ export function Select<T extends string>({
         onClick={() => setOpen((o) => !o)}
         onKeyDown={onKey}
         className={`flex h-10 items-center justify-between gap-3 border bg-bg px-3 text-left text-sm transition-colors duration-150 hover:border-line-hi ${
-          open ? "border-acc" : "border-line"
+          open ? "border-fg" : "border-line"
         } ${inline ? "min-w-[150px]" : "w-full"}`}
       >
         <span id={`${id}-value`}>{current.label}</span>

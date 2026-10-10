@@ -8,8 +8,15 @@
 
 const RULE_FIELDS = ['monthly_income', 'credit_score', 'age'];
 const APPLIES_TO = ['any', 'salaried', 'self_employed', 'business'];
-// Notes our own pipeline appends to other_criteria_text: never rules or requirements.
+// Notes our own pipeline appends to other_criteria_text ("criteria not published", "could not be
+// verified"). Never a rule; always a requirement, in our own wording: a lender that publishes
+// nothing checkable must show as "may qualify", never as plainly eligible.
 const PIPELINE_NOTES = /could not be verified automatically|criteria not published/i;
+
+/** The pipeline's own notes found in a criteria text, verbatim. */
+function pipelineNotes(text) {
+  return String(text || '').split(';').map((s) => s.trim()).filter((s) => PIPELINE_NOTES.test(s));
+}
 
 // Same marker as normalize.js: everything after it was NOT found on the lender's page.
 // (Named differently from normalize.js: some Code nodes paste both files together.)
@@ -75,7 +82,8 @@ function validateCompiled(compiled, sourceText) {
       requirements.push(quote);
     }
   }
-  return { rules, requirements: [...new Set(requirements)] };
+  // The model's paraphrase of our notes is dropped above; the exact note is kept here.
+  return { rules, requirements: [...new Set([...requirements, ...pipelineNotes(sourceText)])] };
 }
 
 /** Parse the model's answer for a batch; never throws. Returns { byId, ok, error, tokens }. */
@@ -106,4 +114,4 @@ function parseCompileResponse(response, texts) {
   return out;
 }
 
-if (typeof module !== 'undefined') module.exports = { UNVERIFIED_MARK: COMPILE_UNVERIFIED_MARK, splitConditions, buildCompileRequest, ruleValue, validateCompiled, parseCompileResponse };
+if (typeof module !== 'undefined') module.exports = { UNVERIFIED_MARK: COMPILE_UNVERIFIED_MARK, splitConditions, pipelineNotes, buildCompileRequest, ruleValue, validateCompiled, parseCompileResponse };

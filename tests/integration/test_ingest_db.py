@@ -73,7 +73,8 @@ def db() -> psycopg.Connection:
         autocommit=True,
     )
     conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-    conn.execute((ROOT / "sql" / "001_schema.sql").read_text())
+    for migration in sorted((ROOT / "sql").glob("[0-9][0-9][0-9]_*.sql")):  # the real schema
+        conn.execute(migration.read_text())
     yield conn
     conn.close()
 
@@ -243,3 +244,28 @@ def test_api_progress_of_a_real_job_serializes_to_json(db, env):
     assert decoded["rejects"][0]["reason"] == "invalid_user_id"
     assert decoded["match_run"]["naive_pairs"] == 20
     assert get_job_progress(db, uuid.uuid4()) is None
+
+
+def test_each_account_starts_fresh_with_the_same_file(db, env):
+    """The same CSV uploaded by two merchant accounts loads twice (fresh customers for each);
+    the same account uploading it again is still idempotent."""
+    deps, s3, _ = env
+    body = f"{HEADER}{U1},A,a@x.com,50000,700,Salaried,30\n{U2},B,b@x.com,60000,720,Salaried,35\n"
+    for account in ("acct-a", "acct-b"):
+        db.execute(
+            "INSERT INTO accounts (account_id, email) VALUES (%s, %s)",
+            (account, f"{account}@x.org"),
+        )
+
+    def owned_upload(account: str) -> uuid.UUID:
+        upload = new_job(db, s3, body)
+        db.execute(
+            "UPDATE upload_jobs SET account_id = %s WHERE job_id = %s", (account, upload.job_id)
+        )
+        assert ingest.process_upload(upload, 1, deps) == ingest.Outcome.COMPLETED
+        return upload.job_id
+
+    first, second, again = owned_upload("acct-a"), owned_upload("acct-b"), owned_upload("acct-a")
+    assert (job(db, first)["inserted"], job(db, second)["inserted"]) == (2, 2)  # both fresh
+    assert (job(db, again)["inserted"], job(db, again)["unchanged"]) == (0, 2)  # idempotent
+    assert db.execute("SELECT count(*) FROM users").fetchone()[0] == 4

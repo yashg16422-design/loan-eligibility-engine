@@ -2,45 +2,41 @@
 @import "@fontsource-variable/inter";
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
-@import "@fontsource/cormorant-garamond/600.css";
-@import "@fontsource/cormorant-garamond/700.css";
 
-/* Gothic: a violet-black night, amethyst for every "yes", hairline structure kept from the
-   landing (sharp boxes, Inter + JetBrains Mono), and a high-contrast Cormorant Garamond for
-   page and section titles only. Colour is information:
-   amethyst (--color-acc) = yes / eligible / results / primary action,
-   crimson (coral) = rejection or a problem, antique gold (amber) = lenders and their rules,
-   verdigris (peri) = the AI and the engine (Workflow B). */
+/* Monochrome studio chrome, colour only where it carries data (the owner's reference):
+   true black, white type, grey hairlines, light Inter display, tracked mono for data labels.
+   The UI itself is black and white; colour is information:
+   green (--color-acc) = eligible / yes / done, amber = may qualify / lender rules,
+   red (coral) = not eligible / rejected / failed, violet (peri) = the engine and the AI,
+   blue (acc-2) and teal = neutral distributions (who the users are). */
 @theme {
-  --color-bg: #07050a;
-  --color-panel: #0e0a14;
-  --color-panel-2: #16101f;
-  --color-line: #2a2236;
-  --color-line-hi: #463a5c;
-  --color-fg: #efe9f7;
-  --color-mute: #a196b4;
-  --color-dim: #5b5069;
-  --color-acc: #a07cff;
-  --color-acc-deep: #4f22b0;
-  --color-acc-2: #d2c2ff;
-  --color-coral: #e5536b;
-  --color-amber: #d8b45f;
-  --color-peri: #6fb8a7;
+  --color-bg: #000000;
+  --color-panel: #0a0a0a;
+  --color-panel-2: #121212;
+  --color-line: #1d1d1d;
+  --color-line-hi: #2f2f2f;
+  --color-fg: #f4f4f4;
+  --color-mute: #8f8f8f;
+  --color-dim: #555555;
+  --color-acc: #3ecf8e;
+  --color-acc-2: #5aa2f8;
+  --color-teal: #38c6c0;
+  --color-coral: #f2716b;
+  --color-amber: #f2b94b;
+  --color-peri: #a48bfa;
 
   --font-sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
-  --font-display: "Cormorant Garamond", "Cormorant", Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
-  /* Operate surface: a fixed scale (no fluid type in an app). The top steps are sized for the
-     display serif, whose small x-height reads about a step smaller than Inter. */
+  /* Operate surface: a fixed scale (no fluid type in an app). */
   --text-xs: 0.78rem;
   --text-sm: 0.9375rem;
   --text-base: 1.0625rem;
   --text-lg: 1.25rem;
-  --text-xl: 1.625rem;
-  --text-2xl: 2.25rem;
-  --text-3xl: 2.875rem;
-  --text-4xl: 3.5rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-3xl: 2.75rem;
+  --text-4xl: 3.75rem;
 }
 
 @layer base {
@@ -59,29 +55,28 @@
     line-height: 1.6;
   }
   ::selection {
-    background: var(--color-acc-deep);
-    color: var(--color-fg);
+    background: var(--color-fg);
+    color: var(--color-bg);
   }
   :focus-visible {
-    outline: 2px solid var(--color-acc);
+    outline: 1px solid var(--color-fg);
     outline-offset: 3px;
   }
   h1,
   h2,
   h3,
   h4 {
-    font-weight: 600;
-    letter-spacing: -0.03em;
+    font-weight: 500;
+    letter-spacing: -0.02em;
     text-wrap: balance;
-    line-height: 1.1;
+    line-height: 1.15;
   }
-  /* Page and section titles in the display serif; h3/h4 stay in Inter for scanning. */
+  /* Page and section titles: light and large, like the reference ("Built for scale"). */
   h1,
   h2 {
-    font-family: var(--font-display);
-    font-weight: 700;
-    letter-spacing: -0.01em;
-    line-height: 1.02;
+    font-weight: 300;
+    letter-spacing: -0.035em;
+    line-height: 1.04;
   }
   a {
     color: inherit;
@@ -108,13 +103,15 @@
     left: 16px;
     width: 28px;
     height: 2px;
-    background: var(--tick, var(--color-acc));
+    background: var(--tick, var(--color-fg));
   }
-  /* Small mono caption: names a value, never decorates a heading. */
+  /* Small tracked mono caption: names a value or a unit, never decorates a heading. */
   .label {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
-    letter-spacing: 0.02em;
+    font-size: 0.7rem;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     color: var(--color-mute);
   }
   .btn {
@@ -143,14 +140,13 @@
     opacity: 0.55;
     cursor: not-allowed;
   }
-  /* Dark amethyst with light text: the one filled control on any screen. */
+  /* White with black text (the reference's "Start Project"): the one filled control. */
   .btn-primary {
-    background: var(--color-acc-deep);
-    border-color: color-mix(in srgb, var(--color-acc) 55%, var(--color-acc-deep));
-    color: var(--color-fg);
+    background: var(--color-fg);
+    color: var(--color-bg);
   }
   .btn-primary:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--color-acc-deep) 80%, var(--color-acc));
+    background: #ffffff;
   }
   .btn-ghost {
     border-color: var(--color-line-hi);
@@ -158,8 +154,7 @@
     background: transparent;
   }
   .btn-ghost:hover:not(:disabled) {
-    border-color: var(--color-acc-2);
-    color: var(--color-acc-2);
+    border-color: var(--color-fg);
   }
   .field {
     height: 48px;
@@ -179,7 +174,7 @@
     border-color: var(--color-line-hi);
   }
   .field:focus {
-    border-color: var(--color-acc);
+    border-color: var(--color-fg);
     outline: none;
   }
 }
@@ -199,6 +194,15 @@
     transform-origin: bottom;
     transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   }
+}
+
+/* Indeterminate loading bar: the only looping motion, and only while something is loading. */
+@keyframes loading-slide {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+.loading-bar {
+  animation: loading-slide 1.1s cubic-bezier(0.45, 0, 0.55, 1) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
