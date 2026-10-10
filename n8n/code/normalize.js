@@ -178,6 +178,19 @@ function verifyEntry(entry, sectionText) {
 }
 
 const UNVERIFIED_NOTE = 'Eligibility details could not be verified automatically: confirm with the lender';
+// Conditions the model listed that do not appear on the page: shown to the user, but never
+// compiled into a rule (compile.js only reads the text BEFORE this marker), so an invented
+// phrase can never reject anyone. Keep identical to UNVERIFIED_MARK in compile.js.
+const UNVERIFIED_MARK = 'Also mentioned but not verified on the page:';
+
+/** True when every fragment of a phrase occurs verbatim in the page sections. */
+function onPage(phrase, sectionText) {
+  const page = squash(sectionText);
+  const whole = squash(phrase);
+  if (!whole) return false;
+  const fragments = String(phrase).split(/[.;\n•|]+/).map(squash).filter((f) => f.length >= 8);
+  return fragments.length ? fragments.every((f) => page.includes(f)) : page.includes(whole);
+}
 
 /** One extraction (one page) -> product rows ready for the loan_products upsert. */
 function toProducts(page) {
@@ -189,10 +202,13 @@ function toProducts(page) {
   const entries = Array.isArray(x.criteria) && x.criteria.length ? x.criteria : [{ employment_type: 'any', other_conditions: [] }];
   return entries.map((entry) => {
     const type = EMPLOYMENT[entry.employment_type] ? entry.employment_type : 'any';
-    const check = verifyEntry(entry, `${page.eligibility_text || ''}\n${page.rates_text || ''}`);
+    const check = verifyEntry(entry, `${page.eligibility_text || ''}\n${page.rates_text || ''}`); // evidence
     const trusted = check === 'ok';
     const age = trusted ? ageRange(entry.age) : { min: null, max: null };
-    const conditions = [...(entry.other_conditions || [])];
+    const sections = `${page.eligibility_text || ''}\n${page.rates_text || ''}`;
+    const listed = (entry.other_conditions || []).map((c) => String(c).trim()).filter(Boolean);
+    const conditions = listed.filter((c) => onPage(c, sections));
+    const notOnPage = listed.filter((c) => !onPage(c, sections));
     if (!trusted) conditions.push(UNVERIFIED_NOTE);
     // When the hard filter had to simplify, the exact wording still reaches the user.
     if (trusted && entry.age && (String(entry.age).match(/\d{2}/g) || []).length > 2) conditions.push(`Age: ${entry.age}`);
@@ -201,6 +217,7 @@ function toProducts(page) {
     if (trusted && !entry.age && !entry.min_income && !entry.credit_score) {
       conditions.push('Eligibility criteria not published: confirm with the lender');
     }
+    if (notOnPage.length) conditions.push(`${UNVERIFIED_MARK} ${notOnPage.join(', ')}`); // always last
     return {
       lender: name,
       lender_key: key,
@@ -230,9 +247,9 @@ function toProducts(page) {
 // Exported for `node --test`; inside n8n there is no `module`, so this is skipped.
 // Bump when this file's output changes for the same input: it is part of the page hash,
 // so every page is re-normalized once (Workflow A re-extracts changed-hash pages).
-const NORMALIZER_VERSION = 2;
+const NORMALIZER_VERSION = 3;
 
 if (typeof module !== 'undefined') module.exports = {
   NORMALIZER_VERSION, lenderKey, lenderName, amounts, monthlyIncome, ageRange, minCreditScore, rateRange,
-  loanAmountRange, tenureMaxMonths, verifyEntry, toProducts,
+  loanAmountRange, tenureMaxMonths, verifyEntry, onPage, UNVERIFIED_MARK, toProducts,
 };

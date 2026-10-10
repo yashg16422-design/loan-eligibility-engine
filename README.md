@@ -6,8 +6,8 @@ products they are likely eligible for, and emails each matched user their best o
 
 | | |
 |---|---|
-| **Live upload UI** (the required minimal UI) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/ |
-| **Borrower dashboard + engine console** (extra) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/ ([§14](#14-extra-borrower-dashboard-and-engine-console)) |
+| **Live upload UI** (the required minimal UI) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/upload (and the bulk upload on `/app/`) |
+| **Landing + app** (extra) | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/ (app at `/app/`, [§14](#14-extra-landing-page-app-and-accounts-one-product)) |
 | **Region** | `ap-southeast-2` (Sydney): the only region this AWS account's organization allows (see [Trade-offs](#11-trade-offs--production-next-steps)) |
 | **n8n** | self-hosted 2.42.5 on EC2, **not exposed to the internet**: reached through an SSM tunnel |
 | **LLM** | Amazon Bedrock · Nova Pro (temperature 0), via n8n with **no AWS access keys** |
@@ -35,7 +35,7 @@ then **0 calls** on every later run, and a brute-force check proves the optimize
 11. [Trade-offs & production next steps](#11-trade-offs--production-next-steps)
 12. [Code quality & tests](#12-code-quality--tests)
 13. [Repository layout](#13-repository-layout)
-14. [Extra: borrower dashboard and engine console](#14-extra-borrower-dashboard-and-engine-console)
+14. [Extra: landing page, app and accounts](#14-extra-landing-page-app-and-accounts-one-product)
 
 ---
 
@@ -45,7 +45,8 @@ then **0 calls** on every later run, and a brute-force check proves the optimize
    upload ticket (a **presigned POST**), then sends the file **straight to S3**: the API never
    handles the file, so API Gateway's request size and time limits do not apply.
 2. **Ingest**: S3 drops an event on an **SQS queue**; the **ingest Lambda** (inside the VPC)
-   streams the CSV, validates every row, and loads it into **RDS PostgreSQL** in one transaction.
+   reads the CSV line by line from S3, validates every row, and loads the valid rows into
+   **RDS PostgreSQL** with one `COPY`, in one transaction.
    Bad rows are stored with their line number and reason and shown in the UI.
 3. **Match (Workflow B)**: after the commit, the Lambda calls an **n8n webhook** over the private
    network. B claims the job, runs the multi-stage matching pipeline, and writes `matches`.
@@ -75,12 +76,14 @@ flowchart LR
     sm[("Secrets Manager")]
     bedrock["Bedrock · Nova Pro"]
     ses["SES"]
+    cognito["Cognito user pool<br/>accounts · email codes"]
+    cw["CloudWatch alarms<br/>DLQ · Lambda errors → SNS email"]
     subgraph VPC["VPC · no NAT Gateway"]
       subgraph PUB["public subnet · outbound only"]
         n8n["EC2 · n8n 2.42.5 in Docker<br/>A · A1 · B · B1 · C · E (errors)"]
       end
       subgraph PRIV["private subnets"]
-        api["λ api<br/>UI · upload tickets · status"]
+        api["λ api<br/>landing + app · upload tickets · status<br/>dashboard · accounts (JWT)"]
         ingest["λ ingest<br/>validate · COPY · upsert"]
         migrate["λ migrate<br/>schema · roles · grants"]
         rds[("RDS PostgreSQL 17<br/>private · TLS · encrypted")]
@@ -89,11 +92,13 @@ flowchart LR
     end
   end
 
-  user -->|"GET / · POST /uploads"| apigw --> api
+  user -->|"/ · /app · POST /uploads · /check"| apigw --> api
+  user -->|"sign up / sign in"| cognito
+  cognito -.->|"JWT authorizer on /account"| apigw
   user -->|"presigned POST: the file"| s3
   api --> rds
   s3 -->|ObjectCreated| sqs --> ingest
-  sqs -.->|3 failures| dlq
+  sqs -.->|3 failures| dlq -.-> cw
   ingest --> rds
   ingest -->|"webhook: private IP + header secret"| n8n
   api -.-> vpce
@@ -106,6 +111,7 @@ flowchart LR
   n8n -->|crawl over HTTP| web
   n8n -->|"AssumeRole → Converse"| bedrock
   n8n -->|AWS SES node| ses --> gmail
+  n8n -->|"signed dashboard links: POST /internal/email-tokens"| apigw
   dev -->|"SSM port forwarding: no SSH, no open ports"| n8n
 ```
 
@@ -154,6 +160,7 @@ webhook). No SSH, no port 80/443, no editor exposure; the editor is opened throu
 | **Pinned versions** | n8n 2.42.5, Postgres 17.11, AMI id, Docker Compose 5.5.1 (SHA-256 checked), Playwright 1.63.0: a redeploy can never silently change behavior. |
 | **Pluggable seams** | Validation rules (`VALIDATION_RULES` env JSON), the next-stage notifier (`Notifier` protocol), crawl sources (`crawl_sources` table), and prompts (versioned files) change by config, not by rewriting infrastructure. |
 | **Text JSON, not a forced tool call** (measured) | Tried Bedrock's schema-forced tool use (`toolChoice.tool`) for both Nova calls. Values were identical on a single page, but on a real 5-page batch Nova called the tool **once** and returned only **1–2 of 5 pages** (live crawl: 19 of 25 pages failed safe). Text mode returns 5/5 (40/40 on the full crawl), so batching wins: the answer stays a JSON array, parsed defensively, and every quote is verified against the page. |
+| **FastAPI behind API Gateway, one Lambda** (Mangum adapter) | API Gateway keeps the edge: routes, throttling and the Cognito JWT authorizer. Inside the api Lambda, FastAPI declares each endpoint as a typed function: path ids are parsed as UUIDs (bad ones → 400), and auth is a dependency (`Borrower`, `SignedIn`, `Admin`). Every error has one shape, `{"error": …}`. Interactive docs are served at `/api/docs`. Cost: cold start went from ≈ 0.6 s to ≈ 0.7–1.3 s (measured), only on the first request of a fresh container. Response models are switched off so database decimals stay JSON numbers; a test pins this. Migrated with 31 live requests diffed before and after (identical) plus the full upload → B → C path re-run live. |
 | **Workflow JSON is generated** | `n8n/build_workflows.py` assembles every Code node from `n8n/code/*.js` (unit-tested with `node --test`) and every prompt from `n8n/prompts/*.md`, so the running workflow can never drift from the tested code. |
 
 The full reasoning trail, including what changed when reality disagreed with the plan, is in
@@ -172,6 +179,8 @@ the decision log at the end of [PLAN.md](PLAN.md).
     aws sesv2 create-email-identity --region ap-southeast-2 --email-identity "$e"; done
   ```
   Click the four verification links. Then set `SES_FROM` / `TEST_ALIASES` in `n8n/build_workflows.py`.
+  (Identities are created by hand on purpose: each one needs its owner to click the emailed link,
+  which CloudFormation cannot do; the stack only grants n8n permission to send from them.)
 - **Bedrock**: Amazon Nova Pro is available by default in `ap-southeast-2` (no model-access form).
 
 ### 4.2 Python environment (also used to package the Lambdas)
@@ -180,13 +189,20 @@ uv venv --python 3.12 && uv pip install -r requirements-dev.txt pip
 ```
 
 ### 4.3 Deploy the AWS stack (everything is in `serverless.yml`)
+Run these in order (each step needs the previous one):
 ```bash
-scripts/n8n-sync.sh push        # first time only: upload n8n's boot script + compose file to S3
-serverless deploy                # VPC, endpoints, RDS, S3, SQS/DLQ, Lambdas, API, EC2, IAM, secrets (~15 min first time)
-aws lambda invoke --function-name loan-engine-dev-migrate --payload '{}' /tmp/out.json && cat /tmp/out.json
+scripts/build-frontends.sh       # 1. landing (web/) + app (dashboard/) into the api package
+serverless deploy                # 2. VPC, endpoints, RDS, S3, SQS/DLQ, alarms, Lambdas, API, Cognito, EC2, IAM, secrets (~15 min first time)
+scripts/n8n-sync.sh push         # 3. n8n's boot script + compose file to the bucket created in step 2
+aws lambda invoke --function-name loan-engine-dev-migrate --payload '{}' /tmp/out.json && cat /tmp/out.json   # 4.
 ```
-`migrate` applies `sql/001…003` once each, creates the three database roles with passwords
-generated in Secrets Manager, re-applies `sql/R__grants.sql`, and creates n8n's database.
+- Step 3 can only run after step 2 (it reads the bucket name from the stack). The EC2 instance
+  created in step 2 simply waits, retrying every 15 s, until the boot script appears.
+- Step 4 (`migrate`) applies `sql/001…006` once each, creates the three database roles with
+  passwords generated in Secrets Manager, re-applies `sql/R__grants.sql`, and creates n8n's
+  database and its `n8n_meta` role. n8n becomes healthy only after this step.
+- Confirm the SNS email ("AWS Notification - Subscription Confirmation") sent to the alarm alias,
+  so CloudWatch alarms (DLQ not empty, Lambda errors) reach you.
 
 The EC2 instance boots n8n by itself (`deploy/n8n/boot.sh`, about 2–3 minutes): it installs Docker,
 reads its secrets through the instance role, writes `.env` (mode 600), and starts the container.
@@ -198,7 +214,10 @@ scripts/tunnel-n8n.sh            # keep running, open http://localhost:5678
 Then follow [§5](#5-configuring-credentials-inside-n8n).
 
 ### 4.5 Import the workflows
+The exports reference credentials by id. On a fresh n8n, put the ids of the three credentials you
+created in §5 (open each credential: the id is in the URL) into the environment, then regenerate:
 ```bash
+export N8N_CRED_PG=<postgres id> N8N_CRED_AWS=<aws id> N8N_CRED_WEBHOOK=<header auth id>
 .venv/bin/python n8n/build_workflows.py   # regenerate n8n/workflows/*.json from tested sources
 scripts/n8n-workflows.sh import           # import + publish via the n8n CLI over SSM
 scripts/n8n-workflows.sh run LoanEngineWfA001   # first crawl now (otherwise daily 06:00 IST)
@@ -267,7 +286,7 @@ via `NODE_EXTRA_CA_CERTS` (set by `deploy/n8n/boot.sh`).
 
 `n8n_workflows` can only read users, update the match-progress columns of
 `upload_jobs`, and read/write the matching tables. It cannot delete anything or change
-the schema (see [Security](#9-security)).
+the schema (see [Security](#10-security)).
 
 ![Postgres credential](docs/screenshots/03-cred-postgres.png)
 
@@ -349,9 +368,9 @@ that explains it inside the editor.
 | Node | What it does |
 |---|---|
 | **Ingest complete (webhook)** | `POST /webhook/ingest-complete`, Header Auth, responds immediately. Called by the ingest Lambda after COMMIT. |
-| **Sweeper every 10 min → Jobs waiting for matching** | Recovery path: picks up completed jobs whose webhook was missed, or whose run died (lock older than 15 min). |
+| **Sweeper every 10 min → Jobs waiting for matching** | Recovery path ([`sweeper.sql`](sql/matching/sweeper.sql)): completed jobs whose webhook was missed, whose run died (lock older than 15 min), or whose run **failed** (retried up to 3 times, 10 min apart; then it stays FAILED for a human, after Workflow E has alerted). |
 | **From A (product mode)** | Re-matches all users against new or changed products. |
-| **Claim job + start run** | Atomic `UPDATE … WHERE match_status IS NULL OR stale` + new `pipeline_runs` row: a duplicate webhook racing the sweeper can never double-match. |
+| **Claim job + start run** | Atomic `UPDATE … WHERE match_status IS NULL OR stale OR (FAILED and < 3 failures)` + new `pipeline_runs` row ([`claim.sql`](sql/matching/claim.sql)): a duplicate webhook racing the sweeper can never double-match. |
 | **Match (B1) → Matching failed? → Mark job failed / Notify users (C)** | Runs the Treasure Hunt; failures mark the job `FAILED` (visible in the UI) instead of hanging. |
 
 Hardening: the webhook body is validated (a non-UUID `job_id` is dropped before it reaches SQL);
@@ -364,7 +383,7 @@ Workflow A calls B in **product mode** with the ids of new or changed products a
 
 **Criteria to compile → Batches of 10 → Nova Pro · compile → Validate compiled rules → Save** (Stage 0, cache misses only) →
 **Stage 1+2 · classes & decisions** → **Refresh planner stats** → **Stage 3 · expand, score, diff** →
-**Correctness proof** → **Finish run**. The SQL is in [`sql/matching/`](sql/matching/).
+**Correctness proof** → **Proof passed?** (if any pair differs, the run stops before notification: B marks the job failed, C is never called, Workflow E alerts) → **Finish run** → **Treasure Hunt funnel** (one output item: pairs → classes → decisions → AI calls → matches → mismatches). The SQL is in [`sql/matching/`](sql/matching/).
 
 ### C · Notify matched users (SES)
 ![Workflow C](docs/screenshots/11-workflow-C.png)
@@ -449,9 +468,9 @@ and make the remaining work exact and set-based.
 | **1 · equivalence classes** | B1 · SQL | Every threshold any product or rule uses is a **cut point**. Users whose income, score and age fall between the same cut points, with the same employment type, get identical answers to every rule → one class. **Exact, not banded.** | users → classes |
 | **2 · decisions** | B1 · SQL | Hard criteria + compiled rules evaluated once per class × product → eligible / conditional / not eligible. | class × product |
 | **3 · expand, score, diff** | B1 · SQL (one transaction, advisory lock) | Classes → users; transparent **fit score**; insert new matches, update changed ones, supersede lost ones. | matches |
-| **Proof** | B1 · SQL | Re-decides **every** user × product pair the naive way and compares. | — |
+| **Proof** | B1 · SQL + IF gate | Re-decides **every** user × product pair the naive way and compares; any mismatch stops the run before emails. | — |
 
-### Measured funnel (`pipeline_runs`, run on RDS with the real `users.csv`)
+### Measured funnel (`pipeline_runs`, run on RDS with the real `users.csv`; raw export and query in [`docs/evidence/`](docs/evidence/))
 | | |
 |---|---|
 | Users × active products | 10,000 × 59 |
@@ -497,19 +516,20 @@ published criteria**, never an approval probability.
 | Duplicate S3/SQS delivery | `FOR UPDATE SKIP LOCKED` on the job → second delivery is a no-op | ingest |
 | Malformed CSV (missing column, not UTF-8) | Job `FAILED` immediately with a clear error, no retries | ingest |
 | Bad rows | Stored in `upload_rejects` (line + reason), shown in the UI; good rows load | ingest |
-| Transient error (DB blip, S3) | Re-raised → SQS retries (720 s) → after 3 tries the job is `FAILED`, the message goes to the DLQ | ingest + SQS |
+| Transient error (DB blip, S3) | Re-raised → SQS retries (720 s); on the 3rd attempt the handler marks the job `FAILED` (visible in the UI) and consumes the message | ingest + SQS |
+| Hard crash (timeout, DB unreachable before the claim) | SQS moves the message to the DLQ after 3 receives; a **CloudWatch alarm** (DLQ depth > 0, and Lambda errors) emails the operator | SQS + CloudWatch |
 | File never uploaded | Ticket shows `EXPIRED` after 15 min | api |
 | n8n down / webhook lost | Ingest still completes; B's **10-minute sweeper** picks the job up | B |
 | Duplicate webhook / sweeper race | Atomic claim: only one run per job | B |
 | Matching run crashes | Job `FAILED` (UI); a stale lock (> 15 min) is reclaimed by the sweeper | B |
 | LLM error / throttling / malformed output | Retries; the shared parser ([`structured.js`](n8n/code/structured.js)) tolerates fences/prose, normalizes placeholders like `"null"`, and never throws; affected pages keep their existing products and are retried next run | A1, B1 |
-| LLM hallucination | Evidence verification: unverifiable criteria never reject anyone | A1, B1 |
+| LLM hallucination | Evidence verification on every extracted number, and every listed condition is checked against the page: a phrase not found there is shown as "also mentioned, not verified" and is never compiled into a rule, so it can never reject anyone | A1, B1 |
 | Site down | S3 fixture used, `crawl_runs.status = fixture` | A1 |
 | Site blocks bots / robots.txt says no | Skipped and logged (`blocked` / `robots_disallowed`), never bypassed | A, A1 |
 | Site layout changes | No section found → page `failed`, existing products kept (not wiped) | A1 |
 | Same CSV uploaded again | 0 inserted, 0 new matches, 0 emails (verified live) | ingest + B |
 | User no longer qualifies | Match `superseded` (history kept), no email | B1 |
-| SES send fails | Recorded as `failed`, user left un-notified for a retry | C |
+| SES send fails | Retried twice in the node; then recorded as `failed` and the match stays un-notified, so re-running C for that run sends it | C |
 | Any workflow fails | Error workflow **E**: `workflow_errors` row + rate-limited alert email | E |
 | Run dies mid-way (n8n restart) | Sweeper closes runs `running` > 30 min; a re-claimed job closes its old run | B |
 | Malformed webhook body | Non-UUID `job_id` dropped before SQL (the header secret is checked first) | B |
@@ -564,20 +584,21 @@ published criteria**, never an approval probability.
 
 - **Python 3.12**, type hints everywhere, small pure functions with I/O at the edges, docstrings
   and comments that explain *why*; **ruff** (lint + format) clean.
-- **198 Python tests, 0 skipped**:
+- **291 Python tests, 0 skipped**:
   - unit tests
   - **workflow lint**: every connection resolves, no orphan nodes, every workflow reports to E,
     sub-workflow ids exist, webhooks are authenticated, credentials are references only,
     **no secrets** in the exports, and every Code node compiles
-  - **12 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
+  - **18 integration tests** against a real Postgres 17 with TLS: the whole ingest path with
     10k users (the real CSV locally; a deterministic synthetic twin in CI, since the real file
     is never committed), and the Treasure Hunt in upload and **product** mode, each with its
-    brute-force proof
-- **42 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
+    brute-force proof, and the data reset run as the least-privilege api role
+- **49 Node tests** for the n8n Code-node logic (`node --test n8n/code/code.test.js`); the same files are
   what runs inside n8n.
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push (two jobs: `test`, `dashboard`): ruff → Node
-  tests → Python unit + integration tests (Postgres 17 container with TLS) → the committed
-  workflow JSON must equal the generator's output.
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) on every push, three jobs:
+  `test` (ruff → Node tests → Python unit + integration tests on a Postgres 17 container with TLS →
+  the committed workflow JSON must equal the generator's output), `dashboard` (typecheck, tests,
+  build) and `web` (lint, typecheck, tests, build).
 
   ![CI](docs/screenshots/18-github-ci.png)
 - Structured JSON logs (AWS Lambda Powertools) carrying `job_id`.
@@ -598,13 +619,14 @@ PG_TEST_PORT=55432 .venv/bin/pytest tests/integration
 serverless.yml              all AWS resources (VPC, endpoints, RDS, S3, SQS, Lambdas, API, EC2, IAM, secrets)
 docker-compose.yml          n8n (+ optional renderer, + local Postgres profile)
 deploy/n8n/boot.sh          idempotent EC2 bootstrap (Docker, secrets → .env, start n8n)
-loan_engine/                Python Lambdas: api/, ingest/, migrate/, common/ (validation, db, secrets, notifier)
-sql/                        001–003 migrations, R__grants.sql (least privilege), matching/ (Treasure Hunt SQL)
+loan_engine/                Python Lambdas: api/ (FastAPI + Mangum), ingest/, migrate/, common/ (validation, db, secrets, notifier)
+sql/                        001–006 migrations, R__grants.sql (least privilege), matching/ (Treasure Hunt SQL)
 n8n/workflows/              the workflow exports A, A1, B, B1, C, E, E1 (generated)
 n8n/code/                   Code-node logic (tested with node --test)
 n8n/prompts/                versioned LLM prompts
 n8n/build_workflows.py      generates the workflow JSON from the tested sources
-dashboard/                  borrower dashboard + engine console (React, built into loan_engine/api/static/)
+dashboard/                  the app at /app (React; built into loan_engine/api/static/)
+web/                        the landing page at / (Vite + TS + three.js; built into loan_engine/api/site/)
 renderer/                   optional headless renderer (Playwright, SSRF guard)
 scripts/                    tunnels, n8n import/run, crawl inventory/probe, extraction preview, psql, upload sample
 tests/                      unit + integration tests, fixtures
@@ -615,39 +637,74 @@ PLAN.md                     the build plan + decision log
 
 ---
 
-## 14. Extra: borrower dashboard and engine console
+## 14. Extra: landing page, app and accounts (one product)
 
-The required UI (§1) starts the pipeline. This extra shows what the pipeline produces, from
-the borrower's side and the operator's, at **`/app`** on the same API (no new hosting, no CORS).
+One origin serves everything from the api Lambda (no extra hosting, no CORS):
 
-| Page | What it does | Backed by |
+| Path | What | Built from |
 |---|---|---|
-| **`/app/`** check my eligibility | Four numbers (income, score, age, employment), no email or phone | `POST /check` writes a **1-row CSV to `raw/`**, so the visitor takes the **same path as a bulk upload**: S3 → SQS → ingest → webhook → Workflow B → C. Measured live: **about 11 s** from submit to matches. Capped at 100 checks/day (SES sandbox quota). |
-| **`/app/dashboard`** | Plain-sentence summary; one row per lender with the **best platform** (direct vs BankBazaar vs Paisabazaar); expand for **why it fits** (the fit score broken into its published-rule parts), what else is needed, other platforms, verified source | `GET /me`, `/me/matches` (signed token) |
-| **What if** | Sliders for income, score, age, employment: lenders coming into / falling out of reach, plus the **exact** next threshold ("with an income of ₹20,000, Kotak Mahindra Bank comes into reach") | `GET /products` (with AI-compiled rules); [`eligibility.ts`](dashboard/src/lib/eligibility.ts) mirrors the SQL decision. A test asserts it reproduces **Workflow B's decision on all 59 live products** |
-| **Save, compare, hide, alerts** | Shortlist, top 3 side by side (EMI, total interest, how much cheaper), a merged document checklist, "tell me when a new lender matches" | `GET/PUT /me/preferences` → `user_preferences` (migration 004) |
-| **`/app/ops`** the engine, live | The latest big run as a **self-building pipeline** (pairs → classes → decisions → AI calls → matches → emails, with the brute-force proof); recent runs; crawl health by source; workflow errors; CSV upload with live stages | `GET /ops/runs`, `/ops/crawl`, `/ops/errors` (aggregates only, no personal data) |
+| **`/`** | The **ClickPar Match** landing: the scroll story (globe → India → Surat, the problem, the team, Aarav's journey, the engine, proof) | [`web/`](web/) (Vite + TypeScript + three.js) |
+| **`/app/`** | **Overview, assignment first**: bulk CSV upload (also a header button on every page) → the **live pipeline** for that upload (Upload → Validate and load → Workflow B → Workflow C) → charts that form as the run reports numbers (rows, the Treasure Hunt funnel) → **analytics of the uploaded users** (income, score, age, employment, matches per user, eligible vs may qualify, platforms, where they qualify outright) → **Workflows A, B, C, E** with their triggers and real numbers → recent runs | [`dashboard/`](dashboard/) (React + Tailwind) |
+| **`/app/check`** | One person's check: a 1-row CSV through the **same** pipeline (≈ 11 s live) | |
+| **`/app/dashboard`** | Results in order: **Top 5** (best pick first) → **Also eligible** → **May qualify** → **Not eligible, with the exact published rule missed** → **Quick tips** (exact score/income thresholds that open more lenders); **What if** (mirrors Workflow B's decision, tested on all 59 live products) and **Compare** (EMI, total interest) alongside | |
+| **`/app/account`** | **Accounts (Amazon Cognito)**: sign up with email + password, confirm with the emailed code, sign in from any device; saved checks; daily top picks | |
+| **`/upload`** | The original minimal upload page (the assignment's required UI), kept | `loan_engine/api/ui.html` |
+
+**Accounts:** Cognito owns identity (passwords never reach our code or database). Its default
+email sender delivers verification codes to **any** address, which our own SES cannot do while
+in the sandbox. API Gateway's **JWT authorizer** verifies the Cognito ID token on every
+`/account` route before the Lambda runs (verified live: no token or a fake one → 401). Our
+database stores `accounts` (Cognito `sub`, email, daily-picks flag) and `account_profiles`
+(which checks an account saved; whoever saves a check first owns it, enforced by a UNIQUE key).
+Saving needs the results link, proving the person ran (or was emailed) that check.
 
 **From the email to the dashboard:** every notification email carries a **"View all N
-matches"** button: Workflow C asks the api Lambda to sign one link per user (verified live:
-check → matches → `email tokens signed count=1` → 1 email with the button).
+matches"** button: Workflow C asks the api Lambda to sign one 14-day link per user (verified
+live: check → matches → `email tokens signed count=1` → 1 email with the button).
+
+**Uploads as records:** `GET /uploads` lists every bulk upload (file, time, rows new / changed /
+rejected, users still in the database, matches, emails; counts only). On Overview each row has
+*View* (its own charts) and *Delete*. The default charts show the upload with the most users,
+and the runs list always includes the full-file reference run, so test runs or a reset never
+hide the measured Treasure Hunt numbers.
+
+**Data reset (start again without touching accounts):**
+
+| Who | Where | What is deleted | Route |
+|---|---|---|---|
+| A person | My matches → *Start over* | their own instant check (only instant checks; a link can never delete bulk-upload data) | `DELETE /me` (dashboard token) |
+| A signed-in account | Account → *Remove* / *Start fresh* | its saved checks: its own instant checks are deleted, a saved bulk-upload profile is only unlinked; the account and its settings stay | `DELETE /account/profiles[/{user_id}]` (Cognito) |
+| The uploader | Overview → **Uploads** table → *Delete* on its own upload | that upload's users, so the same file can be uploaded again and run as a new record (B matches, C emails). The browser that created the upload received a signed delete key (30 days, its own HMAC purpose, so it can never act as a dashboard link) | `DELETE /uploads/{job_id}/users` (`X-Upload-Key`) |
+| An admin | Overview → **Uploads** → *Delete* on any upload, or *Delete all uploaded users* | any upload's users, or every user that came from a CSV | `DELETE /uploads[/{job_id}]` (Cognito + `admin` group) |
+
+Matches, email records, preferences and account links go with each user by `ON DELETE
+CASCADE` (migration 006 adds the `user_id` indexes that keep this an index lookup per user).
+Lender products, `pipeline_runs` (the Treasure Hunt evidence) and the job rows are never
+deleted; a cleared upload is stamped `purged_at` and shows *data deleted* in recent runs. A job
+that is still loading, matching, or inside the 2-minute window in which Workflow C emails is
+refused (409), and its row is locked during the delete. Tested
+against real Postgres as the least-privilege `app_ingest` role
+(`test_data_reset_runs_as_app_ingest_and_keeps_history`).
+
+Admin membership is never self-service. After signing up in the app, add yourself once:
+
+```bash
+aws cognito-idp admin-add-user-to-group --region ap-southeast-2 --user-pool-id "$(scripts/stack-output.sh UserPoolId)" --username you@example.com --group-name admin
+```
+
+Sign out and in again so the new ID token carries the group.
+
+**Design:** the app keeps the landing's structure (sharp hairline boxes, Inter + JetBrains Mono,
+colour as meaning) in a gothic palette: violet-black, amethyst for every "yes", crimson for
+rejections, antique gold for lenders, verdigris for the engine, and Cormorant Garamond for
+page titles. Documented in [`dashboard/DESIGN.md`](dashboard/DESIGN.md). No decorative motion:
+bars move only when their numbers change.
 
 ![Borrower dashboard](docs/screenshots/15-dashboard.png)
 ![Compare view](docs/screenshots/16-dashboard-compare.png)
-![Engine console](docs/screenshots/17-engine.png)
-
-**Access without accounts:** `/check` returns an HMAC-SHA256 token (`user_id` + expiry, key in
-Secrets Manager, 24 h); it lives in `sessionStorage` only. Forged or expired tokens get 401
-(tested live). Instant-check users get a reserved `@example.invalid` address: no real email
-is ever collected, and Workflow C still mails only the test aliases.
-
-**Design:** Operate mode, documented in [`dashboard/DESIGN.md`](dashboard/DESIGN.md): graphite
-and one marigold accent, Geist with Geist Mono only for measurements, container-query rows,
-keyboard focus, reduced motion. References: daqconsulting.com (pinned pipeline narrative),
-weevolveit.com (proof strip), see [`docs/extras/REFERENCE_NOTES.md`](docs/extras/REFERENCE_NOTES.md).
+![Overview](docs/screenshots/17-engine.png)
 
 ```bash
-cd dashboard && npm ci && npm test && npm run build   # build lands in loan_engine/api/static/
-npm run dev                                           # local UI against the deployed API
+scripts/build-frontends.sh   # web/ -> loan_engine/api/site/, dashboard/ -> loan_engine/api/static/
+serverless deploy            # ships both inside the api Lambda
 ```
-

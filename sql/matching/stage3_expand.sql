@@ -48,9 +48,15 @@ WITH lck AS (
                        AND mp.tier IN ('eligible', 'conditional')
     JOIN loan_products p ON p.product_id = mp.product_id
 ), current_active AS (  -- active matches inside this run's scope
+    -- A user created or changed after this run started (i.e. after Stage 1 classified everyone)
+    -- is left alone: their matches are never wrongly superseded; the next run decides them.
+    -- Written as a PK lookup on users, not "IN (user_class)": the planner estimates that CTE
+    -- at 1 row and a nested loop over 240k matches took 8+ minutes on RDS (found live).
     SELECT m.match_id, m.user_id, m.product_id
     FROM matches m
     WHERE m.status = 'active'
+      AND NOT EXISTS (SELECT 1 FROM users late
+                      WHERE late.user_id = m.user_id AND late.updated_at > (SELECT started_at FROM run))
       AND (((SELECT mode FROM run) = 'upload' AND m.user_id IN (SELECT user_id FROM usr))
         OR ((SELECT mode FROM run) = 'products' AND m.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[]))))
 ), ins AS (

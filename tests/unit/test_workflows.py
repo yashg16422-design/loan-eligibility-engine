@@ -135,3 +135,15 @@ def test_code_nodes_are_valid_javascript(wf, tmp_path):
         )
         result = subprocess.run(["node", str(script)], capture_output=True, text=True, check=False)
         assert result.returncode == 0, f"{node['name']}: {result.stderr.strip()[:500]}"
+
+
+def test_b1_correctness_proof_gates_the_run():
+    """DF9: a failed brute-force proof must stop the run before Finish run (so B skips C)."""
+    b1 = WORKFLOWS["B1_match_run.json"]
+    out = lambda name, i: [e["node"] for e in b1["connections"][name]["main"][i]]  # noqa: E731
+    assert out("Correctness proof", 0) == ["Proof passed?"]
+    assert out("Proof passed?", 0) == ["Finish run"]
+    assert out("Proof passed?", 1) == ["Stop: proof failed"]
+    stop = next(n for n in b1["nodes"] if n["name"] == "Stop: proof failed")
+    assert "throw new Error" in stop["parameters"]["jsCode"]
+    assert out("Finish run", 0) == ["Treasure Hunt funnel"]

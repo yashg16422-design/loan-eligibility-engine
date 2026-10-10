@@ -14,8 +14,9 @@ EXPIRE_AFTER = timedelta(minutes=15)
 def derive_status(status: str, attempts: int, created_at: datetime, now: datetime) -> str:
     """Add the two states that are computed, never stored (PLAN.md §5.1).
 
-    - EXPIRED: still waiting, no ingest attempt ever, and older than 15 minutes:
-      the browser never uploaded the file.
+    - EXPIRED: still waiting, no recorded ingest attempt, and older than 15 minutes: the
+      browser never uploaded the file, or ingest crashed before it could record an attempt
+      (that message is in the DLQ and the DLQ alarm has fired).
     - RETRYING: still waiting but at least one ingest attempt failed; SQS will redeliver.
     """
     if status != "AWAITING_UPLOAD":

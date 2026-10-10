@@ -1,220 +1,325 @@
-import { BellRinging, CircleNotch, Scales, WarningCircle } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
-import type { Me, Profile } from "../api/types";
+import { BookmarkSimple, Lightbulb, Scales, WarningCircle } from "@phosphor-icons/react";
+import { useEffect, useMemo, useState } from "react";
+import { api, ApiError, session } from "../api/client";
+import type { CatalogProduct, Me, Profile } from "../api/types";
 import { Compare } from "../components/Compare";
-import { OfferRow } from "../components/OfferRow";
+import { Actions, OfferRow, Rate, TierBadge, type RowActions } from "../components/OfferRow";
 import { WhatIf } from "../components/WhatIf";
+import { decide, whyNot } from "../lib/eligibility";
 import { EMPLOYMENT_LABEL, count, rupees, rupeesShort } from "../lib/format";
-import { groupByLender, sortOffers, type SortKey } from "../lib/offers";
+import { CHANNEL_PHRASE, groupByLender, type LenderOffer } from "../lib/offers";
+import { tips } from "../lib/tips";
+import { pendingSave, useSignedIn } from "../lib/useAccount";
 import { toggleCompare, toggleHidden, toggleSaved, useDashboard } from "../lib/useDashboard";
-import { Link } from "../router";
+import { Link, navigate } from "../router";
+import { ConfirmDelete } from "../ui/Confirm";
 
-type Filter = "all" | "eligible" | "conditional" | "saved";
+const TOP = 5;
 
 export function Dashboard() {
   const { load, prefs, update, saveError, retry } = useDashboard();
-  const [filter, setFilter] = useState<Filter>("all");
-  const [sort, setSort] = useState<SortKey>("fit");
   const [showHidden, setShowHidden] = useState(false);
-
   const ready = load.state === "ready" ? load : null;
   const offers = useMemo(() => (ready ? groupByLender(ready.matches) : []), [ready]);
 
   if (load.state === "loading") return <Skeleton />;
-  if (load.state === "signed-out") return <SignedOut />;
-  if (load.state === "queued") return <Queued />;
+  if (load.state === "signed-out") return <NoResults />;
+  if (load.state === "queued") return <Notice>Matching your profile against every lender. This takes about ten seconds.</Notice>;
   if (load.state === "error") return <ErrorState message={load.message} onRetry={retry} />;
 
   const { me, matches, catalog } = load;
   const profile: Profile = { monthly_income: me.monthly_income, credit_score: me.credit_score, age: me.age, employment_status: me.employment_status };
-  const hiddenSet = new Set(prefs.hidden);
-  const counts = {
-    all: offers.filter((o) => !hiddenSet.has(o.best.product_id)).length,
-    eligible: offers.filter((o) => o.best.tier === "eligible" && !hiddenSet.has(o.best.product_id)).length,
-    conditional: offers.filter((o) => o.best.tier === "conditional" && !hiddenSet.has(o.best.product_id)).length,
-    saved: offers.filter((o) => prefs.shortlist.includes(o.best.product_id)).length,
-  };
-  const visible = sortOffers(offers, sort).filter((o) => {
+  const hidden = new Set(prefs.hidden);
+  const visible = offers.filter((o) => showHidden || !hidden.has(o.best.product_id));
+  const top = visible.slice(0, TOP);
+  const rest = visible.slice(TOP);
+  const eligible = rest.filter((o) => o.best.tier === "eligible");
+  const conditional = rest.filter((o) => o.best.tier === "conditional");
+  const actions = (o: LenderOffer): RowActions => {
     const id = o.best.product_id;
-    if (hiddenSet.has(id) && !showHidden) return false;
-    if (filter === "saved") return prefs.shortlist.includes(id);
-    if (filter === "all") return true;
-    return o.best.tier === filter;
-  });
+    return {
+      saved: prefs.shortlist.includes(id), comparing: prefs.top3.includes(id), compareFull: prefs.top3.length >= 3, hidden: hidden.has(id),
+      onSave: () => update(toggleSaved(id)), onCompare: () => update(toggleCompare(id)), onHide: () => update(toggleHidden(id)),
+    };
+  };
   const picks = prefs.top3.map((id) => matches.find((m) => m.product_id === id)).filter((m) => m != null);
+  const outright = offers.filter((o) => o.best.tier === "eligible").length;
 
   return (
-    <div className="mx-auto max-w-[1240px] px-4 pt-10 pb-16 sm:px-6">
-      <Summary me={me} lendersOutright={counts.eligible} />
+    <div className="mx-auto max-w-[1480px] px-5 pt-14 pb-10 lg:pt-20 sm:px-10 xl:px-16">
+      <Summary me={me} outright={outright} possible={offers.length - outright} />
+      <SaveBanner />
+      {saveError && <p role="status" className="mt-4 flex items-center gap-2 text-sm text-coral"><WarningCircle size={16} aria-hidden /> {saveError}</p>}
 
-      {saveError && (
-        <p role="status" className="mt-6 flex items-center gap-2 text-sm text-danger">
-          <WarningCircle size={16} aria-hidden /> {saveError}
-        </p>
-      )}
+      <div className="mt-14 grid gap-14 lg:grid-cols-[minmax(0,1fr)_380px]">
+        <div className="grid min-w-0 content-start gap-20">
+          <section aria-labelledby="top-title">
+            <SectionHead id="top-title" title={`Your top ${top.length}`} note="One offer per lender, on the platform that fits you best" />
+            <ol className="mt-8 grid gap-5 md:grid-cols-2">
+              {top.map((o, i) => <TopPick key={o.lender_key} rank={i + 1} offer={o} actions={actions(o)} />)}
+            </ol>
+          </section>
 
-      <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-12">
-        <section aria-labelledby="offers-title" className="@container min-w-0">
-          <h2 id="offers-title" className="sr-only">Your offers</h2>
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
-            <div role="tablist" aria-label="Filter offers" className="flex flex-wrap gap-1">
-              {([
-                ["all", "All"], ["eligible", "Eligible"], ["conditional", "May qualify"], ["saved", "Saved"],
-              ] as [Filter, string][]).map(([key, label]) => (
-                <button key={key} role="tab" type="button" aria-selected={filter === key} onClick={() => setFilter(key)}
-                  className={`rounded-[var(--radius-ctl)] px-3 py-1.5 text-sm transition-colors duration-150 ${
-                    filter === key ? "bg-raise text-text" : "text-muted hover:text-text"
-                  }`}>
-                  {label} <span className="num text-muted">{counts[key]}</span>
-                </button>
+          <OfferSection id="eligible" title="Also eligible" note="You meet every rule these lenders publish" offers={eligible} profile={profile} actions={actions} />
+          <OfferSection id="maybe" title="May qualify" note="You pass the checkable rules; the lender asks for more" offers={conditional} profile={profile} actions={actions} />
+          <NotEligible catalog={catalog} profile={profile} reachable={new Set(offers.map((o) => o.lender_key))} />
+
+          <section aria-labelledby="tips-title">
+            <SectionHead id="tips-title" title="Quick tips" />
+            <ul className="mt-8 grid gap-px border border-line bg-line">
+              {tips(offers, matches, catalog, profile).map((t) => (
+                <li key={t} className="flex gap-3 bg-panel p-6 text-sm">
+                  <Lightbulb size={18} className="mt-0.5 shrink-0 text-amber" aria-hidden /> {t}
+                </li>
               ))}
-            </div>
-            <label className="flex items-center gap-2 text-sm text-muted">
-              Sort by
-              <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}
-                className="h-8 rounded-[var(--radius-ctl)] border border-line-strong bg-panel px-2 text-text focus:border-marigold focus:outline-none">
-                <option value="fit">Best fit</option>
-                <option value="rate">Lowest rate</option>
-                <option value="amount">Largest loan</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="hidden grid-cols-[minmax(0,1fr)_170px_140px_112px_116px] gap-x-4 px-1 pt-3 text-xs text-muted @3xl:grid">
-            <span className="pl-7">Lender</span><span className="text-right">Interest rate</span>
-            <span className="text-right">Loan size</span><span>Status</span><span />
-          </div>
-
-          {visible.length ? (
-            <ul>
-              {visible.map((o) => {
-                const id = o.best.product_id;
-                return (
-                  <OfferRow key={o.lender_key} offer={o} profile={profile}
-                    saved={prefs.shortlist.includes(id)} comparing={prefs.top3.includes(id)} compareFull={prefs.top3.length >= 3}
-                    hidden={hiddenSet.has(id)}
-                    onSave={() => update(toggleSaved(id))} onCompare={() => update(toggleCompare(id))} onHide={() => update(toggleHidden(id))} />
-                );
-              })}
             </ul>
-          ) : (
-            <p className="py-12 text-sm text-muted">
-              {filter === "saved" ? "Save an offer with the bookmark to keep it here." : "No offers in this view. Try All."}
-            </p>
-          )}
+            {prefs.hidden.length > 0 && (
+              <button type="button" onClick={() => setShowHidden((s) => !s)} className="mt-4 text-sm text-mute underline">
+                {showHidden ? "Hide the offers you dismissed" : `Show ${count(prefs.hidden.length, "dismissed offer")}`}
+              </button>
+            )}
+          </section>
+        </div>
 
-          {prefs.hidden.length > 0 && (
-            <button type="button" onClick={() => setShowHidden((s) => !s)} className="mt-4 text-sm text-muted underline decoration-line-strong hover:text-text">
-              {showHidden ? "Hide the offers you dismissed" : `Show ${count(prefs.hidden.length, "dismissed offer")}`}
-            </button>
-          )}
-        </section>
-
-        <aside className="grid content-start gap-6 lg:sticky lg:top-20 lg:self-start">
+        <aside className="grid content-start gap-5 lg:sticky lg:top-20 lg:self-start">
           <WhatIf catalog={catalog} profile={profile} />
-          <CompareTray picks={picks.length} />
-          <AlertsToggle on={prefs.alerts} onChange={(alerts) => update((p) => ({ ...p, alerts }))} />
+          <div className="box flex items-center justify-between gap-4 p-6 text-sm">
+            <span className="flex items-center gap-2"><Scales size={18} className="text-mute" aria-hidden />
+              {picks.length ? `${picks.length} of 3 picked to compare` : "Pick up to 3 offers to compare"}</span>
+            {picks.length > 0 && <a href="#compare" className="text-acc underline">Compare</a>}
+          </div>
         </aside>
       </div>
 
       {picks.length > 0 && (
-        <div className="mt-16 border-t border-line pt-10">
+        <div className="mt-24 border-t border-line pt-10">
           <Compare picks={picks} onRemove={(id) => update(toggleCompare(id))} />
         </div>
       )}
+      {/* Outside the sticky aside: a tall sidebar would push this below a short screen for good. */}
+      {me.source === "instant_check" && <StartOver />}
     </div>
   );
 }
 
-function Summary({ me, lendersOutright }: { me: Me; lendersOutright: number }) {
-  const greeting = me.name?.split(/\s+/)[0];
-  const possible = me.lenders - lendersOutright;
+function Summary({ me, outright, possible }: { me: Me; outright: number; possible: number }) {
+  const first = me.name?.split(/\s+/)[0];
   return (
-    <section aria-labelledby="summary-title" className="max-w-[760px]">
-      <h1 id="summary-title" className="text-2xl font-semibold leading-snug sm:text-3xl">
-        {greeting ? `${greeting}, you` : "You"} qualify outright with {count(lendersOutright, "lender")}
+    <section aria-labelledby="summary-title" className="max-w-[820px]">
+      <h1 id="summary-title" className="text-3xl leading-tight sm:text-4xl">
+        {first ? `${first}, you` : "You"} qualify outright with {count(outright, "lender")}
         {possible > 0 && `, and may qualify with ${possible} more`}.
       </h1>
-      <p className="mt-3 text-muted">
-        Based on <span className="num whitespace-nowrap text-text">{rupees(me.monthly_income)}</span> a month, a credit score of{" "}
-        <span className="num text-text">{me.credit_score}</span>, {EMPLOYMENT_LABEL[me.employment_status].toLowerCase()}, age{" "}
-        <span className="num text-text">{me.age}</span>.
-        {me.best_rate != null && <> Rates start at <span className="num text-text">{me.best_rate}%</span>, loans up to <span className="num whitespace-nowrap text-text">{rupeesShort(me.max_amount)}</span>.</>}{" "}
-        <Link to="check" className="text-text underline decoration-line-strong hover:decoration-marigold">Run a new check</Link>
+      <p className="mt-3 text-mute">
+        For <span className="num whitespace-nowrap text-fg">{rupees(me.monthly_income)}</span> a month, a credit score of{" "}
+        <span className="num text-fg">{me.credit_score}</span>, {EMPLOYMENT_LABEL[me.employment_status].toLowerCase()}, age{" "}
+        <span className="num text-fg">{me.age}</span>.
+        {me.best_rate != null && <> Rates from <span className="num text-fg">{me.best_rate}%</span>, loans up to <span className="num whitespace-nowrap text-fg">{rupeesShort(me.max_amount)}</span>.</>}{" "}
+        <Link to="check" className="text-fg underline decoration-line-hi hover:decoration-acc">Run a new check</Link>
       </p>
     </section>
   );
 }
 
-function CompareTray({ picks }: { picks: number }) {
+/** Save prompt: anonymous until here; signing in keeps these results and refreshes them daily. */
+function SaveBanner() {
+  const email = useSignedIn();
+  const [state, setState] = useState<{ phase: "idle" | "saving" | "done" | "error"; message?: string }>({ phase: "idle" });
+
+  const save = async () => {
+    const token = session.get();
+    if (!token) return;
+    setState({ phase: "saving" });
+    try {
+      const r = await api.saveProfile(token);
+      setState({ phase: r.outcome === "taken" ? "error" : "done", message: r.message });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        pendingSave.set();
+        navigate("account");
+        return;
+      }
+      setState({ phase: "error", message: err instanceof Error ? err.message : "Could not save. Try again." });
+    }
+  };
+  useEffect(() => {
+    if (email && pendingSave.take()) void save(); // finishing a save that started before sign-in
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [email]);
+
+  if (state.phase === "done") {
+    return (
+      <p className="box tick mt-6 flex flex-wrap items-center gap-x-4 gap-y-2 p-6 text-sm">
+        <BookmarkSimple size={18} weight="fill" className="text-acc" aria-hidden /> {state.message} Your top picks are refreshed every
+        morning after the 06:00 lender crawl. <Link to="account" className="underline">Account</Link>
+      </p>
+    );
+  }
   return (
-    <div className="flex items-center justify-between gap-4 rounded-[var(--radius-ctl)] border border-line p-4 text-sm">
-      <span className="flex items-center gap-2">
-        <Scales size={18} className="text-muted" aria-hidden />
-        {picks ? `${picks} of 3 picked to compare` : "Pick up to 3 offers to compare"}
-      </span>
-      {picks > 0 && <a href="#compare" className="text-marigold underline decoration-marigold/40 hover:decoration-marigold">Compare</a>}
+    <div className="box tick mt-6 flex flex-wrap items-center justify-between gap-4 p-6">
+      <p className="text-sm">
+        <span className="font-medium">Keep these results.</span>{" "}
+        <span className="text-mute">Save them to an account and your top picks are ready every morning, after lenders' sites are re-read at 06:00.</span>
+        {state.phase === "error" && <span className="mt-1 block text-coral">{state.message}</span>}
+      </p>
+      <button type="button" onClick={() => (email ? void save() : (pendingSave.set(), navigate("account")))} disabled={state.phase === "saving"} className="btn btn-primary">
+        <BookmarkSimple size={16} aria-hidden /> {state.phase === "saving" ? "Saving" : email ? "Save to my account" : "Save my results"}
+      </button>
     </div>
   );
 }
 
-function AlertsToggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+function TopPick({ rank, offer, actions }: { rank: number; offer: LenderOffer; actions: RowActions }) {
+  const m = offer.best;
   return (
-    <label className="flex cursor-pointer items-start justify-between gap-4 rounded-[var(--radius-ctl)] border border-line p-4 text-sm">
-      <span className="flex gap-2">
-        <BellRinging size={18} className="mt-px shrink-0 text-muted" aria-hidden />
-        <span>
-          <span className="block">Tell me when a new lender matches</span>
-          <span className="text-muted">Lender sites are re-read every morning; you are re-matched automatically.</span>
-        </span>
-      </span>
-      <input type="checkbox" role="switch" checked={on} onChange={(e) => onChange(e.target.checked)} className="mt-1 size-4 accent-[var(--color-marigold)]" />
-    </label>
+    <li className={`box tick grid gap-4 p-8 ${rank === 1 ? "md:col-span-2" : ""}`} style={{ ["--tick" as string]: m.tier === "eligible" ? "var(--color-acc)" : "var(--color-amber)" }}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="label">{rank === 1 ? "Best pick" : `Pick ${rank}`}</p>
+          <h3 className={`mt-1 ${rank === 1 ? "text-2xl" : "text-lg"}`}>{offer.lender}</h3>
+          <p className="text-sm text-mute">on {CHANNEL_PHRASE[m.channel]}</p>
+        </div>
+        <div className="flex flex-col items-end gap-2">
+          <TierBadge tier={m.tier} />
+          <span className="text-sm text-mute">fit <span className="num text-fg">{m.fit_score}</span></span>
+        </div>
+      </div>
+      <p className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
+        <Rate min={m.interest_rate_min} max={m.interest_rate_max} />
+        <span className="text-mute">{m.loan_amount_max ? <>up to <span className="num text-fg">{rupeesShort(m.loan_amount_max)}</span></> : "amount not stated"}</span>
+      </p>
+      {m.requirements && <p className="text-sm text-mute">Also needs: {m.requirements}</p>}
+      <div className="-ml-2 flex items-center justify-between">
+        <Actions actions={actions} />
+        {m.product_url && /^https?:\/\//.test(m.product_url) && (
+          <a href={m.product_url} target="_blank" rel="noopener noreferrer" className="text-sm underline decoration-line-hi hover:decoration-acc">View offer</a>
+        )}
+      </div>
+    </li>
   );
 }
 
-function Skeleton() {
+function OfferSection({ id, title, note, offers, profile, actions }: {
+  id: string; title: string; note: string; offers: LenderOffer[]; profile: Profile; actions: (o: LenderOffer) => RowActions;
+}) {
+  if (!offers.length) return null;
   return (
-    <div className="mx-auto max-w-[1240px] animate-pulse px-4 pt-10 sm:px-6" aria-busy="true" aria-label="Loading your matches">
-      <div className="h-9 w-2/3 rounded bg-panel" />
-      <div className="mt-4 h-5 w-1/2 rounded bg-panel" />
-      <div className="mt-12 grid gap-10 lg:grid-cols-[1fr_340px]">
-        <div className="grid gap-3">{Array.from({ length: 6 }, (_, i) => <div key={i} className="h-16 rounded bg-panel" />)}</div>
-        <div className="h-96 rounded bg-panel" />
+    <section aria-labelledby={`${id}-title`} className="@container">
+      <SectionHead id={`${id}-title`} title={`${title} (${offers.length})`} note={note} />
+      <ul className="mt-8 border border-line bg-panel">
+        {offers.map((o) => <OfferRow key={o.lender_key} offer={o} profile={profile} actions={actions(o)} />)}
+      </ul>
+    </section>
+  );
+}
+
+function NotEligible({ catalog, profile, reachable }: { catalog: CatalogProduct[]; profile: Profile; reachable: Set<string> }) {
+  const [all, setAll] = useState(false);
+  // Lenders with no product in reach, each with the reasons of its closest product.
+  const rows = useMemo(() => {
+    const by = new Map<string, { lender: string; reasons: string[] }>();
+    for (const p of catalog) {
+      if (reachable.has(p.lender_key) || decide(p, profile) !== "not_eligible") continue;
+      const reasons = whyNot(p, profile);
+      const prev = by.get(p.lender_key);
+      if (!prev || reasons.length < prev.reasons.length) by.set(p.lender_key, { lender: p.lender, reasons });
+    }
+    return [...by.values()].sort((a, b) => a.reasons.length - b.reasons.length || a.lender.localeCompare(b.lender));
+  }, [catalog, profile, reachable]);
+  if (!rows.length) return null;
+  const shown = all ? rows : rows.slice(0, 6);
+  return (
+    <section aria-labelledby="no-title">
+      <SectionHead id="no-title" title={`Not eligible yet (${rows.length})`} note="The exact published rule you miss, so you know what to change" />
+      <ul className="mt-8 grid gap-px border border-line bg-line sm:grid-cols-2">
+        {shown.map((r) => (
+          <li key={r.lender} className="bg-panel p-6">
+            <p className="flex items-center justify-between gap-3"><span className="font-medium">{r.lender}</span><TierBadge tier="not_eligible" /></p>
+            <ul className="mt-2 grid gap-0.5 text-sm text-mute">{r.reasons.map((x) => <li key={x}>{x}</li>)}</ul>
+          </li>
+        ))}
+      </ul>
+      {rows.length > 6 && (
+        <button type="button" onClick={() => setAll((a) => !a)} className="mt-3 text-sm text-mute underline">
+          {all ? "Show fewer" : `Show all ${rows.length}`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+function SectionHead({ id, title, note }: { id: string; title: string; note?: string }) {
+  return (
+    <div>
+      <h2 id={id} className="text-2xl">{title}</h2>
+      {note && <p className="mt-1 text-sm text-mute">{note}</p>}
+    </div>
+  );
+}
+
+/** Delete this instant check (and its matches) to start again; an account is never touched. */
+function StartOver() {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="mt-24 flex flex-wrap items-center justify-between gap-6 border-t border-line pt-10 text-sm">
+      <div>
+        <h3 className="font-medium">Start over</h3>
+        <p className="mt-1 text-mute">Deletes this check and its matches from our database. Your account, if you have one, stays.</p>
+        {error && <p role="alert" className="mt-3 text-coral">{error}</p>}
+      </div>
+      <div>
+        <ConfirmDelete
+          small
+          label="Delete this check"
+          question="Delete this check?"
+          onConfirm={async () => {
+            try {
+              await api.deleteMyCheck();
+              session.clear();
+              navigate("check");
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Nothing was deleted. Try again.");
+            }
+          }}
+        />
       </div>
     </div>
   );
 }
 
-function SignedOut() {
+function Skeleton() {
   return (
-    <div className="mx-auto max-w-[560px] px-4 pt-24 pb-24 sm:px-6">
-      <h1 className="text-2xl font-semibold">Your matches open from a check or an email link.</h1>
-      <p className="mt-3 text-muted">There's no account and no password. Run a check, or open the "View my matches" link in your email.</p>
-      <Link to="check" className="mt-8 inline-flex h-11 items-center rounded-[var(--radius-ctl)] bg-marigold px-5 font-medium text-marigold-ink no-underline">
-        Check my eligibility
-      </Link>
+    <div className="mx-auto max-w-[1480px] px-5 pt-14 sm:px-10 lg:pt-20 xl:px-16" aria-busy="true" aria-label="Loading your matches">
+      <div className="h-10 w-2/3 bg-panel" />
+      <div className="mt-4 h-5 w-1/2 bg-panel" />
+      <div className="mt-10 grid gap-3 md:grid-cols-2">{Array.from({ length: 4 }, (_, i) => <div key={i} className="h-36 border border-line bg-panel" />)}</div>
     </div>
   );
 }
 
-function Queued() {
+function NoResults() {
   return (
-    <div className="mx-auto flex max-w-[560px] items-center gap-3 px-4 pt-24 sm:px-6" role="status">
-      <CircleNotch size={22} className="animate-spin text-marigold" aria-hidden />
-      <p>Matching your profile against every lender. This takes about ten seconds.</p>
+    <div className="mx-auto max-w-[620px] px-5 pt-20 pb-16 sm:px-10 xl:px-16">
+      <h1 className="text-3xl">Your matches open from a check, an email link or your account.</h1>
+      <p className="mt-3 text-mute">Run a check with four numbers, open the "View all matches" link in your email, or sign in to see saved results.</p>
+      <div className="mt-8 flex flex-wrap gap-3">
+        <Link to="check" className="btn btn-primary no-underline">Check eligibility</Link>
+        <Link to="account" className="btn btn-ghost no-underline">Sign in</Link>
+      </div>
     </div>
   );
+}
+
+function Notice({ children }: { children: React.ReactNode }) {
+  return <p role="status" className="mx-auto max-w-[620px] px-5 pt-24 text-lg sm:px-10 xl:px-16">{children}</p>;
 }
 
 function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="mx-auto max-w-[560px] px-4 pt-24 sm:px-6" role="alert">
-      <h1 className="text-xl font-semibold">Your matches didn't load.</h1>
-      <p className="mt-2 text-muted">{message}</p>
-      <button type="button" onClick={onRetry} className="mt-6 h-10 rounded-[var(--radius-ctl)] border border-line-strong px-4 text-sm hover:bg-raise">
-        Try again
-      </button>
+    <div className="mx-auto max-w-[620px] px-5 pt-24 sm:px-10 xl:px-16" role="alert">
+      <h1 className="text-2xl">Your matches didn't load.</h1>
+      <p className="mt-2 text-mute">{message}</p>
+      <button type="button" onClick={onRetry} className="btn btn-ghost mt-6">Try again</button>
     </div>
   );
 }

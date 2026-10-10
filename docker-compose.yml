@@ -46,7 +46,7 @@ services:
 
   postgres:
     profiles: [local]
-    image: postgres:16
+    image: postgres:17 # same major version as RDS (n8n 2.x supports 16 only in compatibility mode)
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_POSTGRESDB_USER}

@@ -1,5 +1,8 @@
 // The one module that talks to the api Lambda. Same origin, so paths are relative.
+import { auth } from "./auth";
 import type {
+  Account,
+  Analytics,
   CatalogProduct,
   CrawlHealth,
   Match,
@@ -8,6 +11,7 @@ import type {
   Profile,
   Run,
   UploadProgress,
+  UploadRecord,
   WorkflowError,
 } from "./types";
 
@@ -57,19 +61,49 @@ export function adoptTokenFromUrl(): void {
   window.history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 
-async function request<T>(path: string, init: RequestInit = {}, auth = false): Promise<{ status: number; body: T }> {
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  auth = false,
+  account = false,
+): Promise<{ status: number; body: T }> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set("content-type", "application/json");
+  if (account) {
+    const id = await accountToken();
+    if (!id) throw new ApiError(401, "Sign in to continue.");
+    headers.set("authorization", `Bearer ${id}`); // verified by API Gateway's JWT authorizer
+  }
   if (auth) {
     const token = session.get();
     if (!token) throw new ApiError(401, "Your link has expired. Run a new check to see your matches.");
     headers.set("authorization", `Bearer ${token}`);
   }
-  const res = await fetch(path, { ...init, headers });
+  const res = await fetchWithRetry(path, { ...init, headers });
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) throw new ApiError(res.status, body.error ?? `Request failed (${res.status})`);
   return { status: res.status, body };
 }
+
+// Reads (GET) are retried twice on a network error or a 5xx: one dropped request while polling
+// must not fail a whole check. Writes are never retried, so nothing can be submitted twice.
+const RETRY_DELAYS_MS = [700, 1800];
+
+async function fetchWithRetry(path: string, init: RequestInit): Promise<Response> {
+  const retryable = (init.method ?? "GET") === "GET";
+  for (let attempt = 0; ; attempt++) {
+    const last = !retryable || attempt >= RETRY_DELAYS_MS.length;
+    try {
+      const res = await fetch(path, init);
+      if (res.status < 500 || last) return res;
+    } catch (err) {
+      if (last) throw new ApiError(0, "You seem to be offline. Check your connection and try again.");
+    }
+    await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]));
+  }
+}
+
+const accountToken = () => auth.idToken();
 
 export const api = {
   check: (profile: Profile & { name?: string }) =>
@@ -87,9 +121,41 @@ export const api = {
   crawl: () => request<CrawlHealth>("/ops/crawl").then((r) => r.body),
   errors: () => request<WorkflowError[]>("/ops/errors").then((r) => r.body),
   createUpload: (filename: string) =>
-    request<{ job_id: string; upload: { url: string; fields: Record<string, string> }; max_bytes: number }>(
+    request<{ job_id: string; upload: { url: string; fields: Record<string, string> }; max_bytes: number; delete_key: string }>(
       "/uploads",
       { method: "POST", body: JSON.stringify({ filename }) },
     ).then((r) => r.body),
   upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`).then((r) => r.body),
+  uploads: () => request<UploadRecord[]>("/uploads").then((r) => r.body),
+  deleteMyUpload: (jobId: string, key: string) =>
+    request<{ deleted_users: number }>(`/uploads/${jobId}/users`, { method: "DELETE", headers: { "x-upload-key": key } }).then(
+      (r) => r.body,
+    ),
+  analytics: (jobId?: string | null) =>
+    request<Analytics>(`/analytics${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`).then((r) => r.body),
+  account: () => request<Account>("/account", {}, false, true).then((r) => r.body),
+  setDailyPicks: (daily_picks: boolean) =>
+    request<Account>("/account", { method: "PUT", body: JSON.stringify({ daily_picks }) }, false, true).then((r) => r.body),
+  saveProfile: (token: string) =>
+    request<{ outcome: string; message: string; user_id: string }>(
+      "/account/profiles",
+      { method: "POST", body: JSON.stringify({ token }) },
+      false,
+      true,
+    ).then((r) => r.body),
+  openProfile: (userId: string) =>
+    request<{ token: string }>(`/account/profiles/${userId}/open`, { method: "POST" }, false, true).then((r) => r.body),
+  // Data reset. The account itself is never deleted by any of these.
+  deleteMyCheck: () => request<{ outcome: string }>("/me", { method: "DELETE" }, true).then((r) => r.body),
+  clearProfiles: (userId?: string) =>
+    request<{ deleted_checks: number; unlinked: number }>(
+      userId ? `/account/profiles/${userId}` : "/account/profiles",
+      { method: "DELETE" },
+      false,
+      true,
+    ).then((r) => r.body),
+  purgeUpload: (jobId: string) =>
+    request<{ deleted_users: number }>(`/uploads/${jobId}`, { method: "DELETE" }, false, true).then((r) => r.body),
+  purgeAllUploads: () =>
+    request<{ deleted_users: number; uploads: number }>("/uploads", { method: "DELETE" }, false, true).then((r) => r.body),
 };

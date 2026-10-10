@@ -95,6 +95,7 @@ export interface Profile {
 export interface Run {
   run_id: string;
   mode: "upload" | "products";
+  job_id: string | null;
   status: "running" | "done" | "failed";
   started_at: string;
   finished_at: string | null;
@@ -119,6 +120,8 @@ export interface Run {
   emails_sent: number | null;
   emails_failed: number | null;
   emails_skipped_demo: number | null;
+  purged: boolean | null; // an admin deleted this upload's users (the run history stays)
+  reference: boolean; // the largest completed upload run, always listed (the measured funnel)
 }
 
 export interface CrawlHealth {
@@ -150,4 +153,62 @@ export interface UploadProgress {
   rejects: { row_number: number; reason: string; raw_line: string }[];
   match_run: Partial<Run> | null;
   notifications: Record<string, number>;
+}
+
+export interface Band {
+  ord: number;
+  n: number;
+}
+
+export interface Analytics {
+  users: number;
+  matches: number;
+  users_with_eligible: number;
+  users_without_matches: number;
+  income_bands: Band[];
+  score_bands: Band[];
+  age_bands: Band[];
+  employment: { key: Employment; n: number }[];
+  matches_per_user: Band[];
+  tiers: { key: Tier; n: number }[];
+  channels: { key: Channel; n: number }[];
+  top_lenders: { lender: string; users: number; eligible_users: number }[];
+}
+
+export interface SavedProfile extends Profile {
+  user_id: string;
+  name: string | null;
+  saved_at: string;
+  matches: number;
+  eligible: number;
+  source: "csv" | "instant_check";
+}
+
+export interface Account {
+  account_id: string;
+  email: string;
+  daily_picks: boolean;
+  created_at: string;
+  profiles: SavedProfile[];
+  is_admin: boolean; // in the Cognito `admin` group: may delete uploaded data
+}
+
+/** One bulk upload as a record (GET /uploads): counts only, no personal data. */
+export interface UploadRecord {
+  job_id: string;
+  original_filename: string | null;
+  status: "AWAITING_UPLOAD" | "PROCESSING" | "COMPLETED" | "FAILED";
+  created_at: string;
+  completed_at: string | null;
+  total_rows: number | null;
+  inserted: number | null;
+  updated: number | null;
+  unchanged: number | null;
+  rejected: number | null;
+  match_status: "RUNNING" | "DONE" | "FAILED" | null;
+  matched_at: string | null;
+  purged_at: string | null;
+  users_now: number;
+  matches: number;
+  emails_sent: number;
 }

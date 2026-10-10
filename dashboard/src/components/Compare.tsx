@@ -1,4 +1,4 @@
-import { ArrowSquareOut, CheckSquare, X } from "@phosphor-icons/react";
+import { ArrowUpRight, CheckSquare, X } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import type { Match } from "../api/types";
 import { loanCost } from "../lib/finance";
@@ -30,7 +30,7 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
       <div className="flex flex-wrap items-end justify-between gap-6">
         <div>
           <h2 id="compare-title" className="text-xl font-semibold">Compare your top {picks.length}</h2>
-          <p className="mt-1 text-sm text-muted">At each lender's advertised starting rate. Your actual rate is set by the lender.</p>
+          <p className="mt-1 text-sm text-mute">At each lender's advertised starting rate. Your actual rate is set by the lender.</p>
         </div>
         <div className="grid w-full gap-4 sm:w-auto sm:grid-cols-2 sm:gap-8">
           <Range label="Loan amount" display={rupeesShort(amount)} value={amount} min={50_000} max={Math.max(ceiling, 100_000)}
@@ -44,16 +44,16 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
           <caption className="sr-only">Side-by-side comparison of your selected offers</caption>
           <thead>
             <tr className="text-left">
-              <th scope="col" className="w-44 py-3 font-normal text-muted"><span className="sr-only">Measure</span></th>
+              <th scope="col" className="w-44 py-3 font-normal text-mute"><span className="sr-only">Measure</span></th>
               {rows.map(({ m }) => (
                 <th key={m.product_id} scope="col" className="py-3 pr-4 align-top font-normal">
                   <div className="flex items-start justify-between gap-2">
                     <span>
-                      <span className="block font-medium text-text">{m.lender}</span>
-                      <span className="text-muted">{CHANNEL_LABEL[m.channel]}</span>
+                      <span className="block font-medium text-fg">{m.lender}</span>
+                      <span className="text-mute">{CHANNEL_LABEL[m.channel]}</span>
                     </span>
                     <button type="button" onClick={() => onRemove(m.product_id)} aria-label={`Remove ${m.lender} from comparison`}
-                      className="grid size-7 place-items-center rounded-[var(--radius-ctl)] text-muted hover:bg-raise hover:text-text">
+                      className="grid size-7 place-items-center text-mute hover:bg-panel-2 hover:text-fg">
                       <X size={14} />
                     </button>
                   </div>
@@ -75,8 +75,8 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
               {rows.map(({ m }) =>
                 m.product_url ? (
                   <a key={m.product_id} href={m.product_url} target="_blank" rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 underline decoration-line-strong hover:decoration-marigold">
-                    Apply on {CHANNEL_LABEL[m.channel]} <ArrowSquareOut size={14} aria-hidden />
+                    className="inline-flex items-center gap-1 underline decoration-line-hi hover:decoration-acc">
+                    Apply on {CHANNEL_LABEL[m.channel]} <ArrowUpRight size={14} aria-hidden />
                   </a>
                 ) : "-",
               )}
@@ -87,7 +87,7 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
 
       {saving > 0 && (
         <p className="mt-4 text-sm">
-          {priced[0].m.lender} costs <span className="num font-medium text-marigold">{rupees(saving)}</span> less in interest than{" "}
+          {priced[0].m.lender} costs <span className="num font-medium text-acc">{rupees(saving)}</span> less in interest than{" "}
           {priced[priced.length - 1].m.lender} on this loan.
         </p>
       )}
@@ -97,7 +97,7 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
           <h3 className="font-medium">Before you apply, have these ready</h3>
           <ul className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
             {docs.map((d) => (
-              <li key={d} className="flex gap-2 text-muted">
+              <li key={d} className="flex gap-2 text-mute">
                 <CheckSquare size={18} className="mt-px shrink-0" aria-hidden />
                 {d}
               </li>
@@ -112,7 +112,7 @@ export function Compare({ picks, onRemove }: { picks: Match[]; onRemove: (id: st
 function Row({ label, num, strong, children }: { label: string; num?: boolean; strong?: boolean; children: React.ReactNode[] }) {
   return (
     <tr>
-      <th scope="row" className="py-3 pr-4 text-left font-normal text-muted">{label}</th>
+      <th scope="row" className="py-3 pr-4 text-left font-normal text-mute">{label}</th>
       {children.map((c, i) => (
         <td key={i} className={`py-3 pr-4 align-top ${num ? "num" : ""} ${strong ? "text-base font-medium" : ""}`}>{c}</td>
       ))}
@@ -121,7 +121,7 @@ function Row({ label, num, strong, children }: { label: string; num?: boolean; s
 }
 
 function Note({ children }: { children: React.ReactNode }) {
-  return <span className="ml-2 font-sans text-xs font-normal text-muted">({children})</span>;
+  return <span className="ml-2 font-sans text-xs font-normal text-mute">({children})</span>;
 }
 
 function Range({ label, display, value, min, max, step, onChange }: {
@@ -129,8 +129,8 @@ function Range({ label, display, value, min, max, step, onChange }: {
 }) {
   return (
     <label className="grid min-w-[200px] gap-1.5 text-sm">
-      <span className="flex justify-between gap-4"><span className="text-muted">{label}</span><span className="num">{display}</span></span>
-      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} aria-label={label} aria-valuetext={display} />
+      <span className="flex justify-between gap-4"><span className="text-mute">{label}</span><span className="num">{display}</span></span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} aria-label={label} aria-valuetext={display} className="accent-[var(--color-acc)]" />
     </label>
   );
 }

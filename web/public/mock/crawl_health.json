@@ -1,0 +1,44 @@
+[
+ {
+  "channel": "bankbazaar",
+  "status": "failed",
+  "pages": 1,
+  "last_crawled": "2026-10-09T04:56:38.851168+00:00"
+ },
+ {
+  "channel": "bankbazaar",
+  "status": "ok",
+  "pages": 9,
+  "last_crawled": "2026-10-09T04:56:53.353957+00:00"
+ },
+ {
+  "channel": "bankbazaar",
+  "status": "unchanged",
+  "pages": 16,
+  "last_crawled": "2026-10-09T04:56:51.62771+00:00"
+ },
+ {
+  "channel": "direct",
+  "status": "ok",
+  "pages": 1,
+  "last_crawled": "2026-10-09T04:55:56.328804+00:00"
+ },
+ {
+  "channel": "direct",
+  "status": "unchanged",
+  "pages": 4,
+  "last_crawled": "2026-10-09T04:56:15.567187+00:00"
+ },
+ {
+  "channel": "paisabazaar",
+  "status": "ok",
+  "pages": 2,
+  "last_crawled": "2026-10-09T04:56:30.839724+00:00"
+ },
+ {
+  "channel": "paisabazaar",
+  "status": "unchanged",
+  "pages": 8,
+  "last_crawled": "2026-10-09T04:56:30.900628+00:00"
+ }
+]

@@ -235,3 +235,16 @@ class TestRulesFromJson:
     def test_bad_config_fails_loudly(self, bad_json, message):
         with pytest.raises(ValueError, match=message):
             rules_from_json(bad_json)
+
+
+def test_header_spelling_variants_match_by_name():
+    from loan_engine.common.validation import normalize_header
+
+    assert normalize_header(
+        ["﻿User ID", " Monthly Income ", "credit-score", "Employment_Status"]
+    ) == [
+        "user_id",
+        "monthly_income",
+        "credit_score",
+        "employment_status",
+    ]

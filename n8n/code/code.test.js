@@ -491,3 +491,40 @@ test('composeEmail adds the signed dashboard link only when it is a safe https U
     assert.doesNotMatch(out.html, /<script>/);
   }
 });
+
+// ------------------------------------------------------------- DF7: unverified conditions never become rules
+
+test('toProducts: a condition the model listed but the page does not say is marked, not trusted', () => {
+  const page = {
+    channel: 'bankbazaar', lender_slug: 'hdfc', url: 'https://www.bankbazaar.com/hdfc-personal-loan.html',
+    eligibility_text: 'Age 21 to 60 years. Minimum income Rs. 25,000 per month. Minimum work experience of 2 years.',
+    rates_text: '',
+    extraction: { criteria: [{ employment_type: 'any', age: '21 to 60 years', min_income: 'Rs. 25,000 per month',
+      other_conditions: ['Minimum work experience of 2 years', 'CIBIL score of 750 required'],
+      evidence: 'Age 21 to 60 years. Minimum income Rs. 25,000 per month.' }] },
+  };
+  const [row] = N.toProducts(page);
+  assert.equal(row.verification, 'ok');
+  assert.match(row.other_criteria_text, /^Minimum work experience of 2 years; Also mentioned but not verified on the page: CIBIL score of 750 required$/);
+});
+
+test('compile: the LLM sees only verified text; an invented rule is impossible; the rest is a requirement', () => {
+  assert.equal(C.UNVERIFIED_MARK, N.UNVERIFIED_MARK); // the two modules agree on the marker
+  const text = 'Minimum work experience of 2 years; Also mentioned but not verified on the page: CIBIL score of 750 required';
+  assert.deepEqual(C.splitConditions(text), {
+    checkable: 'Minimum work experience of 2 years',
+    unverified: 'Also mentioned but not verified on the page: CIBIL score of 750 required',
+  });
+  const req = C.buildCompileRequest([{ text_id: 't', text }], { system: 'S', head: 'H' });
+  assert.doesNotMatch(req.messages[0].content[0].text, /CIBIL/);
+  // Even if the model invents the rule, its quote is not in the verified text, so it is not a rule.
+  const res = { output: { message: { content: [{ text: JSON.stringify([{ text_id: 't', requirements: [],
+    rules: [{ field: 'credit_score', op: '>=', value_text: '750', applies_to: 'any', quote: 'CIBIL score of 750 required' }] }]) }] } } };
+  const out = C.parseCompileResponse(res, [{ text_id: 't', text }]);
+  assert.deepEqual(out.byId.t.rules, []);
+  assert.ok(out.byId.t.requirements.some((r) => r.startsWith('Also mentioned but not verified')));
+  // Nothing verifiable at all: no model answer needed, still never a rule.
+  const only = 'Also mentioned but not verified on the page: CIBIL score of 750 required';
+  const none = C.parseCompileResponse({ output: { message: { content: [{ text: '[]' }] } } }, [{ text_id: 'u', text: only }]);
+  assert.deepEqual(none.byId.u, { rules: [], requirements: [only] });
+});

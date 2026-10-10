@@ -172,8 +172,9 @@ class ValidationResult:
 
 
 def normalize_header(header: Iterable[str]) -> list[str]:
-    """Trim, lowercase and drop a stray BOM so columns match by name, not position."""
-    return [col.replace("﻿", "").strip().lower() for col in header]
+    """Match columns by name, not position or spelling: drop a stray BOM, trim, lowercase,
+    and treat spaces and hyphens as underscores ("Monthly Income" -> "monthly_income")."""
+    return [re.sub(r"[\s-]+", "_", col.replace("﻿", "").strip().lower()) for col in header]
 
 
 def find_missing_columns(header: Iterable[str]) -> list[str]:

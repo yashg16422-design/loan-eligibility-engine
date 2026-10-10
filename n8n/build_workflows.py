@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CODE = ROOT / "n8n" / "code"
 OUT = ROOT / "n8n" / "workflows"
 PROMPT_VERSION = "v2"
-NORMALIZER_VERSION = 2  # keep equal to NORMALIZER_VERSION in n8n/code/normalize.js
+NORMALIZER_VERSION = 3  # keep equal to NORMALIZER_VERSION in n8n/code/normalize.js
 # Part of every page hash: bumping the prompt or the normalizer re-processes each page once.
 HASH_SALT = f"prompt={PROMPT_VERSION};normalizer={NORMALIZER_VERSION}"
 
@@ -53,9 +53,27 @@ USER_AGENT = (
     "Chrome/128.0 Safari/537.36 LoanEligibilityEngine-assignment/1.0"
 )
 # Credential ids as created in the n8n UI (README §5). Ids, not secrets.
-PG = {"postgres": {"id": "PkRN0GO4XtFXA9pL", "name": "RDS app (n8n_workflows)"}}
-AWS = {"awsAssumeRole": {"id": "fa286DA3YraErW57", "name": "AWS n8n role (assume)"}}
-WEBHOOK_AUTH = {"httpHeaderAuth": {"id": "qaXP0OsyRtnbitga", "name": "Ingest webhook secret"}}
+# Credential REFERENCES (id + name), never secrets. The ids belong to the n8n instance the
+# credentials were created in; on a fresh n8n, create the three credentials (README §5) and
+# set N8N_CRED_PG / N8N_CRED_AWS / N8N_CRED_WEBHOOK to their ids before regenerating.
+PG = {
+    "postgres": {
+        "id": os.environ.get("N8N_CRED_PG", "PkRN0GO4XtFXA9pL"),
+        "name": "RDS app (n8n_workflows)",
+    }
+}
+AWS = {
+    "awsAssumeRole": {
+        "id": os.environ.get("N8N_CRED_AWS", "fa286DA3YraErW57"),
+        "name": "AWS n8n role (assume)",
+    }
+}
+WEBHOOK_AUTH = {
+    "httpHeaderAuth": {
+        "id": os.environ.get("N8N_CRED_WEBHOOK", "qaXP0OsyRtnbitga"),
+        "name": "Ingest webhook secret",
+    }
+}
 
 
 def stack_output(key: str) -> str:
@@ -1152,8 +1170,60 @@ RETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, 
 """,
             "={{ [ $('From B (run)').first().json.run_id ] }}",
         ),
-        (2640, 0),
+        (2860, 0),
         credentials=PG,
+    )
+    # The proof GATES the run: if the class pipeline disagrees with checking every pair one by
+    # one, nothing is marked done and nobody is emailed (B marks the job failed, E alerts).
+    f.add(
+        "Proof passed?",
+        IF_T,
+        2,
+        if_true("={{ $json.correctness_ok === true && Number($json.mismatches) === 0 }}"),
+        (2640, 0),
+    )
+    f.add(
+        "Stop: proof failed",
+        CODE_T,
+        2,
+        {
+            "jsCode": js(
+                entry="""
+const p = $input.first().json;
+throw new Error(`Correctness proof failed: ${p.mismatches} of ${p.naive_pairs_evaluated} pairs differ from the brute-force check. Run stopped before notification.`);
+"""
+            )
+        },
+        (2860, 200),
+    )
+    f.add(
+        "Treasure Hunt funnel",
+        CODE_T,
+        2,
+        {
+            "jsCode": js(
+                entry="""
+// One item that reads like the README table: how much work each stage removed, and the proof.
+const r = $input.first().json;
+const proof = $('Correctness proof').first().json;
+const ratio = (a, b) => (a && b ? Math.round((Number(b) / Number(a)) * 10000) / 100 : null);
+return [{ json: {
+  run_id: r.run_id, mode: r.mode, job_id: r.job_id,
+  funnel: {
+    naive_pairs: r.naive_pairs,
+    pairs_passing_published_rules: r.pairs_after_sql,
+    equivalence_classes: r.classes,
+    class_product_decisions: r.class_product_pairs,
+    decisions_as_share_of_naive_pct: ratio(r.naive_pairs, r.class_product_pairs),
+    llm_calls: r.llm_calls, llm_cache_hits: r.llm_cache_hits, llm_cost_usd_est: r.llm_cost_usd_est,
+    matches_new: r.matches_new, matches_superseded: r.matches_superseded, matches_unchanged: r.matches_unchanged,
+  },
+  proof: { pairs_checked: proof.naive_pairs_evaluated, mismatches: proof.mismatches, correctness_ok: proof.correctness_ok },
+} }];
+"""
+            )
+        },
+        (3080, 0),
     )
 
     for a, b in [
@@ -1167,9 +1237,12 @@ RETURNING run_id::text, mode, job_id::text, users_in, products_in, naive_pairs, 
         ("Stage 1+2 · classes & decisions", "Refresh planner stats"),
         ("Refresh planner stats", "Stage 3 · expand, score, diff"),
         ("Stage 3 · expand, score, diff", "Correctness proof"),
-        ("Correctness proof", "Finish run"),
+        ("Correctness proof", "Proof passed?"),
+        ("Finish run", "Treasure Hunt funnel"),
     ]:
         f.link(a, b)
+    f.link("Proof passed?", "Finish run", out=0)
+    f.link("Proof passed?", "Stop: proof failed", out=1)
     f.link("Anything to compile?", "Build compile request", out=0)
     f.link("Anything to compile?", "Stage 1+2 · classes & decisions", out=1)
     return f.build()
@@ -1245,23 +1318,7 @@ return UUID.test(jobId) ? [{ json: { mode: 'upload', job_id: jobId, product_ids:
         "Jobs waiting for matching",
         PG_T,
         2.5,
-        pg_query("""
--- Janitor first: a run still 'running' after 30 min is dead (n8n's hard timeout is 10 min),
--- e.g. n8n restarted mid-run. Close it so the funnel table never shows ghost runs.
-WITH dead AS (
-  UPDATE pipeline_runs SET status = 'failed', finished_at = now(),
-         error = 'abandoned: still running after 30 min (n8n restart or timeout)'
-  WHERE status = 'running' AND started_at < now() - interval '30 minutes'
-  RETURNING 1
-)
--- Completed uploads never matched, or whose matching run died (> 15 min old lock).
-SELECT 'upload' AS mode, job_id::text AS job_id, '' AS product_ids
-FROM upload_jobs
-WHERE status = 'COMPLETED'
-  AND (match_status IS NULL OR (match_status = 'RUNNING' AND match_started_at < now() - interval '15 minutes'))
-ORDER BY completed_at
-LIMIT 5
-"""),
+        pg_query(sql_file("sweeper.sql")),
         (220, 130),
         credentials=PG,
     )
@@ -1284,31 +1341,7 @@ return ids.length ? [{ json: { mode: 'products', job_id: '', product_ids: JSON.s
         PG_T,
         2.5,
         pg_query(
-            """
--- Atomic claim: only ONE run per job, even with a duplicate webhook + the sweeper racing.
--- 0 rows returned = nothing to do (already matched / running / unknown job) -> stop here.
-WITH req AS (
-  SELECT $1::text AS mode, nullif($2, '')::uuid AS job_id, nullif($3, '')::jsonb AS product_ids
-), locked AS (
-  UPDATE upload_jobs j SET match_status = 'RUNNING', match_started_at = now()
-  FROM req
-  WHERE req.mode = 'upload' AND j.job_id = req.job_id AND j.status = 'COMPLETED'
-    AND (j.match_status IS NULL OR (j.match_status = 'RUNNING' AND j.match_started_at < now() - interval '15 minutes'))
-  RETURNING j.job_id
-), abandoned AS (  -- a re-claimed job's previous run died: close it (data-modifying CTEs always run)
-  UPDATE pipeline_runs SET status = 'failed', finished_at = now(),
-         error = 'abandoned: job re-claimed after a stale lock'
-  WHERE status = 'running' AND job_id = (SELECT job_id FROM locked)
-  RETURNING 1
-)
-INSERT INTO pipeline_runs (mode, job_id, scope_product_ids)
-SELECT req.mode, (SELECT job_id FROM locked),
-       CASE WHEN req.mode = 'products'
-            THEN ARRAY(SELECT jsonb_array_elements_text(req.product_ids))::uuid[] END
-FROM req
-WHERE req.mode = 'products' OR EXISTS (SELECT 1 FROM locked)
-RETURNING run_id::text, mode, job_id::text
-""",
+            sql_file("claim.sql"),
             "={{ [ $json.mode, $json.job_id, $json.product_ids ] }}",
         ),
         (440, 120),

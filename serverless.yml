@@ -12,6 +12,16 @@ provider:
   logRetentionInDays: 14
   tags:
     project: loan-eligibility-engine
+  httpApi:
+    authorizers:
+      # API Gateway verifies the Cognito ID token (signature, issuer, audience, expiry)
+      # before the Lambda runs; /account routes are unreachable without a valid sign-in.
+      cognito:
+        type: jwt
+        identitySource: $request.header.Authorization
+        issuerUrl: !Join ["", ["https://cognito-idp.${aws:region}.amazonaws.com/", !Ref UserPool]]
+        audience:
+          - !Ref UserPoolClient
 
 custom:
   # Built as a plain string (not !Ref) to break the bucket <-> queue-policy cycle;
@@ -104,12 +114,18 @@ functions:
       DATA_BUCKET: ${self:custom.dataBucket}
       TOKEN_SECRET_ARN: !Ref DashboardTokenSecret
       N8N_WEBHOOK_SECRET_ARN: !Ref N8nWebhookSecret # verifies Workflow C's token requests
+      USER_POOL_ID: !Ref UserPool
+      USER_POOL_CLIENT_ID: !Ref UserPoolClient
       COMPILE_PROMPT_VERSION: compile_v1 # = COMPILE_PROMPT_VERSION in n8n/build_workflows.py
       VALIDATION_RULES: "" # keep equal to the ingest function's: one set of rules
       POWERTOOLS_LOG_LEVEL: INFO
     events:
       - httpApi: GET /
+      - httpApi: GET /upload
+      - httpApi: GET /{proxy+} # landing assets; every more specific route wins over it
+      - httpApi: GET /uploads
       - httpApi: POST /uploads
+      - httpApi: DELETE /uploads/{job_id}/users # uploader's delete key, checked in the Lambda
       - httpApi: GET /uploads/{job_id}
       - httpApi: POST /check
       - httpApi: GET /me
@@ -123,6 +139,43 @@ functions:
       - httpApi: GET /app
       - httpApi: GET /app/{proxy+}
       - httpApi: POST /internal/email-tokens
+      - httpApi: GET /analytics
+      - httpApi: GET /auth/config
+      - httpApi:
+          method: GET
+          path: /account
+          authorizer: { name: cognito }
+      - httpApi:
+          method: PUT
+          path: /account
+          authorizer: { name: cognito }
+      - httpApi:
+          method: POST
+          path: /account/profiles
+          authorizer: { name: cognito }
+      - httpApi:
+          method: POST
+          path: /account/profiles/{user_id}/open
+          authorizer: { name: cognito }
+      # Data reset: a person deletes their own check (dashboard token, checked in the Lambda);
+      # an account removes its saved checks; an admin (Cognito group) deletes uploaded users.
+      - httpApi: DELETE /me
+      - httpApi:
+          method: DELETE
+          path: /account/profiles
+          authorizer: { name: cognito }
+      - httpApi:
+          method: DELETE
+          path: /account/profiles/{user_id}
+          authorizer: { name: cognito }
+      - httpApi:
+          method: DELETE
+          path: /uploads
+          authorizer: { name: cognito }
+      - httpApi:
+          method: DELETE
+          path: /uploads/{job_id}
+          authorizer: { name: cognito }
 
 resources:
   Resources:
@@ -474,6 +527,71 @@ resources:
         MessageRetentionPeriod: 1209600 # 14 days (the maximum), time to investigate
         SqsManagedSseEnabled: true
 
+    # ------------------------------------------------------------------
+    # Monitoring: the ingest handler marks a job FAILED and consumes the message on its
+    # 3rd attempt, so only HARD crashes (timeout, DB unreachable before the claim) reach the
+    # DLQ. Any message there, or any Lambda error, emails the operator (test alias).
+    # ------------------------------------------------------------------
+    AlarmTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: ${self:service}-${sls:stage}-alarms
+        KmsMasterKeyId: alias/aws/sns
+        Subscription:
+          - Protocol: email
+            Endpoint: yashg16422+one@gmail.com # the project's test alias (confirm once)
+
+    IngestDlqNotEmptyAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${sls:stage}-ingest-dlq-not-empty
+        AlarmDescription: An upload crashed ingest hard 3 times (timeout or DB unreachable); inspect the DLQ message and its job.
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - { Name: QueueName, Value: !GetAtt IngestDLQ.QueueName }
+        Statistic: Maximum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmTopic]
+
+    IngestErrorsAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${sls:stage}-ingest-errors
+        AlarmDescription: The ingest Lambda raised errors (SQS will retry; repeated errors end in the DLQ).
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - { Name: FunctionName, Value: !Ref IngestLambdaFunction }
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 0
+        ComparisonOperator: GreaterThanThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmTopic]
+
+    ApiErrorsAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: ${self:service}-${sls:stage}-api-errors
+        AlarmDescription: The api Lambda failed 5 or more times in 5 minutes (users see 500s).
+        Namespace: AWS/Lambda
+        MetricName: Errors
+        Dimensions:
+          - { Name: FunctionName, Value: !Ref ApiLambdaFunction }
+        Statistic: Sum
+        Period: 300
+        EvaluationPeriods: 1
+        Threshold: 5
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+        AlarmActions: [!Ref AlarmTopic]
+
     IngestQueuePolicy:
       Type: AWS::SQS::QueuePolicy
       Properties:
@@ -504,7 +622,7 @@ resources:
       Type: AWS::SecretsManager::Secret
       Properties:
         Name: ${self:service}/${sls:stage}/db/app_ingest
-        Description: Postgres login for the api, ingest and dlq-handler Lambdas
+        Description: Postgres login for the api and ingest Lambdas
         GenerateSecretString:
           SecretStringTemplate: '{"username": "app_ingest"}'
           GenerateStringKey: password
@@ -557,6 +675,68 @@ resources:
         GenerateSecretString:
           PasswordLength: 48
           ExcludePunctuation: true
+
+    # ------------------------------------------------------------------
+    # Borrower accounts: Amazon Cognito owns identity (passwords never reach our code or
+    # database). COGNITO_DEFAULT email delivers verification codes to ANY address, which
+    # our own SES cannot while it is in the sandbox.
+    # ------------------------------------------------------------------
+    UserPool:
+      Type: AWS::Cognito::UserPool
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        UserPoolName: ${self:service}-${sls:stage}-users
+        DeletionProtection: ACTIVE
+        UsernameAttributes: [email]
+        UsernameConfiguration:
+          CaseSensitive: false
+        AutoVerifiedAttributes: [email]
+        AccountRecoverySetting:
+          RecoveryMechanisms:
+            - { Name: verified_email, Priority: 1 }
+        AdminCreateUserConfig:
+          AllowAdminCreateUserOnly: false
+        EmailConfiguration:
+          EmailSendingAccount: COGNITO_DEFAULT
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 10
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireUppercase: false
+            RequireSymbols: false
+            TemporaryPasswordValidityDays: 3
+        VerificationMessageTemplate:
+          DefaultEmailOption: CONFIRM_WITH_CODE
+          EmailSubject: Your ClickPar Match code
+          EmailMessage: "Your ClickPar Match verification code is {####}. If you did not ask for it, ignore this email."
+
+    UserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        UserPoolId: !Ref UserPool
+        ClientName: ${self:service}-${sls:stage}-web
+        GenerateSecret: false # a browser app cannot keep a secret
+        ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+        PreventUserExistenceErrors: ENABLED # sign-in errors never reveal whether an email exists
+        EnableTokenRevocation: true
+        IdTokenValidity: 1
+        AccessTokenValidity: 1
+        RefreshTokenValidity: 30
+        TokenValidityUnits:
+          IdToken: hours
+          AccessToken: hours
+          RefreshToken: days
+
+    # Members may delete uploaded data from the app (DELETE /uploads). Membership is granted
+    # by hand, never by sign-up: aws cognito-idp admin-add-user-to-group (README §14).
+    AdminGroup:
+      Type: AWS::Cognito::UserPoolGroup
+      Properties:
+        UserPoolId: !Ref UserPool
+        GroupName: admin
+        Description: Can delete uploaded users from the app (data reset)
 
     # HMAC key for the borrower dashboard's signed links (no accounts, no passwords).
     DashboardTokenSecret:
@@ -816,6 +996,10 @@ resources:
       Value: !GetAtt N8nAwsRole.Arn
     N8nAwsRoleExternalId:
       Value: ${self:service}-${sls:stage}-n8n
+    UserPoolId:
+      Value: !Ref UserPool
+    UserPoolClientId:
+      Value: !Ref UserPoolClient
     UploadUiUrl:
       Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/
     DataBucketName:

@@ -54,10 +54,14 @@ export interface Unlock {
  * into reach. Searches the real thresholds (the cut points), not a fixed step, so the advice
  * names an exact number: "with a score of 750, HDFC and ICICI open up".
  */
-export function nextUnlock(catalog: CatalogProduct[], u: Profile): Unlock | null {
+export function nextUnlock(
+  catalog: CatalogProduct[],
+  u: Profile,
+  fields: Unlock["field"][] = ["credit_score", "monthly_income"],
+): Unlock | null {
   const reachable = new Set(catalog.filter((p) => decide(p, u) !== "not_eligible").map((p) => p.lender_key));
   const best: Unlock[] = [];
-  for (const field of ["credit_score", "monthly_income"] as const) {
+  for (const field of fields) {
     const current = u[field];
     const cuts = new Set<number>();
     for (const p of catalog) {
@@ -83,4 +87,44 @@ export function nextUnlock(catalog: CatalogProduct[], u: Profile): Unlock | null
   // Prefer the change that is smallest relative to where the person is today.
   best.sort((a, b) => (a.to - u[a.field]) / u[a.field] - (b.to - u[b.field]) / u[b.field]);
   return best[0] ?? null;
+}
+
+const inr = (n: number) => `₹${new Intl.NumberFormat("en-IN").format(Math.round(n))}`;
+const EMPLOYMENT_NAME: Record<string, string> = {
+  salaried: "salaried",
+  self_employed: "self-employed",
+  business: "business owners",
+};
+
+/**
+ * Why a product is out of reach, in plain words, one line per failing rule (same checks as
+ * `decide`). Empty when the product is in reach.
+ */
+export function whyNot(p: CatalogProduct, u: Profile): string[] {
+  const out: string[] = [];
+  if (p.employment_types != null && !p.employment_types.includes(u.employment_status)) {
+    out.push(`Only for ${p.employment_types.map((e) => EMPLOYMENT_NAME[e] ?? e).join(" or ")}`);
+  }
+  if (p.min_monthly_income != null && u.monthly_income < p.min_monthly_income) {
+    out.push(`Needs ${inr(p.min_monthly_income)} a month (you have ${inr(u.monthly_income)})`);
+  }
+  if (p.min_credit_score != null && u.credit_score < p.min_credit_score) {
+    out.push(`Needs a credit score of ${p.min_credit_score} (yours is ${u.credit_score})`);
+  }
+  if (p.max_credit_score != null && u.credit_score > p.max_credit_score) {
+    out.push(`For credit scores up to ${p.max_credit_score}`);
+  }
+  if (p.min_age != null && u.age < p.min_age) out.push(`Minimum age ${p.min_age}`);
+  if (p.max_age != null && u.age > p.max_age) out.push(`Maximum age ${p.max_age}`);
+  if (!out.length && p.other_criteria_text != null && p.compiled_rules != null) {
+    for (const r of p.compiled_rules) {
+      if (r.applies_to !== "any" && r.applies_to !== u.employment_status) continue;
+      if (passesCompiledRules([r], u)) continue;
+      const v = r.op === ">=" ? Math.ceil(r.value) : Math.floor(r.value);
+      const what =
+        r.field === "monthly_income" ? `${inr(v)} a month` : r.field === "credit_score" ? `a credit score of ${v}` : `age ${v}`;
+      out.push(`${r.op === ">=" ? "Needs at least" : "At most"} ${what}`);
+    }
+  }
+  return out;
 }

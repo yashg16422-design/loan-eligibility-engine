@@ -1,72 +1,186 @@
 @import "tailwindcss";
-@import "@fontsource-variable/geist";
-@import "@fontsource-variable/geist-mono";
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/cormorant-garamond/600.css";
+@import "@fontsource/cormorant-garamond/700.css";
 
-/* Tokens: see DESIGN.md. One accent (marigold), rationed to actions, selection and focus. */
+/* Gothic: a violet-black night, amethyst for every "yes", hairline structure kept from the
+   landing (sharp boxes, Inter + JetBrains Mono), and a high-contrast Cormorant Garamond for
+   page and section titles only. Colour is information:
+   amethyst (--color-acc) = yes / eligible / results / primary action,
+   crimson (coral) = rejection or a problem, antique gold (amber) = lenders and their rules,
+   verdigris (peri) = the AI and the engine (Workflow B). */
 @theme {
-  --color-ink: #101315;
-  --color-panel: #161a1d;
-  --color-raise: #1d2226;
-  --color-line: rgb(233 236 238 / 0.08);
-  --color-line-strong: rgb(233 236 238 / 0.16);
-  --color-text: #e9ecee;
-  --color-muted: #9aa3a9;
-  --color-marigold: #f2a93b;
-  --color-marigold-ink: #1b1305;
-  --color-leaf: #7cc4a0;
-  --color-danger: #f08a7e;
+  --color-bg: #07050a;
+  --color-panel: #0e0a14;
+  --color-panel-2: #16101f;
+  --color-line: #2a2236;
+  --color-line-hi: #463a5c;
+  --color-fg: #efe9f7;
+  --color-mute: #a196b4;
+  --color-dim: #5b5069;
+  --color-acc: #a07cff;
+  --color-acc-deep: #4f22b0;
+  --color-acc-2: #d2c2ff;
+  --color-coral: #e5536b;
+  --color-amber: #d8b45f;
+  --color-peri: #6fb8a7;
 
-  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
+  --font-sans: "Inter Variable", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Cormorant Garamond", "Cormorant", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
-  /* Type scale 1.2 (Operate: fixed rem, not fluid). */
-  --text-xs: 0.75rem;
-  --text-sm: 0.875rem;
-  --text-base: 1rem;
-  --text-lg: 1.1875rem;
-  --text-xl: 1.4375rem;
-  --text-2xl: 1.75rem;
-  --text-3xl: 2.0625rem;
-
-  --radius-ctl: 6px;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Operate surface: a fixed scale (no fluid type in an app). The top steps are sized for the
+     display serif, whose small x-height reads about a step smaller than Inter. */
+  --text-xs: 0.78rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.625rem;
+  --text-2xl: 2.25rem;
+  --text-3xl: 2.875rem;
+  --text-4xl: 3.5rem;
 }
 
 @layer base {
   html {
-    background: var(--color-ink);
-    color: var(--color-text);
+    background: var(--color-bg);
+    color: var(--color-fg);
     font-family: var(--font-sans);
-    font-feature-settings: "ss01", "cv11";
+    font-feature-settings: "cv11", "ss01";
+    letter-spacing: -0.011em;
     -webkit-font-smoothing: antialiased;
-    text-rendering: optimizeLegibility;
-    scrollbar-color: var(--color-line-strong) transparent;
+    color-scheme: dark;
+    scrollbar-color: var(--color-line-hi) var(--color-bg);
   }
   body {
     min-height: 100dvh;
-    line-height: 1.5;
+    line-height: 1.6;
   }
   ::selection {
-    background: rgb(242 169 59 / 0.32);
-    color: var(--color-text);
+    background: var(--color-acc-deep);
+    color: var(--color-fg);
   }
   :focus-visible {
-    outline: 2px solid var(--color-marigold);
-    outline-offset: 2px;
-    border-radius: 4px;
-  }
-  a {
-    text-underline-offset: 3px;
-    text-decoration-thickness: 1px;
+    outline: 2px solid var(--color-acc);
+    outline-offset: 3px;
   }
   h1,
   h2,
-  h3 {
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.03em;
     text-wrap: balance;
-    letter-spacing: -0.02em;
+    line-height: 1.1;
   }
-  input[type="range"] {
-    accent-color: var(--color-marigold);
+  /* Page and section titles in the display serif; h3/h4 stay in Inter for scanning. */
+  h1,
+  h2 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.02;
+  }
+  a {
+    color: inherit;
+    text-underline-offset: 3px;
+  }
+  input,
+  button,
+  select {
+    font: inherit;
+  }
+}
+
+@layer components {
+  /* A hairline box with a short coloured tick on its top edge (the landing's engine nodes). */
+  .box {
+    position: relative;
+    border: 1px solid var(--color-line);
+    background: var(--color-panel);
+  }
+  .tick::before {
+    content: "";
+    position: absolute;
+    top: -1px;
+    left: 16px;
+    width: 28px;
+    height: 2px;
+    background: var(--tick, var(--color-acc));
+  }
+  /* Small mono caption: names a value, never decorates a heading. */
+  .label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+    color: var(--color-mute);
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 0 20px;
+    font-weight: 500;
+    font-size: 0.95rem;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease,
+      color 0.2s ease,
+      transform 0.12s ease;
+  }
+  .btn:active {
+    transform: translateY(1px);
+  }
+  .btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  /* Dark amethyst with light text: the one filled control on any screen. */
+  .btn-primary {
+    background: var(--color-acc-deep);
+    border-color: color-mix(in srgb, var(--color-acc) 55%, var(--color-acc-deep));
+    color: var(--color-fg);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--color-acc-deep) 80%, var(--color-acc));
+  }
+  .btn-ghost {
+    border-color: var(--color-line-hi);
+    color: var(--color-fg);
+    background: transparent;
+  }
+  .btn-ghost:hover:not(:disabled) {
+    border-color: var(--color-acc-2);
+    color: var(--color-acc-2);
+  }
+  .field {
+    height: 48px;
+    width: 100%;
+    border: 1px solid var(--color-line);
+    background: var(--color-bg);
+    padding: 0 12px;
+    color: var(--color-fg);
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    transition: border-color 0.15s ease;
+  }
+  .field::placeholder {
+    color: var(--color-dim);
+  }
+  .field:hover {
+    border-color: var(--color-line-hi);
+  }
+  .field:focus {
+    border-color: var(--color-acc);
+    outline: none;
   }
 }
 
@@ -74,7 +188,16 @@
   .num {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
+  }
+  /* Bars grow when their number changes (state, not decoration). */
+  .grow-x {
+    transform-origin: left;
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .grow-y {
+    transform-origin: bottom;
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
   }
 }
 
@@ -82,7 +205,7 @@
   *,
   *::before,
   *::after {
-    animation-duration: 1ms !important;
     transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
   }
 }

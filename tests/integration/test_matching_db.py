@@ -278,3 +278,254 @@ def test_dashboard_queries_on_real_matches(db):
     assert repository.ops_crawl(db)["products"]  # by channel
     assert isinstance(repository.ops_errors(db), list)
     assert repository.instant_checks_last_24h(db) == 0
+
+
+def test_accounts_and_analytics(db):
+    """Migration 005 + the account SQL: first saver owns a profile; analytics are aggregates."""
+    from loan_engine.api import repository
+
+    user_a, user_b = [r[0] for r in db.execute("SELECT user_id FROM users LIMIT 2").fetchall()]
+    repository.upsert_account(db, "sub-1", "one@example.org")
+    repository.upsert_account(db, "sub-2", "two@example.org")
+    assert repository.claim_profile(db, "sub-1", user_a) == "saved"
+    assert repository.claim_profile(db, "sub-1", user_a) == "already_saved"
+    assert repository.claim_profile(db, "sub-2", user_a) == "taken"  # first saver owns it
+    assert repository.claim_profile(db, "sub-2", uuid.uuid4()) == "not_found"
+    assert repository.owns_profile(db, "sub-1", user_a) and not repository.owns_profile(
+        db, "sub-2", user_a
+    )
+    profiles = repository.account_profiles(db, "sub-1")
+    assert [p["user_id"] for p in profiles] == [user_a] and profiles[0]["matches"] >= 0
+    repository.set_daily_picks(db, "sub-1", False)
+    assert repository.upsert_account(db, "sub-1", "one@example.org")["daily_picks"] is False
+    assert repository.claim_profile(db, "sub-2", user_b) == "saved"
+
+    every = repository.analytics(db, None)
+    assert every["users"] == db.execute("SELECT count(*) FROM users").fetchone()[0]
+    assert sum(b["n"] for b in every["income_bands"]) == every["users"]
+    assert sum(b["n"] for b in every["matches_per_user"]) == every["users"]
+    assert sum(t["n"] for t in every["tiers"]) == every["matches"]
+    assert every["top_lenders"] and "user_id" not in json.dumps(every)  # aggregates only
+    one_job = repository.analytics(db, db.job_id)
+    assert 0 < one_job["users"] <= every["users"]
+    assert repository.analytics(db, uuid.uuid4())["users"] == 0
+
+
+def test_sweeper_and_claim_retry_failed_jobs_a_bounded_number_of_times(db):
+    """DF6: a transient failure is retried (after a 10 min backoff), at most 3 times."""
+    job = uuid.uuid4()
+    db.execute(
+        "INSERT INTO upload_jobs (job_id, s3_key, status, completed_at) "
+        "VALUES (%s, %s, 'COMPLETED', now())",
+        (job, f"raw/{job}.csv"),
+    )
+
+    def swept() -> set:
+        return {r[1] for r in db.execute(sql("sweeper.sql")).fetchall()}
+
+    def claim() -> list:
+        return db.execute(sql("claim.sql"), {"p1": "upload", "p2": str(job), "p3": ""}).fetchall()
+
+    def fail_run(minutes_ago: int) -> None:
+        """What B's "Mark job failed" does, with the failure dated `minutes_ago`."""
+        db.execute(
+            "UPDATE pipeline_runs SET status = 'failed', "
+            "finished_at = now() - make_interval(mins => %s) "
+            "WHERE job_id = %s AND status = 'running'",
+            (minutes_ago, job),
+        )
+        db.execute("UPDATE upload_jobs SET match_status = 'FAILED' WHERE job_id = %s", (job,))
+
+    def age_failures() -> None:
+        db.execute(
+            "UPDATE pipeline_runs SET finished_at = now() - interval '11 minutes' "
+            "WHERE job_id = %s",
+            (job,),
+        )
+
+    assert str(job) in swept()  # never matched: picked up
+    assert len(claim()) == 1
+    assert claim() == []  # atomic: the second claim gets nothing
+    fail_run(minutes_ago=1)
+    assert str(job) not in swept()  # backoff: failed a minute ago
+    age_failures()
+    assert str(job) in swept()  # 1 failure, 10+ min ago: retried
+    for _ in range(2):  # second and third failures
+        assert len(claim()) == 1
+        fail_run(minutes_ago=11)
+    failed = db.execute(
+        "SELECT count(*) FROM pipeline_runs WHERE job_id = %s AND status = 'failed'", (job,)
+    ).fetchone()[0]
+    assert failed == 3
+    assert str(job) not in swept()  # out of retries: stays FAILED for a human
+    assert claim() == []
+
+
+def test_product_mode_never_supersedes_a_user_who_was_not_classified(db):
+    """DF11: a user created between Stage 1 and Stage 3 keeps their matches untouched."""
+    product_id = db.execute(
+        "SELECT product_id FROM matches WHERE status = 'active' "
+        "GROUP BY 1 ORDER BY count(*) DESC LIMIT 1"
+    ).fetchone()[0]
+    run = str(
+        db.execute(
+            "INSERT INTO pipeline_runs (mode, scope_product_ids) "
+            "VALUES ('products', ARRAY[%s]::uuid[]) RETURNING run_id",
+            (product_id,),
+        ).fetchone()[0]
+    )
+    run_sql(db, "stage1_classes.sql", run, PROMPT_VERSION)
+    # A user arrives (or changes) after Stage 1, with an outlier profile no class covers.
+    late = uuid.uuid4()
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age, "
+        "upload_job_id) VALUES (%s, 'late@example.org', 99999999, 300, 'business', 99, %s)",
+        (late, db.job_id),
+    )
+    db.execute(
+        "INSERT INTO matches (user_id, product_id, job_id, match_run_id, tier, stage_decided, "
+        "fit_score) VALUES (%s, %s, %s, %s, 'eligible', 'sql', 50)",
+        (late, product_id, db.job_id, run),
+    )
+    stage3(db, run)
+    status = db.execute(
+        "SELECT status FROM matches WHERE user_id = %s AND product_id = %s", (late, product_id)
+    ).fetchone()[0]
+    assert status == "active"
+
+
+def test_awaiting_notification_only_returns_users_with_unnotified_matches(db):
+    from loan_engine.api import repository
+
+    pending = db.execute(
+        "SELECT user_id FROM matches WHERE status = 'active' AND notified_at IS NULL LIMIT 1"
+    ).fetchone()[0]
+    db.execute("UPDATE matches SET notified_at = now() WHERE user_id = %s", (pending,))
+    assert repository.awaiting_notification(db, [pending, uuid.uuid4()]) == set()
+    db.execute("UPDATE matches SET notified_at = NULL WHERE user_id = %s", (pending,))
+    assert repository.awaiting_notification(db, [pending]) == {pending}
+    assert repository.csv_uploads_last_24h(db) >= 0
+
+
+def test_data_reset_runs_as_app_ingest_and_keeps_history(db):
+    """Migration 006 + R__grants: the api role can delete users and the cascade takes their
+    matches, emails and links; pipeline_runs, products and the job rows stay."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "DO $$ BEGIN"
+        " IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_ingest') THEN"
+        " CREATE ROLE app_ingest; END IF;"
+        " IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'n8n_workflows') THEN"
+        " CREATE ROLE n8n_workflows; END IF; END $$"
+    )
+    db.execute((ROOT / "sql" / "R__grants.sql").read_text())
+    product_id = db.execute("SELECT product_id FROM loan_products LIMIT 1").fetchone()[0]
+
+    def upload(source: str, n: int) -> tuple[uuid.UUID, list[uuid.UUID]]:
+        """A small loaded + matched + emailed upload of n users."""
+        job = uuid.uuid4()
+        db.execute(
+            "INSERT INTO upload_jobs (job_id, s3_key, status, match_status, source)"
+            " VALUES (%s, %s, 'COMPLETED', 'DONE', %s)",
+            (job, f"raw/{job}.csv", source),
+        )
+        run = db.execute(
+            "INSERT INTO pipeline_runs (mode, job_id, status) VALUES ('upload', %s, 'done')"
+            " RETURNING run_id",
+            (job,),
+        ).fetchone()[0]
+        users = [uuid.uuid4() for _ in range(n)]
+        for u in users:
+            db.execute(
+                "INSERT INTO users (user_id, email, monthly_income, credit_score,"
+                " employment_status, age, upload_job_id)"
+                " VALUES (%s, 'reset@example.org', 50000, 750, 'salaried', 30, %s)",
+                (u, job),
+            )
+            db.execute(
+                "INSERT INTO matches (user_id, product_id, job_id, match_run_id, tier,"
+                " stage_decided, fit_score) VALUES (%s, %s, %s, %s, 'eligible', 'sql', 50)",
+                (u, product_id, job, run),
+            )
+            db.execute(
+                "INSERT INTO notifications (user_id, alias_email, job_id, run_id, status)"
+                " VALUES (%s, 'x+1@gmail.com', %s, %s, 'sent')",
+                (u, job, run),
+            )
+        return job, users
+
+    csv_job, csv_users = upload("csv", 3)
+    check_job, (check_user,) = upload("instant_check", 1)
+    _, (other_check,) = upload("instant_check", 1)
+    repository.upsert_account(db, "sub-reset", "reset@example.org")
+    assert repository.claim_profile(db, "sub-reset", check_user) == "saved"
+    assert repository.claim_profile(db, "sub-reset", csv_users[0]) == "saved"
+
+    def count(table: str, users: list[uuid.UUID]) -> int:
+        return db.execute(
+            f"SELECT count(*) FROM {table} WHERE user_id = ANY(%s)", (users,)
+        ).fetchone()[0]
+
+    db.execute("SET ROLE app_ingest")
+    try:
+        # A busy job is refused; a dashboard link cannot delete bulk-upload data.
+        db.execute("RESET ROLE")
+        db.execute("UPDATE upload_jobs SET match_status = 'RUNNING' WHERE job_id = %s", (csv_job,))
+        db.execute("SET ROLE app_ingest")
+        with pytest.raises(repository.JobBusyError):
+            repository.purge_upload(db, csv_job)
+        db.execute("RESET ROLE")
+        db.execute("UPDATE upload_jobs SET match_status = 'DONE' WHERE job_id = %s", (csv_job,))
+        db.execute("SET ROLE app_ingest")
+        assert repository.delete_check(db, csv_users[1]) == "csv_user"
+        # Just matched: Workflow C may still be emailing this user, so the delete waits.
+        db.execute("RESET ROLE")
+        db.execute("UPDATE upload_jobs SET matched_at = now() WHERE job_id = %s", (check_job,))
+        db.execute("SET ROLE app_ingest")
+        assert repository.delete_check(db, check_user) == "busy"
+        db.execute("RESET ROLE")
+        db.execute(
+            "UPDATE upload_jobs SET matched_at = now() - interval '1 hour' WHERE job_id = %s",
+            (check_job,),
+        )
+        db.execute("SET ROLE app_ingest")
+
+        # Start fresh: the instant check is deleted, the saved bulk profile only unlinked.
+        assert repository.clear_account_profiles(db, "sub-reset") == {
+            "deleted_checks": 1,
+            "unlinked": 1,
+        }
+        assert count("users", [check_user]) == 0 and count("users", [csv_users[0]]) == 1
+        assert repository.upsert_account(db, "sub-reset", "reset@example.org")["daily_picks"]
+
+        assert repository.delete_check(db, other_check) == "deleted"
+        assert repository.purge_upload(db, csv_job) == 3
+        assert repository.purge_upload(db, uuid.uuid4()) is None
+    finally:
+        db.execute("RESET ROLE")
+
+    gone = [*csv_users, check_user, other_check]
+    assert count("users", gone) == count("matches", gone) == count("notifications", gone) == 0
+    assert db.execute(
+        "SELECT purged_at IS NOT NULL FROM upload_jobs WHERE job_id = %s", (csv_job,)
+    ).fetchone()[0]
+    # History stays: the runs and job rows are still there for the Treasure Hunt evidence.
+    assert (
+        db.execute(
+            "SELECT count(*) FROM pipeline_runs WHERE job_id = ANY(%s)", ([csv_job, check_job],)
+        ).fetchone()[0]
+        == 2
+    )
+    runs = repository.ops_runs(db)
+    assert any(r["job_id"] == csv_job and r["purged"] for r in runs)
+    # Newer small runs never hide the full-file reference run.
+    refs = [r for r in runs if r["reference"]]
+    assert len(refs) == 1 and (refs[0]["users_in"] or 0) == max(
+        r["users_in"] or 0 for r in runs if r["mode"] == "upload" and r["status"] == "done"
+    )
+    # The upload list shows the cleared upload as its own record, emptied but kept.
+    records = {r["job_id"]: r for r in repository.list_uploads(db)}
+    assert records[csv_job]["users_now"] == 0 and records[csv_job]["purged_at"] is not None
+    assert records[csv_job]["emails_sent"] == 0  # its email rows went with the users
+    assert check_job not in records  # instant checks are not bulk uploads

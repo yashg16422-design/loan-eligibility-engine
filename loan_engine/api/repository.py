@@ -26,6 +26,25 @@ def create_job(
     )
 
 
+def csv_uploads_last_24h(conn: psycopg.Connection) -> int:
+    """Upload tickets issued in the last 24 h (each can trigger emails: the SES-quota guard)."""
+    row = conn.execute(
+        "SELECT count(*) FROM upload_jobs"
+        " WHERE source = 'csv' AND created_at > now() - interval '24 hours'"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def awaiting_notification(conn: psycopg.Connection, user_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    """The subset of users Workflow C is about to email: an active, not-yet-notified match."""
+    rows = conn.execute(
+        "SELECT DISTINCT user_id FROM matches"
+        " WHERE user_id = ANY(%s) AND status = 'active' AND notified_at IS NULL",
+        (user_ids,),
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
 def instant_checks_last_24h(conn: psycopg.Connection) -> int:
     """How many instant checks ran in the last 24 h (the SES-quota guard)."""
     row = conn.execute(
@@ -195,22 +214,39 @@ OPS_ROWS = 20
 ERROR_PREVIEW_CHARS = 160  # enough to recognise a failure, not a stack trace
 
 
+_RUN_COLUMNS = """
+    run_id, mode, job_id, status, started_at, finished_at,
+    extract(epoch FROM finished_at - started_at)::numeric(10, 1) AS seconds,
+    users_in, products_in, naive_pairs, pairs_after_sql, classes,
+    class_product_pairs, rule_decided, llm_candidates, llm_cache_hits,
+    llm_calls, llm_input_tokens, llm_output_tokens, llm_cost_usd_est,
+    matches_new, matches_superseded, matches_unchanged, correctness_ok,
+    emails_sent, emails_failed, emails_skipped_demo,
+    (SELECT j.purged_at IS NOT NULL FROM upload_jobs j
+       WHERE j.job_id = pipeline_runs.job_id) AS purged
+"""
+
+
 def ops_runs(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    """The latest matching runs: the measured Treasure Hunt funnel, no personal data."""
+    """The latest matching runs: the measured Treasure Hunt funnel, no personal data.
+
+    The largest completed upload run (the full-file reference: 10,000 users x 59 products) is
+    always included and flagged `reference`, so newer small runs never push it out of view.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
-        return cur.execute(
-            """
-            SELECT run_id, mode, status, started_at, finished_at,
-                   extract(epoch FROM finished_at - started_at)::numeric(10, 1) AS seconds,
-                   users_in, products_in, naive_pairs, pairs_after_sql, classes,
-                   class_product_pairs, rule_decided, llm_candidates, llm_cache_hits,
-                   llm_calls, llm_input_tokens, llm_output_tokens, llm_cost_usd_est,
-                   matches_new, matches_superseded, matches_unchanged, correctness_ok,
-                   emails_sent, emails_failed, emails_skipped_demo
-            FROM pipeline_runs ORDER BY started_at DESC LIMIT %s
-            """,
+        runs = cur.execute(
+            f"SELECT {_RUN_COLUMNS} FROM pipeline_runs ORDER BY started_at DESC LIMIT %s",
             (OPS_ROWS,),
         ).fetchall()
+        biggest = cur.execute(
+            f"SELECT {_RUN_COLUMNS} FROM pipeline_runs WHERE mode = 'upload' AND status = 'done'"
+            " ORDER BY users_in DESC NULLS LAST, started_at DESC LIMIT 1"
+        ).fetchone()
+    for run in runs:
+        run["reference"] = biggest is not None and run["run_id"] == biggest["run_id"]
+    if biggest is not None and not any(r["reference"] for r in runs):
+        runs.append({**biggest, "reference": True})
+    return runs
 
 
 def ops_crawl(conn: psycopg.Connection) -> dict[str, Any]:
@@ -250,3 +286,277 @@ def ops_errors(conn: psycopg.Connection) -> list[dict[str, Any]]:
             " FROM workflow_errors ORDER BY id DESC LIMIT %s",
             (ERROR_PREVIEW_CHARS, OPS_ROWS),
         ).fetchall()
+
+
+# ---------------------------------------------------------------- accounts (Cognito)
+
+
+def upsert_account(conn: psycopg.Connection, account_id: str, email: str) -> dict[str, Any]:
+    """Create the account on first sight (Cognito `sub` + verified email), touch it after."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            """
+            INSERT INTO accounts (account_id, email) VALUES (%s, %s)
+            ON CONFLICT (account_id) DO UPDATE
+                SET email = EXCLUDED.email, last_seen_at = now()
+            RETURNING account_id, email, daily_picks, created_at
+            """,
+            (account_id, email),
+        ).fetchone()
+
+
+def account_profiles(conn: psycopg.Connection, account_id: str) -> list[dict[str, Any]]:
+    """The checks this account saved, newest first, with their headline numbers."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            """
+            SELECT u.user_id, u.name, u.monthly_income, u.credit_score, u.employment_status,
+                   u.age, ap.saved_at, coalesce(j.source, 'csv') AS source,
+                   count(m.*) FILTER (WHERE m.status = 'active')::int AS matches,
+                   count(m.*) FILTER (WHERE m.status = 'active' AND m.tier = 'eligible')::int
+                       AS eligible
+            FROM account_profiles ap
+            JOIN users u USING (user_id)
+            LEFT JOIN upload_jobs j ON j.job_id = u.upload_job_id
+            LEFT JOIN matches m ON m.user_id = u.user_id
+            WHERE ap.account_id = %s
+            GROUP BY u.user_id, ap.saved_at, j.source
+            ORDER BY ap.saved_at DESC
+            """,
+            (account_id,),
+        ).fetchall()
+
+
+def set_daily_picks(conn: psycopg.Connection, account_id: str, on: bool) -> None:
+    conn.execute("UPDATE accounts SET daily_picks = %s WHERE account_id = %s", (on, account_id))
+
+
+def claim_profile(conn: psycopg.Connection, account_id: str, user_id: uuid.UUID) -> str:
+    """Link a checked profile to an account.
+
+    Returns "saved", "already_saved" (this account), "taken" (another account owns it) or
+    "not_found" (the check has not been loaded yet). The UNIQUE(user_id) constraint makes
+    "first saver owns it" hold even under a race.
+    """
+    if conn.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,)).fetchone() is None:
+        return "not_found"
+    row = conn.execute(
+        """
+        INSERT INTO account_profiles (account_id, user_id) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO NOTHING
+        RETURNING 1
+        """,
+        (account_id, user_id),
+    ).fetchone()
+    if row:
+        return "saved"
+    owner = conn.execute(
+        "SELECT account_id FROM account_profiles WHERE user_id = %s", (user_id,)
+    ).fetchone()
+    return "already_saved" if owner and owner[0] == account_id else "taken"
+
+
+def owns_profile(conn: psycopg.Connection, account_id: str, user_id: uuid.UUID) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM account_profiles WHERE account_id = %s AND user_id = %s",
+            (account_id, user_id),
+        ).fetchone()
+        is not None
+    )
+
+
+# ---------------------------------------------------------------- data reset
+
+# Child rows (matches, notifications, preferences, account links) go with each user by
+# ON DELETE CASCADE. Lender products, pipeline_runs (the Treasure Hunt evidence) and the
+# upload_jobs rows always stay; a cleared upload is stamped purged_at.
+
+
+class JobBusyError(Exception):
+    """The upload is loading, matching or being emailed; deleting now would cut a run in half."""
+
+
+# Workflow C emails right after Stage 3 stamps matched_at; a user deleted under it would make
+# its notification insert fail. Two minutes covers a C run with room to spare.
+_BUSY = (
+    "status = 'PROCESSING' OR match_status = 'RUNNING' OR matched_at > now() - interval '2 minutes'"
+)
+
+
+UPLOADS_SHOWN = 20
+
+
+def list_uploads(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Recent bulk uploads, one record each: counts only, no personal data.
+
+    `users_now` is how many of the users this file added or changed are still in the database
+    (0 after a delete); tickets whose file never arrived are left out after 15 minutes.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            """
+            WITH j AS (
+                SELECT job_id, original_filename, status, created_at, completed_at, total_rows,
+                       inserted, updated, unchanged, rejected, match_status, matched_at, purged_at
+                FROM upload_jobs
+                WHERE source = 'csv'
+                  AND (status <> 'AWAITING_UPLOAD' OR created_at > now() - interval '15 minutes')
+                ORDER BY created_at DESC LIMIT %s
+            )
+            SELECT j.*,
+                   (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
+                       AS users_now,
+                   (SELECT count(*) FROM matches m JOIN users u USING (user_id)
+                     WHERE u.upload_job_id = j.job_id AND m.status = 'active')::int AS matches,
+                   (SELECT count(*) FROM notifications n
+                     WHERE n.job_id = j.job_id AND n.status = 'sent')::int AS emails_sent
+            FROM j ORDER BY j.created_at DESC
+            """,
+            (UPLOADS_SHOWN,),
+        ).fetchall()
+
+
+def purge_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> int | None:
+    """Delete the users one upload added or changed, so the same file can be uploaded as new.
+
+    Returns how many users were deleted, or None if the job does not exist. The job row is
+    locked first, so ingest or Workflow B cannot claim it halfway through the delete.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            f"SELECT {_BUSY} FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        if row[0]:
+            raise JobBusyError
+        deleted = conn.execute("DELETE FROM users WHERE upload_job_id = %s", (job_id,)).rowcount
+        conn.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (job_id,))
+    return deleted
+
+
+def purge_csv_uploads(conn: psycopg.Connection) -> dict[str, int]:
+    """Delete every user that came from a bulk CSV upload.
+
+    Instant checks stay: they belong to the people who ran them, who can delete their own.
+    """
+    with conn.transaction():
+        busy = conn.execute(
+            f"SELECT bool_or({_BUSY}) FROM"
+            " (SELECT status, match_status, matched_at FROM upload_jobs"
+            " WHERE source = 'csv' FOR UPDATE) j"
+        ).fetchone()
+        if busy and busy[0]:
+            raise JobBusyError
+        deleted = conn.execute(
+            "DELETE FROM users u USING upload_jobs j"
+            " WHERE j.job_id = u.upload_job_id AND j.source = 'csv'"
+        ).rowcount
+        uploads = conn.execute(
+            "UPDATE upload_jobs SET purged_at = now() WHERE source = 'csv' AND purged_at IS NULL"
+        ).rowcount
+    return {"deleted_users": deleted, "uploads": uploads}
+
+
+def delete_check(conn: psycopg.Connection, user_id: uuid.UUID) -> str:
+    """A person deletes their own instant check: "deleted", "not_found", "csv_user" or "busy".
+
+    Users from a bulk upload are the operator's data, so a dashboard link cannot delete them.
+    """
+    row = conn.execute(
+        f"SELECT j.source, coalesce({_BUSY}, false) FROM users u"
+        " LEFT JOIN upload_jobs j ON j.job_id = u.upload_job_id WHERE u.user_id = %s",
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        return "not_found"
+    if row[0] != "instant_check":
+        return "csv_user"
+    if row[1]:
+        return "busy"
+    conn.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
+    return "deleted"
+
+
+def clear_account_profiles(
+    conn: psycopg.Connection, account_id: str, user_id: uuid.UUID | None = None
+) -> dict[str, int]:
+    """Start fresh: remove this account's saved checks (one, or all). The account stays.
+
+    The account's own instant checks are deleted outright; a bulk-upload profile it saved is
+    only unlinked, because that row is the operator's data.
+    """
+    scope = "ap.account_id = %(a)s AND (%(u)s::uuid IS NULL OR ap.user_id = %(u)s::uuid)"
+    with conn.transaction():
+        deleted = conn.execute(
+            "DELETE FROM users u USING account_profiles ap, upload_jobs j"
+            " WHERE ap.user_id = u.user_id AND j.job_id = u.upload_job_id"
+            f" AND j.source = 'instant_check' AND NOT ({_BUSY}) AND {scope}",
+            {"a": account_id, "u": user_id},
+        ).rowcount
+        unlinked = conn.execute(
+            f"DELETE FROM account_profiles ap WHERE {scope}", {"a": account_id, "u": user_id}
+        ).rowcount
+    return {"deleted_checks": deleted, "unlinked": unlinked}
+
+
+# ---------------------------------------------------------------- CSV analytics (aggregates)
+
+# Band edges match the measured profile of the sample file (PLAN.md §9): income 25k-150k,
+# scores 650-800, ages 22-50, with room either side for other files.
+_ANALYTICS_SQL = """
+WITH u AS (
+    SELECT * FROM users WHERE %(job)s::uuid IS NULL OR upload_job_id = %(job)s::uuid
+), m AS (
+    SELECT m.user_id, m.tier, p.lender, p.lender_key, p.channel
+    FROM matches m JOIN loan_products p USING (product_id) JOIN u USING (user_id)
+    WHERE m.status = 'active'
+), per_user AS (
+    SELECT u.user_id, count(m.user_id) AS n,
+           count(m.user_id) FILTER (WHERE m.tier = 'eligible') AS eligible
+    FROM u LEFT JOIN m USING (user_id) GROUP BY u.user_id
+)
+SELECT
+  (SELECT count(*) FROM u)::int AS users,
+  (SELECT count(*) FROM m)::int AS matches,
+  (SELECT count(*) FROM per_user WHERE eligible > 0)::int AS users_with_eligible,
+  (SELECT count(*) FROM per_user WHERE n = 0)::int AS users_without_matches,
+  (SELECT coalesce(json_agg(x ORDER BY x.ord), '[]') FROM (
+      SELECT CASE WHEN monthly_income < 25000 THEN 0 WHEN monthly_income < 50000 THEN 1
+                  WHEN monthly_income < 75000 THEN 2 WHEN monthly_income < 100000 THEN 3
+                  WHEN monthly_income < 125000 THEN 4 ELSE 5 END AS ord, count(*)::int AS n
+      FROM u GROUP BY 1) x) AS income_bands,
+  (SELECT coalesce(json_agg(x ORDER BY x.ord), '[]') FROM (
+      SELECT CASE WHEN credit_score < 650 THEN 0 WHEN credit_score < 700 THEN 1
+                  WHEN credit_score < 750 THEN 2 WHEN credit_score < 800 THEN 3 ELSE 4 END AS ord,
+             count(*)::int AS n
+      FROM u GROUP BY 1) x) AS score_bands,
+  (SELECT coalesce(json_agg(x ORDER BY x.ord), '[]') FROM (
+      SELECT CASE WHEN age < 25 THEN 0 WHEN age < 30 THEN 1 WHEN age < 35 THEN 2
+                  WHEN age < 40 THEN 3 WHEN age < 45 THEN 4 ELSE 5 END AS ord, count(*)::int AS n
+      FROM u GROUP BY 1) x) AS age_bands,
+  (SELECT coalesce(json_agg(x ORDER BY x.n DESC), '[]') FROM (
+      SELECT employment_status AS key, count(*)::int AS n FROM u GROUP BY 1) x) AS employment,
+  (SELECT coalesce(json_agg(x ORDER BY x.ord), '[]') FROM (
+      SELECT CASE WHEN n = 0 THEN 0 WHEN n <= 10 THEN 1 WHEN n <= 20 THEN 2 WHEN n <= 30 THEN 3
+                  WHEN n <= 40 THEN 4 ELSE 5 END AS ord, count(*)::int AS n
+      FROM per_user GROUP BY 1) x) AS matches_per_user,
+  (SELECT coalesce(json_agg(x ORDER BY x.n DESC), '[]') FROM (
+      SELECT tier AS key, count(*)::int AS n FROM m GROUP BY 1) x) AS tiers,
+  (SELECT coalesce(json_agg(x ORDER BY x.n DESC), '[]') FROM (
+      SELECT channel AS key, count(*)::int AS n FROM m GROUP BY 1) x) AS channels,
+  (SELECT coalesce(json_agg(x ORDER BY x.users DESC, x.lender), '[]') FROM (
+      SELECT lender, count(DISTINCT user_id)::int AS users,
+             count(DISTINCT user_id) FILTER (WHERE tier = 'eligible')::int AS eligible_users
+      FROM m GROUP BY lender ORDER BY 3 DESC, 2 DESC, 1 LIMIT 10) x) AS top_lenders
+"""
+
+
+def analytics(conn: psycopg.Connection, job_id: uuid.UUID | None) -> dict[str, Any]:
+    """Distributions for one upload's users (or every user): profiles, matches, lenders.
+
+    Aggregates only: no names, no emails, no ids leave the database.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(_ANALYTICS_SQL, {"job": job_id}).fetchone()

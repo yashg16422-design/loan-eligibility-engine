@@ -2,7 +2,9 @@
 
 import base64
 import json
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -11,6 +13,7 @@ import pytest
 from loan_engine.api import handler as api
 from loan_engine.api.presign import MAX_UPLOAD_BYTES, clean_filename, post_policy_for
 from loan_engine.api.status import derive_status, to_json_safe
+from tests.unit.apigw import invoke
 
 JOB = uuid.UUID("1ed10381-ea5b-4a02-8715-c0146261aa06")
 NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
@@ -75,53 +78,83 @@ def test_to_json_safe_handles_db_types():
 
 class TestRequestParsing:
     def test_empty_body_is_empty_object(self):
-        assert api.parse_json_body({"body": None}) == {}
-
-    def test_base64_body(self):
-        raw = base64.b64encode(b'{"filename": "u.csv"}').decode()
-        assert api.parse_json_body({"body": raw, "isBase64Encoded": True}) == {"filename": "u.csv"}
+        assert api.parse_json(b"") == {}
+        assert api.parse_json("  ") == {}
 
     @pytest.mark.parametrize("body", ["not json", "[1, 2]"])
     def test_bad_body(self, body):
         with pytest.raises(api.BadRequestError):
-            api.parse_json_body({"body": body})
+            api.parse_json(body)
 
-    def test_job_id_must_be_uuid(self):
-        with pytest.raises(api.BadRequestError):
-            api.parse_job_id({"pathParameters": {"job_id": "../etc"}})
-        assert api.parse_job_id({"pathParameters": {"job_id": str(JOB)}}) == JOB
+    def test_base64_body_is_decoded_before_the_route(self, monkeypatch, lambda_context):
+        """API Gateway may base64 a body; Mangum decodes it, so routes always see JSON."""
+        seen = []
+        monkeypatch.setattr(api, "dependencies", lambda: None)
+        monkeypatch.setattr(api, "parse_json", lambda raw: seen.append(raw) or {})
+        raw = base64.b64encode(b'{"filename": "u.csv"}').decode()
+        invoke({"routeKey": "POST /uploads", "body": raw, "isBase64Encoded": True}, lambda_context)
+        assert seen == [b'{"filename": "u.csv"}']
 
 
 class TestRouting:
-    def call(self, event, monkeypatch):
+    def test_unknown_path_is_404_and_unknown_method_405(self, monkeypatch, lambda_context):
         monkeypatch.setattr(api, "dependencies", lambda: None)
-        return api.handler(event, None)
-
-    def test_unknown_route_is_404(self, monkeypatch, lambda_context):
-        res = api.handler({"routeKey": "DELETE /everything"}, lambda_context)
-        assert res["statusCode"] == 404
+        res = invoke({"routeKey": "GET /no/such/page"}, lambda_context)
+        assert (res["statusCode"], json.loads(res["body"])) == (404, {"error": "not found"})
+        res = invoke({"routeKey": "DELETE /everything"}, lambda_context)
+        assert res["statusCode"] == 405 and "error" in json.loads(res["body"])
 
     def test_ui_is_served_as_html(self, monkeypatch, lambda_context):
         monkeypatch.setattr(api, "dependencies", lambda: None)
-        res = api.handler({"routeKey": "GET /"}, lambda_context)
+        res = invoke({"routeKey": "GET /upload"}, lambda_context)
         assert res["statusCode"] == 200
         assert res["headers"]["content-type"].startswith("text/html")
+        assert res["headers"]["x-frame-options"] == "DENY"
         assert "Loan Eligibility Engine" in res["body"]
 
-    def test_bad_input_is_400_not_500(self, monkeypatch, lambda_context):
+    @pytest.mark.parametrize(
+        "event",
+        [
+            {"routeKey": "GET /uploads/{job_id}", "pathParameters": {"job_id": "nope"}},
+            {"routeKey": "GET /analytics", "queryStringParameters": {"job_id": "nope"}},
+        ],
+    )
+    def test_bad_input_is_400_not_500(self, monkeypatch, lambda_context, event):
         monkeypatch.setattr(api, "dependencies", lambda: None)
-        event = {"routeKey": "GET /uploads/{job_id}", "pathParameters": {"job_id": "nope"}}
-        assert api.handler(event, lambda_context)["statusCode"] == 400
+        res = invoke(event, lambda_context)
+        assert (res["statusCode"], json.loads(res["body"])) == (
+            400,
+            {"error": "job_id must be a UUID"},
+        )
 
     def test_unexpected_error_is_a_generic_500(self, monkeypatch, lambda_context):
-        def boom(event, deps):
+        def boom(*args, **kwargs):
             raise RuntimeError("db password is hunter2")
 
-        monkeypatch.setattr(api, "dependencies", lambda: None)
-        monkeypatch.setitem(api.ROUTES, "GET /", boom)
-        res = api.handler({"routeKey": "GET /"}, lambda_context)
+        monkeypatch.setattr(api.static, "resolve", boom)
+        res = invoke({"routeKey": "GET /"}, lambda_context)
         assert res["statusCode"] == 500
         assert "hunter2" not in res["body"]  # internals never leak to the client
+
+    def test_json_keeps_db_numbers_as_numbers(self, monkeypatch, lambda_context):
+        """FastAPI's response models would write a Decimal as a string; ours must not."""
+
+        @contextmanager
+        def fake_db(_deps):
+            yield object()
+
+        monkeypatch.setattr(api, "dependencies", lambda: None)
+        monkeypatch.setattr(api, "db", fake_db)
+        monkeypatch.setattr(
+            api.repository,
+            "ops_runs",
+            lambda conn: [{"run_id": JOB, "cost": Decimal("0.0012"), "at": NOW}],
+        )
+        res = invoke({"routeKey": "GET /ops/runs"}, lambda_context)
+        assert json.loads(res["body"]) == [
+            {"run_id": str(JOB), "cost": 0.0012, "at": "2026-10-09T12:00:00+00:00"}
+        ]
+        assert res["headers"]["cache-control"] == "no-store"
 
 
 class TestCreateUploadRoute:
@@ -152,8 +185,10 @@ class TestCreateUploadRoute:
 
         deps = api.Dependencies(db_host="h", db_secret_arn="arn", bucket="b", s3=FakeS3())
         monkeypatch.setattr(api, "dependencies", lambda: deps)
+        monkeypatch.setattr(api, "token_key", lambda arn: b"k" * 32)
         monkeypatch.setattr(api, "cached_db_credentials", lambda arn: None)
         monkeypatch.setattr(api, "connect", lambda *a, **k: FakeConn())
+        monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn: 0)  # under the cap
         monkeypatch.setattr(
             api.repository,
             "create_job",
@@ -161,7 +196,7 @@ class TestCreateUploadRoute:
         )
 
         event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "C:\\x\\users.csv"})}
-        res = api.handler(event, lambda_context)
+        res = invoke(event, lambda_context)
 
         assert res["statusCode"] == 201, res["body"]
         body = json.loads(res["body"])
@@ -170,3 +205,41 @@ class TestCreateUploadRoute:
         assert signed["Key"] == f"raw/{job_id}.csv"
         assert signed["Conditions"] == post_policy_for(job_id).conditions
         assert body["upload"]["url"].startswith("https://b.s3.ap-southeast-2")
+        # The browser that created the upload gets a key that proves it may delete it.
+        from loan_engine.api import tokens
+
+        owner = tokens.verify(body["delete_key"], api.upload_key(deps), int(time.time()))
+        assert owner == job_id
+
+
+class TestDatabaseBlips:
+    def test_connect_is_retried_once(self, monkeypatch):
+        import psycopg
+
+        from loan_engine.common import db as dbmod
+        from loan_engine.common.secrets import DbCredentials
+
+        calls = []
+
+        def flaky(**kwargs):
+            calls.append(kwargs["host"])
+            if len(calls) == 1:
+                raise psycopg.errors.ConnectionTimeout("connection timeout expired")
+            return "conn"
+
+        monkeypatch.setattr(dbmod.psycopg, "connect", flaky)
+        monkeypatch.setattr(dbmod, "RETRY_PAUSE_SECONDS", 0)
+        assert dbmod.connect("h", "app", DbCredentials("u", "p")) == "conn"
+        assert calls == ["h", "h"]
+
+    def test_unreachable_database_is_a_503_not_a_500(self, monkeypatch, lambda_context):
+        import psycopg
+
+        def down(_deps):
+            raise psycopg.errors.ConnectionTimeout("connection timeout expired")
+
+        monkeypatch.setattr(api, "dependencies", lambda: None)
+        monkeypatch.setattr(api, "db", down)
+        res = invoke({"routeKey": "GET /ops/runs"}, lambda_context)
+        assert res["statusCode"] == 503
+        assert "try again" in json.loads(res["body"])["error"]

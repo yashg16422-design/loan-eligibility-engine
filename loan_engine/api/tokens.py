@@ -17,6 +17,7 @@ import uuid
 VERSION = b"v1"  # part of the signed message: a future format can't be confused with this one
 CHECK_TTL_SECONDS = 24 * 3600  # instant check: the visitor came to the site
 EMAIL_TTL_SECONDS = 14 * 24 * 3600  # link in the notification email: read days later
+UPLOAD_KEY_TTL_SECONDS = 30 * 24 * 3600  # the uploader's browser may delete its upload for 30 days
 
 
 class InvalidTokenError(ValueError):
@@ -64,3 +65,9 @@ def bearer(headers: dict[str, str] | None) -> str:
     value = (headers or {}).get("authorization", "")
     scheme, _, token = value.partition(" ")
     return token.strip() if scheme.lower() == "bearer" else ""
+
+
+def derived_key(key: bytes, purpose: bytes) -> bytes:
+    """A separate 32-byte key per purpose, so a token minted for one use (an upload's delete
+    key) can never be replayed as another (a dashboard link), even for the same UUID."""
+    return hmac.new(key, b"purpose:" + purpose, hashlib.sha256).digest()

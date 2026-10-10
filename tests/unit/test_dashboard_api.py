@@ -6,13 +6,16 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
+from fastapi.routing import APIRoute
 
 from loan_engine.api import handler as api
 from loan_engine.api import instant_check, static, tokens
 from loan_engine.api.preferences import PreferencesError, parse_preferences
 from loan_engine.common.validation import DEFAULT_RULES, validate_csv
+from tests.unit.apigw import invoke
 
 KEY = b"k" * 32
 USER = uuid.UUID("33f22eb9-6487-4c15-8e43-5ff59be31a9b")
@@ -153,10 +156,19 @@ class TestStatic:
         assert static.resolve("handler.py", root) is None
         assert static.resolve("assets/missing.js", root) is None
 
-    def test_binary_is_base64(self, root):
-        res = static.response(static.resolve("logo.png", root))
-        assert res["isBase64Encoded"] is True
+    def test_binary_is_base64_through_the_lambda(self, root, monkeypatch, lambda_context):
+        monkeypatch.setattr(static, "STATIC_DIR", root)
+        monkeypatch.setattr(api, "dependencies", lambda: None)
+        res = invoke({"routeKey": "GET /app/{proxy+}", "pathParameters": {"proxy": "logo.png"}})
+        assert res["isBase64Encoded"] is True and res["body"] == "iVBORw=="
         assert res["headers"]["content-type"] == "image/png"
+        page = invoke({"routeKey": "GET /app/{proxy+}", "pathParameters": {"proxy": "dashboard"}})
+        assert page["body"] == "<!doctype html>"  # client-side route -> index.html
+        assert page["headers"]["cache-control"] == "no-cache"
+        asset = invoke(
+            {"routeKey": "GET /app/{proxy+}", "pathParameters": {"proxy": "assets/app-1a2b.js"}}
+        )
+        assert "immutable" in asset["headers"]["cache-control"]
 
 
 # ---------------------------------------------------------------- routes
@@ -191,7 +203,7 @@ def call(route, lambda_context, body=None, token=None):
         event["body"] = json.dumps(body)
     if token:
         event["headers"]["authorization"] = f"Bearer {token}"
-    res = api.handler(event, lambda_context)
+    res = invoke(event, lambda_context)
     return res["statusCode"], json.loads(res["body"])
 
 
@@ -254,10 +266,31 @@ class TestMeRoutes:
         assert status == 200 and saved["uid"] == USER and saved["alerts"] is True
 
 
+def route_keys() -> set[str]:
+    """Every FastAPI endpoint as an API Gateway route key ("{proxy:path}" is "{proxy+}")."""
+    return {
+        f"{m} {r.path.replace(':path}', '+}')}"
+        for r in api.app.routes
+        if isinstance(r, APIRoute)
+        for m in r.methods
+    }
+
+
 def test_every_route_is_wired_in_serverless_yml():
     """A route in the code but not in serverless.yml would silently 404 in production."""
-    events = set(re.findall(r"- httpApi: (\S+ \S+)", (ROOT / "serverless.yml").read_text()))
-    assert set(api.ROUTES) == events
+    text = (ROOT / "serverless.yml").read_text()
+    events = set(re.findall(r"- httpApi: (\S+ \S+)", text))
+    # Object form (routes with an authorizer): method + path on the next lines.
+    events |= {f"{m} {p}" for m, p in re.findall(r"method: (\S+)\n\s+path: (\S+)", text)}
+    assert route_keys() == events
+
+
+def test_account_routes_require_the_cognito_authorizer():
+    text = (ROOT / "serverless.yml").read_text()
+    guarded = re.findall(r"method: (\S+)\n\s+path: (\S+)\n\s+authorizer: \{ name: cognito \}", text)
+    admin_only = {"DELETE /uploads", "DELETE /uploads/{job_id}"}
+    expected = {r for r in route_keys() if " /account" in r or r in admin_only}
+    assert {f"{m} {p}" for m, p in guarded} == expected
 
 
 class TestEmailTokens:
@@ -284,10 +317,13 @@ class TestEmailTokens:
         event = {"routeKey": "POST /internal/email-tokens", "headers": {}, "body": json.dumps(body)}
         if secret is not None:
             event["headers"]["x-webhook-secret"] = secret
-        res = api.handler(event, lambda_context)
+        res = invoke(event, lambda_context)
         return res["statusCode"], json.loads(res["body"])
 
-    def test_signs_one_link_per_user_valid_for_two_weeks(self, secrets, lambda_context):
+    def test_signs_one_link_per_user_valid_for_two_weeks(
+        self, secrets, monkeypatch, lambda_context
+    ):
+        monkeypatch.setattr(api.repository, "awaiting_notification", lambda conn, ids: set(ids))
         status, body = self.post(lambda_context, {"user_ids": [str(USER)]}, self.SECRET)
         assert status == 200
         token = body["tokens"][str(USER)]
@@ -303,3 +339,296 @@ class TestEmailTokens:
     @pytest.mark.parametrize("ids", [[], ["nope"], [str(USER)] * 51, "x"])
     def test_bad_body_is_400(self, secrets, lambda_context, ids):
         assert self.post(lambda_context, {"user_ids": ids}, self.SECRET)[0] == 400
+
+
+class TestAccounts:
+    CLAIMS: ClassVar[dict[str, str]] = {
+        "sub": "c0ffee-sub",
+        "email": "aarav@example.org",
+        "email_verified": "true",
+        "token_use": "id",
+    }
+
+    def event(self, route, claims=None, body=None, path=None):
+        e = {
+            "routeKey": route,
+            "headers": {},
+            "requestContext": {"authorizer": {"jwt": {"claims": claims or {}}}},
+        }
+        if body is not None:
+            e["body"] = json.dumps(body)
+        if path:
+            e["pathParameters"] = path
+        return e
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            {},
+            {**CLAIMS, "token_use": "access"},
+            {**CLAIMS, "email_verified": "false"},
+            {**CLAIMS, "sub": ""},
+        ],
+    )
+    def test_only_a_verified_id_token_is_accepted(self, deps, lambda_context, claims):
+        res = invoke(self.event("GET /account", claims), lambda_context)
+        assert res["statusCode"] == 401
+
+    @pytest.mark.parametrize(
+        ("outcome", "status"),
+        [("saved", 200), ("already_saved", 200), ("taken", 409), ("not_found", 409)],
+    )
+    def test_save_profile_needs_a_genuine_results_link(
+        self, deps, monkeypatch, lambda_context, outcome, status
+    ):
+        seen = {}
+        monkeypatch.setattr(api.repository, "upsert_account", lambda conn, sub, email: {})
+        monkeypatch.setattr(
+            api.repository,
+            "claim_profile",
+            lambda conn, sub, uid: seen.update(sub=sub, uid=uid) or outcome,
+        )
+        token = tokens.sign(USER, int(time.time()) + 60, KEY)
+        res = invoke(
+            self.event("POST /account/profiles", self.CLAIMS, {"token": token}), lambda_context
+        )
+        assert res["statusCode"] == status
+        assert seen == {
+            "sub": "c0ffee-sub",
+            "uid": USER,
+        }  # the profile goes to the signed-in account
+
+    def test_forged_results_link_is_refused(self, deps, lambda_context):
+        res = invoke(
+            self.event("POST /account/profiles", self.CLAIMS, {"token": "a.b.c"}), lambda_context
+        )
+        assert res["statusCode"] == 400
+
+    def test_open_only_your_own_profile(self, deps, monkeypatch, lambda_context):
+        monkeypatch.setattr(api.repository, "owns_profile", lambda conn, sub, uid: uid == USER)
+        ok = invoke(
+            self.event(
+                "POST /account/profiles/{user_id}/open", self.CLAIMS, path={"user_id": str(USER)}
+            ),
+            lambda_context,
+        )
+        assert ok["statusCode"] == 200
+        assert tokens.verify(json.loads(ok["body"])["token"], KEY, int(time.time())) == USER
+        other = invoke(
+            self.event(
+                "POST /account/profiles/{user_id}/open",
+                self.CLAIMS,
+                path={"user_id": str(uuid.uuid4())},
+            ),
+            lambda_context,
+        )
+        assert other["statusCode"] == 404
+
+    def test_auth_config_exposes_public_ids_only(self, deps, monkeypatch, lambda_context):
+        monkeypatch.setattr(
+            api,
+            "dependencies",
+            lambda: api.Dependencies(
+                db_host="h",
+                db_secret_arn="a",
+                bucket="b",
+                s3=None,
+                user_pool_id="pool",
+                user_pool_client_id="client",
+            ),
+        )
+        body = json.loads(invoke({"routeKey": "GET /auth/config"}, lambda_context)["body"])
+        assert set(body) == {"region", "user_pool_id", "client_id"}
+
+
+class TestSite:
+    def test_landing_has_no_spa_fallback(self, tmp_path):
+        (tmp_path / "index.html").write_text("<!doctype html>")
+        (tmp_path / "geo").mkdir()
+        (tmp_path / "geo" / "globe.json").write_text("{}")
+        assert static.resolve("", tmp_path, spa=False).path.name == "index.html"
+        assert (
+            static.resolve("geo/globe.json", tmp_path, spa=False).content_type == "application/json"
+        )
+        assert static.resolve("dashboard", tmp_path, spa=False) is None  # not silently the landing
+        assert static.resolve("../handler.py", tmp_path, spa=False) is None
+
+    def test_home_falls_back_to_the_upload_page_when_the_landing_is_not_built(
+        self, monkeypatch, lambda_context
+    ):
+        monkeypatch.setattr(api, "dependencies", lambda: None)
+        monkeypatch.setattr(static, "SITE_DIR", Path("/nonexistent"))
+        res = invoke({"routeKey": "GET /"}, lambda_context)
+        assert "Loan Eligibility Engine" in res["body"]
+        upload = invoke({"routeKey": "GET /upload"}, lambda_context)
+        assert "Loan Eligibility Engine" in upload["body"]
+
+
+def test_email_tokens_only_for_users_about_to_be_emailed(deps, monkeypatch, lambda_context):
+    other = uuid.uuid4()
+    monkeypatch.setattr(api, "token_key", lambda arn: KEY if arn == "t" else b"s" * 48)
+    monkeypatch.setattr(
+        api,
+        "dependencies",
+        lambda: api.Dependencies(
+            db_host="h",
+            db_secret_arn="a",
+            bucket="b",
+            s3=None,
+            token_secret_arn="t",
+            webhook_secret_arn="w",
+        ),
+    )
+    monkeypatch.setattr(api.repository, "awaiting_notification", lambda conn, ids: {USER})
+    event = {
+        "routeKey": "POST /internal/email-tokens",
+        "headers": {"x-webhook-secret": "s" * 48},
+        "body": json.dumps({"user_ids": [str(USER), str(other)]}),
+    }
+    body = json.loads(invoke(event, lambda_context)["body"])
+    assert set(body["tokens"]) == {str(USER)}  # the arbitrary id gets nothing
+
+
+def test_upload_tickets_have_a_daily_cap(deps, monkeypatch, lambda_context):
+    monkeypatch.setattr(api, "connect", lambda *a, **k: contextmanager(lambda: (yield object()))())
+    monkeypatch.setattr(api, "cached_db_credentials", lambda arn: None)
+    monkeypatch.setattr(
+        api.repository, "csv_uploads_last_24h", lambda conn: api.MAX_UPLOADS_PER_DAY
+    )
+    res = invoke(
+        {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}, lambda_context
+    )
+    assert res["statusCode"] == 429
+
+
+# ---------------------------------------------------------------- data reset
+
+
+class TestDataReset:
+    CLAIMS: ClassVar[dict[str, str]] = TestAccounts.CLAIMS
+    ADMIN: ClassVar[dict[str, str]] = {**TestAccounts.CLAIMS, "cognito:groups": "[admin]"}
+    JOB = uuid.UUID("0b7f9c1e-2a51-4f6e-9d3c-3f5d8a1c2b4e")
+
+    event = TestAccounts.event
+
+    @pytest.mark.parametrize(
+        ("raw", "groups"),
+        [
+            ("[admin]", {"admin"}),
+            ("[ops admin]", {"ops", "admin"}),
+            (["admin"], {"admin"}),
+            ("", set()),
+            (None, set()),
+        ],
+    )
+    def test_cognito_groups_claim(self, raw, groups):
+        assert api.cognito_groups(raw) == groups
+
+    def test_deleting_uploads_needs_the_admin_group(self, deps, monkeypatch, lambda_context):
+        calls = []
+        monkeypatch.setattr(
+            api.repository, "purge_upload", lambda conn, job: calls.append(job) or 7
+        )
+        monkeypatch.setattr(
+            api.repository,
+            "purge_csv_uploads",
+            lambda conn: calls.append("all") or {"deleted_users": 9, "uploads": 2},
+        )
+        path = {"job_id": str(self.JOB)}
+        for route, p in (("DELETE /uploads/{job_id}", path), ("DELETE /uploads", None)):
+            res = invoke(self.event(route, self.CLAIMS, path=p), lambda_context)
+            assert res["statusCode"] == 403
+        assert calls == []  # nothing was deleted for a non-admin
+
+        one = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
+        assert (one["statusCode"], json.loads(one["body"])["deleted_users"]) == (200, 7)
+        every = invoke(self.event("DELETE /uploads", self.ADMIN), lambda_context)
+        assert json.loads(every["body"]) == {"deleted_users": 9, "uploads": 2}
+        assert calls == [self.JOB, "all"]
+
+    def test_purge_of_a_missing_or_busy_job(self, deps, monkeypatch, lambda_context):
+        path = {"job_id": str(self.JOB)}
+        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, job: None)
+        res = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
+        assert res["statusCode"] == 404
+
+        def busy(conn, job):
+            raise api.repository.JobBusyError
+
+        monkeypatch.setattr(api.repository, "purge_upload", busy)
+        res = invoke(self.event("DELETE /uploads/{job_id}", self.ADMIN, path=path), lambda_context)
+        assert res["statusCode"] == 409
+
+    def test_account_says_whether_it_is_an_admin(self, deps, monkeypatch, lambda_context):
+        monkeypatch.setattr(api.repository, "upsert_account", lambda conn, sub, email: {})
+        monkeypatch.setattr(api.repository, "account_profiles", lambda conn, sub: [])
+        for claims, admin in ((self.CLAIMS, False), (self.ADMIN, True)):
+            res = invoke(self.event("GET /account", claims), lambda_context)
+            assert json.loads(res["body"])["is_admin"] is admin
+
+    @pytest.mark.parametrize(
+        ("outcome", "status"),
+        [("deleted", 200), ("not_found", 200), ("csv_user", 409), ("busy", 409)],
+    )
+    def test_delete_my_check(self, deps, monkeypatch, lambda_context, outcome, status):
+        seen = []
+        monkeypatch.setattr(
+            api.repository, "delete_check", lambda conn, uid: seen.append(uid) or outcome
+        )
+        assert call("DELETE /me", lambda_context)[0] == 401
+        token = tokens.sign(USER, int(time.time()) + 60, KEY)
+        assert call("DELETE /me", lambda_context, token=token)[0] == status
+        assert seen == [USER]  # only the user the link was signed for
+
+    def test_start_fresh_keeps_the_account(self, deps, monkeypatch, lambda_context):
+        seen = []
+        monkeypatch.setattr(
+            api.repository,
+            "clear_account_profiles",
+            lambda conn, sub, uid=None: seen.append((sub, uid))
+            or {"deleted_checks": 1, "unlinked": 1},
+        )
+        invoke(self.event("DELETE /account/profiles", self.CLAIMS), lambda_context)
+        invoke(
+            self.event(
+                "DELETE /account/profiles/{user_id}", self.CLAIMS, path={"user_id": str(USER)}
+            ),
+            lambda_context,
+        )
+        assert seen == [("c0ffee-sub", None), ("c0ffee-sub", USER)]
+
+
+class TestUploadRecords:
+    JOB = uuid.UUID("5d1c6a3e-9b0f-4f61-8d2a-7c3b9e1f0a42")
+
+    def test_list_of_uploads(self, deps, monkeypatch, lambda_context):
+        rows = [{"job_id": self.JOB, "original_filename": "users.csv", "users_now": 4}]
+        monkeypatch.setattr(api.repository, "list_uploads", lambda conn: rows)
+        status, body = call("GET /uploads", lambda_context)
+        assert status == 200 and body == [{**rows[0], "job_id": str(self.JOB)}]
+
+    def test_uploader_deletes_with_its_key_and_nobody_else_can(
+        self, deps, monkeypatch, lambda_context
+    ):
+        purged = []
+        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, j: purged.append(j) or 4)
+        good = tokens.sign(self.JOB, int(time.time()) + 60, api.upload_key(deps))
+        other_job = tokens.sign(uuid.uuid4(), int(time.time()) + 60, api.upload_key(deps))
+        dashboard_link = tokens.sign(self.JOB, int(time.time()) + 60, KEY)  # wrong purpose
+        path = {"job_id": str(self.JOB)}
+        for key in (None, "a.b.c", other_job, dashboard_link):
+            event = {"routeKey": "DELETE /uploads/{job_id}/users", "pathParameters": path}
+            if key:
+                event["headers"] = {"x-upload-key": key}
+            assert invoke(event, lambda_context)["statusCode"] == 403
+        assert purged == []
+        res = invoke(
+            {
+                "routeKey": "DELETE /uploads/{job_id}/users",
+                "pathParameters": path,
+                "headers": {"x-upload-key": good},
+            },
+            lambda_context,
+        )
+        assert res["statusCode"] == 200 and json.loads(res["body"])["deleted_users"] == 4
+        assert purged == [self.JOB]

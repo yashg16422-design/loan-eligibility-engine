@@ -23,6 +23,8 @@
   main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
   h1 { font-size: 1.5rem; margin: 0 0 4px; }
   .sub { color: var(--muted); margin: 0 0 24px; }
+  .sub a { color: var(--accent); text-underline-offset: 3px; }
+  .sub + .sub { margin-top: -16px; font-size: 14px; }
   .card {
     background: var(--card); border: 1px solid var(--line); border-radius: 12px;
     padding: 20px; margin-bottom: 16px;
@@ -63,6 +65,7 @@
 <main>
   <h1>Loan Eligibility Engine</h1>
   <p class="sub">Upload a users CSV to start the pipeline: ingest, match to loan products, notify.</p>
+  <p class="sub">Also: <a href="/app/check">check one person's eligibility</a> · <a href="/app/">the full app</a> (runs, crawl health, errors)</p>
 
   <section class="card" aria-labelledby="upload-h">
     <h2 id="upload-h" hidden>Upload</h2>
@@ -146,7 +149,7 @@ function render(p) {
   } else if (j.status === "FAILED") {
     setStep("s-ingest", "error", j.error || "ingest failed");
   } else if (j.status === "EXPIRED") {
-    setStep("s-ingest", "error", "the file never arrived; please upload again");
+    setStep("s-ingest", "error", "the file never arrived or could not be processed; please upload again");
   } else if (j.status === "RETRYING") {
     setStep("s-ingest", "warn", `attempt ${j.attempts} failed; retrying automatically`);
   } else {

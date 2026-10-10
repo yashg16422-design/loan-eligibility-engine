@@ -1,85 +1,52 @@
-# Dashboard design system (borrower dashboard + ops console)
+# App design system (/app): one product with the landing page
 
-**Mode:** Operate. People come here to finish a task: see what they qualify for, compare,
-shortlist, and understand why. Scannability beats expression. The landing page (built
-separately) persuades; this surface works.
+**Mode:** Operate. The landing (`web/`, Persuade) tells the story; the app is where people
+work. It uses the **landing's world exactly**, so moving from `/` to `/app/` feels like one
+product: `web/src/styles/landing.css` is the source of these tokens.
 
-**References (owner's choice):** daqconsulting.com for the world (dark graphite,
-hairline structure, a self-building pipeline diagram, monospace only for measurements),
-and weevolveit.com for one strip of real proof. Techniques are borrowed, not their visuals.
-See `docs/extras/REFERENCE_NOTES.md`.
+## Tokens (gothic, on the landing's structure)
 
-## Tokens
+The app keeps the landing's structure (sharp hairline boxes, ticks, Inter + JetBrains Mono,
+colour as meaning) in its own gothic palette, the owner's direction: violet-black night,
+amethyst for every "yes", display serif for titles.
 
-| Token | Value | Role |
+| Token | Value | Meaning |
 |---|---|---|
-| `--ink` | `#101315` | page (graphite, cool) |
-| `--panel` | `#161A1D` | rails, tables, inputs |
-| `--raise` | `#1D2226` | hover / selected rows |
-| `--line` | `rgb(233 236 238 / 0.08)` | hairlines (structure, never decoration) |
-| `--text` | `#E9ECEE` | primary text (16:1 on ink) |
-| `--muted` | `#9AA3A9` | secondary text (7.2:1 on ink) |
-| `--marigold` | `#F2A93B` | the one accent: primary action, current selection, focus |
-| `--leaf` | `#7CC4A0` | semantic only: "eligible" marker |
+| `bg` | `#07050A` | violet-black page |
+| `panel` / `panel-2` | `#0E0A14` / `#16101F` | boxes, menus |
+| `line` / `line-hi` | `#2A2236` / `#463A5C` | hairlines (structure, never decoration) |
+| `fg` / `mute` / `dim` | `#EFE9F7` / `#A196B4` / `#5B5069` | text |
+| `acc` (amethyst) | `#A07CFF` | yes, eligible, results, focus |
+| `acc-deep` | `#4F22B0` | the filled primary button, selected segments, selection |
+| `coral` (crimson) | `#E5536B` | rejection, not eligible, failures, delete |
+| `amber` (antique gold) | `#D8B45F` | lenders and their rules, "may qualify" |
+| `peri` (verdigris) | `#6FB8A7` | the AI and the engine (Workflow B) |
 
-Marigold, not acid green or vermilion: it is the colour of Surat's garland markets and
-reads as "go" without borrowing a fintech-green cliché. It is used ONLY for actions,
-selection and focus; never for decoration or inactive states.
+Colour is information: a colour is used only for what it means above.
+**Type:** Cormorant Garamond 700 for `h1`/`h2` only (page and section titles); Inter Variable
+for everything else; JetBrains Mono for numbers that are measurements and for small labels.
+**Shape:** sharp, radius 0 everywhere. A box is a hairline border on `panel`, with an optional
+28 px coloured tick on its top edge saying what it is. **Space:** 1480 px max width, gutters up
+to 64 px, 28-32 px inside boxes, 96 px between sections: the app breathes like the landing.
 
-**Type:** Geist Variable for everything (one family, Operate). Geist Mono Variable ONLY for
-numbers that are measurements: rates, rupees, scores, counts in tables. Scale 1.2:
-12 / 14 / 16 / 19 / 23 / 28 / 33 px. Sentence case everywhere. No eyebrows, no all-caps.
+## Motion
+None for decoration. Things move only when real data changes: a bar grows when its number
+arrives (`grow-x` / `grow-y`, 0.6 s ease-out), a workflow box turns glacier when that stage
+finishes. No entrance animations, no loops, no spinners. Reduced motion: transitions off.
 
-**Shape:** radius 6px for controls and panels, 999px for the segmented control only.
-**Depth:** none by default; a raised surface is a lighter fill, not a shadow. Dialog-like
-overlays get one soft shadow (`0 24px 48px rgb(0 0 0 / .45)`).
+## Information architecture
+- **Overview `/app/`** (assignment first): bulk CSV upload (also in the header on every page) →
+  the live pipeline for that upload (Upload → Validate and load → Workflow B → Workflow C) →
+  charts that form as the run reports numbers → analytics of the uploaded users → Workflows
+  A, B, C, E with their triggers and real numbers → recent runs.
+- **Check `/app/check`**: four numbers through the same pipeline.
+- **My matches `/app/dashboard`**: summary, save prompt, **Top 5** → **Also eligible** →
+  **May qualify** → **Not eligible (with the exact rule missed)** → **Quick tips**; What if and
+  Compare alongside.
+- **Account `/app/account`**: Cognito sign-up (email code) / sign-in; saved checks (remove one, or start fresh); daily picks.
+- **Data reset**: destructive actions confirm in place (the button becomes a sentence naming what goes, with Delete / Cancel), crimson only; admins see *Reset uploaded data* on Overview.
 
-## Layout
-
-```
-Dashboard (>= 1024px)
-+----------------------------------------------------------------------------+
-| ClickPe Match                                   Shortlist (3)   Engine     |
-+----------------------------------------------------------------------------+
-| You qualify outright for 9 offers from 6 lenders. 31 more are possible.    |  <- sentence, not a hero metric
-| Rs 52,000 a month, score 760, salaried, 31                     Adjust      |
-+---------------------------------------------+------------------------------+
-| [All 40] [Eligible 9] [May qualify 31] [Saved] |  What if...             |
-| sort: best fit v                              |  income  ----o----       |
-|---------------------------------------------- |  score   ------o--       |
-| Axis Bank            9.5% - 21.6%   up to 40L |  age     --o------       |
-|   best on BankBazaar, also direct  [save]     |  +4 lenders at 790:      |
-|   > why: income 3.5x the minimum ...          |   HDFC, ICICI ...        |
-| ...                                           |----------------------    |
-|                                               |  Compare (3)  [open]     |
-+---------------------------------------------+------------------------------+
-Mobile: single column; the what-if panel becomes a section after the list.
-```
-
-The list is one lender per row (the best platform for that lender), so the same bank
-never appears three times; the other platforms open inline. Left-aligned throughout.
-
-## Signature moments (boldness spent in exactly two places)
-
-1. **Dashboard: the what-if simulator.** Moving a slider re-evaluates every product with
-   the same rules as the SQL (hard criteria + compiled rules) and the rows that change
-   tier animate in place (layout animation). This is the product's point of view.
-2. **Ops: the pipeline builds itself** once, from the real latest run: users x products
-   -> naive pairs -> classes -> AI calls -> matches -> emails, packets travelling between
-   nodes (the DAQ technique). Reduced motion: drawn complete, no travel.
-
-Everything else stays still. Motion on interaction only: 160-220 ms, ease-out.
-
-## Self-review against generated-design defaults (and what changed)
-
-- "Big number + small label" headline: replaced by one plain sentence with the numbers.
-- Identical rounded cards for offers: replaced by a dense, aligned list (rows, not cards).
-- Mono as a "technical" costume: mono restricted to measurements.
-- Near-black + one neon accent: graphite + marigold, with the accent rationed to actions.
-- Glass/blur: not used. DAQ's glassy cards were decoration; here a fill change does it.
-- Numbered markers: only in the ops pipeline, where the order is the content.
-
-## Quality floor
-Keyboard reachable, visible focus ring (marigold, 2px offset), `prefers-reduced-motion`,
-contrast >= 4.5:1 for text, themed selection and scrollbars, tabular numerals, skeleton
-loading, empty and error states written as directions.
+## Components
+Custom `Select` (listbox, keyboard: arrows, Enter, Escape, type-ahead) replaces native selects.
+Charts are plain elements (`ui/charts.tsx`): numbers printed next to every bar, no background
+tracks, log scale only for the funnel (590,000 to 5). Rows, not cards, for long lists.

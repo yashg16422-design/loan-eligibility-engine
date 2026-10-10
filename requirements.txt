@@ -1,2 +1,4 @@
 psycopg[binary]==3.2.10
 aws-lambda-powertools==3.35.0
+fastapi==0.142.4
+mangum==0.22.0

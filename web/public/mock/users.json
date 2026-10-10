@@ -1,0 +1,18 @@
+[
+ {
+  "user_id": "33f22eb9-6487-4c15-8e43-5ff59be31a9b",
+  "name": "Aarav Sharma",
+  "monthly_income": 48000,
+  "credit_score": 742,
+  "employment_status": "salaried",
+  "age": 29
+ },
+ {
+  "user_id": "a81929ca-97f8-479e-ae39-58d447603233",
+  "name": "Meera Nair",
+  "monthly_income": 135000,
+  "credit_score": 790,
+  "employment_status": "self_employed",
+  "age": 41
+ }
+]

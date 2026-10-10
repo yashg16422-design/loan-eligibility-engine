@@ -11,13 +11,19 @@ GRANT CONNECT, TEMPORARY ON DATABASE app TO app_ingest, n8n_workflows;
 GRANT USAGE ON SCHEMA public TO app_ingest, n8n_workflows;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_ingest, n8n_workflows;
 
--- app_ingest: api, ingest and dlq-handler Lambdas.
+-- app_ingest: the api and ingest Lambdas.
 -- Writes the ingestion tables; reads match/notify progress for the UI tracker.
 GRANT SELECT, INSERT, UPDATE ON upload_jobs, users, upload_rejects TO app_ingest;
 GRANT SELECT ON pipeline_runs, notifications TO app_ingest;
 -- Borrower dashboard + ops view (api Lambda): read the results, own only the preferences.
 GRANT SELECT ON matches, loan_products, criteria_rules, crawl_runs, workflow_errors TO app_ingest;
 GRANT SELECT, INSERT, UPDATE ON user_preferences TO app_ingest;
+-- Accounts (Cognito-backed): the api Lambda creates and links accounts, never deletes one.
+GRANT SELECT, INSERT, UPDATE ON accounts, account_profiles TO app_ingest;
+-- Data reset (006): an admin deletes an upload's users, a person deletes their own check, an
+-- account unlinks its saved checks. Child rows (matches, notifications, preferences, links)
+-- go by ON DELETE CASCADE, which runs as the table owner, so no DELETE grant is needed there.
+GRANT DELETE ON users, account_profiles TO app_ingest;
 
 -- n8n_workflows: the n8n Postgres credential (Workflows A, B, C).
 -- Reads users; may only touch the match-progress columns of upload_jobs.

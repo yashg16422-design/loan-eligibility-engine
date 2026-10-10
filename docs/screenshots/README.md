@@ -9,7 +9,7 @@ Open n8n first: `scripts/tunnel-n8n.sh`, then http://localhost:5678.
 
 | # | File | Where | Must be visible |
 |---|---|---|---|
-| 1 | `01-upload-ui.png` | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/ after uploading `tests/fixtures/demo_users.csv` | All four steps finished, the funnel line, the rejected row |
+| 1 | `01-upload-ui.png` | https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/ after **Upload CSV** with `tests/fixtures/demo_users.csv` | The four pipeline boxes done, the rows and funnel charts, the rejected row |
 | 2 | `02-n8n-workflows.png` | n8n home (Overview) | A, A1, B, B1, C, E, E1 listed, published toggles |
 | 3 | `03-cred-postgres.png` | n8n > Credentials > "RDS app (n8n_workflows)" | Host, database `app`, user `n8n_workflows`, SSL; password masked |
 | 4 | `04-cred-aws-assume-role.png` | Credentials > "AWS n8n role (assume)" | Assume Role, role ARN, external ID; no access keys |
@@ -23,9 +23,9 @@ Open n8n first: `scripts/tunnel-n8n.sh`, then http://localhost:5678.
 | 12 | `12-B1-funnel-output.png` | B1 > Executions > the 10k run > "Finish run" node output | users_in 10000, naive_pairs 590000, classes 164, correctness_ok true |
 | 13 | `13-workflow-E.png` | Workflow E canvas (or its execution of the E1 drill) | Error Trigger, Record error, Alert due?, SES |
 | 14 | `14-email.png` | Gmail, the newest "you may qualify" email | Best pick, top picks with "why", the **View all N matches** button, the To: alias |
-| 15 | `15-dashboard.png` | Click that button (or /app/ after a check) | Summary sentence, one row expanded ("Why it fits"), What if panel |
+| 15 | `15-dashboard.png` | Click that button (or /app/check, then run a check) | Summary, Top 5, one row expanded ("Why it fits"), What if |
 | 16 | `16-dashboard-compare.png` | Same page: compare 2-3 offers, scroll to Compare | EMI, total interest, "costs less" line, checklist |
-| 17 | `17-engine.png` | /app/ops | The pipeline (5,90,000 pairs > 164 classes > 5 AI calls), recent runs |
+| 17 | `17-engine.png` | /app/ (Overview) | Upload analytics charts and the Workflows A, B, C, E boxes |
 | 18 | `18-github-ci.png` | GitHub > Actions > latest run | Both jobs green (test, dashboard) |
 
 Tip for 12: if the 10k run's execution is gone, any upload run's "Finish run" output shows

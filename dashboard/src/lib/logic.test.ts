@@ -149,3 +149,37 @@ describe("fit display", () => {
     }
   });
 });
+
+import { whyNot } from "./eligibility";
+
+describe("why not eligible", () => {
+  it("names every failing published rule in plain words", () => {
+    const u = { monthly_income: 15000, credit_score: 690, age: 31, employment_status: "salaried" as const };
+    expect(whyNot(base, u)).toEqual([
+      "Needs ₹25,000 a month (you have ₹15,000)",
+      "Needs a credit score of 700 (yours is 690)",
+    ]);
+    expect(whyNot({ ...base, employment_types: ["business"] }, profile)).toEqual(["Only for business owners"]);
+    expect(whyNot(base, profile)).toEqual([]); // in reach: nothing to say
+  });
+
+  it("explains a failing compiled rule when the published criteria pass", () => {
+    const p = { ...base, other_criteria_text: "max age 30", compiled_rules: [{ field: "age", op: "<=", value: 30, applies_to: "any" }] as CatalogProduct["compiled_rules"], compiled_requirements: [] };
+    expect(whyNot(p, profile)).toEqual(["At most age 30"]);
+  });
+
+  it("agrees with decide() on every live product", () => {
+    for (const p of catalog) expect(whyNot(p, profile).length > 0).toBe(decide(p, profile) === "not_eligible");
+  });
+});
+
+import { tips } from "./tips";
+
+describe("quick tips", () => {
+  it("are specific to the person and always end with the enquiry advice", () => {
+    const low = { ...profile, credit_score: 690 };
+    const t = tips([], [], [base, { ...base, lender: "Other", lender_key: "o", min_credit_score: 740 }], low);
+    expect(t[0]).toBe("Raising your credit score to 700 would bring Test Bank into reach.");
+    expect(t.at(-1)).toMatch(/hard enquiry/);
+  });
+});

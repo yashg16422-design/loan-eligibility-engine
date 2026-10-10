@@ -1,24 +1,29 @@
-// A three-route app does not need a router library: History API + one hook.
+// Four routes do not need a router library: History API + one hook.
 import { useEffect, useState, type AnchorHTMLAttributes, type MouseEvent } from "react";
 
 export const BASE = "/app";
-export type Route = "check" | "dashboard" | "ops";
+export type Route = "overview" | "check" | "dashboard" | "account";
 
-function current(): Route {
-  const path = window.location.pathname.replace(BASE, "").replace(/^\/+|\/+$/g, "");
-  return path === "dashboard" || path === "ops" ? path : "check";
+const PATHS: Record<Route, string> = { overview: "", check: "check", dashboard: "dashboard", account: "account" };
+
+export function routeFromPath(pathname: string): Route {
+  const path = pathname.replace(BASE, "").replace(/^\/+|\/+$/g, "");
+  if (path === "check" || path === "dashboard" || path === "account") return path;
+  return "overview"; // "", "ops" (old links) and anything unknown
 }
 
+export const href = (to: Route) => `${BASE}/${PATHS[to]}`;
+
 export function navigate(to: Route) {
-  window.history.pushState(null, "", `${BASE}/${to === "check" ? "" : to}`);
+  if (window.location.pathname !== href(to)) window.history.pushState(null, "", href(to));
   window.dispatchEvent(new PopStateEvent("popstate"));
   window.scrollTo({ top: 0 });
 }
 
 export function useRoute(): Route {
-  const [route, setRoute] = useState(current);
+  const [route, setRoute] = useState(() => routeFromPath(window.location.pathname));
   useEffect(() => {
-    const on = () => setRoute(current());
+    const on = () => setRoute(routeFromPath(window.location.pathname));
     window.addEventListener("popstate", on);
     return () => window.removeEventListener("popstate", on);
   }, []);
@@ -31,5 +36,5 @@ export function Link({ to, ...rest }: { to: Route } & AnchorHTMLAttributes<HTMLA
     e.preventDefault();
     navigate(to);
   };
-  return <a href={`${BASE}/${to === "check" ? "" : to}`} onClick={onClick} {...rest} />;
+  return <a href={href(to)} onClick={onClick} {...rest} />;
 }
