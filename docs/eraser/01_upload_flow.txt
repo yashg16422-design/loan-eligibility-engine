@@ -1,0 +1,196 @@
+// Eraser diagram type: CLOUD ARCHITECTURE DIAGRAM
+// What it shows: one 5-row CSV travelling browser -> API -> S3 -> SQS -> ingest worker -> RDS -> n8n,
+// with the file and function that handles each step, the numbered edges, notes, and failure paths.
+// Solid arrows = the happy path. Dotted arrows = failures, retries and side effects.
+// Yellow boxes = notes (why it was built this way).
+
+title Upload pipeline - five.csv from browser to n8n
+colorMode pastel
+styleMode shadow
+typeface clean
+direction right
+
+// =====================================================================
+// 1. THE BROWSER  (loan_engine/api/ui.html)
+// =====================================================================
+browserGroup [label: "1 BROWSER - loan_engine/api/ui.html", icon: monitor, color: blue] {
+  submitHandler [label: "form submit handler - checks .csv and size 1 B to 50 MB", icon: mouse-pointer]
+  createTicket [label: "createTicket() - asks API for a pass", icon: send]
+  uploadToS3 [label: "uploadToS3() - carries the file to S3", icon: upload]
+  pollRender [label: "poll() and render() - asks done yet every 2 s", icon: refresh-cw]
+}
+
+// =====================================================================
+// 2. API GATEWAY  (serverless.yml  httpApi routes)
+// =====================================================================
+apiGateway [label: "API Gateway HTTP API - POST /uploads and GET /uploads/job_id", icon: aws-api-gateway, color: purple]
+noteThrottle [label: "NOTE Throttle rate 10 per s, burst 20, before the Lambda runs. Wraps each request into an event dictionary.", icon: info, color: yellow]
+
+// =====================================================================
+// AWS VPC  (private network: no NAT, no inbound internet)
+// =====================================================================
+vpcGroup [label: "AWS VPC 10.0.0.0/16 - region ap-southeast-2 Sydney", icon: aws-vpc, color: green] {
+
+  apiLambdaGroup [label: "2 api Lambda - loan_engine/api/  timeout 10 s, memory 256 MB", icon: aws-lambda, color: orange] {
+    handlerFn [label: "handler.py handler() + Mangum - turns the event into a web request", icon: zap]
+    createUpload [label: "handler.py create_upload() - the boss of POST /uploads", icon: play]
+    postPolicy [label: "presign.py post_policy_for() - writes the pass rules", icon: shield]
+    createJob [label: "repository.py create_job() - writes the waiting note", icon: edit]
+    presignPost [label: "boto3 generate_presigned_post() - signs the pass locally, no network", icon: key]
+    getUpload [label: "handler.py get_upload() - answers done yet", icon: help-circle]
+    getJobProgress [label: "repository.py get_job_progress() - 4 queries: job, rejects, match run, notifications", icon: search]
+    deriveStatus [label: "status.py derive_status() - adds RETRYING and EXPIRED", icon: clock]
+  }
+
+  ingestLambdaGroup [label: "10 ingest Lambda - loan_engine/ingest/  timeout 120 s, memory 512 MB, batch 1, max 2 at once", icon: aws-lambda, color: orange] {
+    ingestHandler [label: "ingest/handler.py handler() - receives the queue message", icon: inbox]
+    parseSqs [label: "events.py parse_sqs_record() - opens message, ignores TestEvent", icon: mail]
+    jobIdFromKey [label: "common/s3_keys.py job_id_from_event_key() - key must be exactly raw/uuid.csv", icon: check-circle]
+    credsFn [label: "common/secrets.py cached_db_credentials() - fetch DB password once", icon: lock]
+    connectDb [label: "common/db.py connect() - TLS, 5 s timeout, 1 retry", icon: link]
+    bumpAttempts [label: "repository.py bump_attempts() - attempts + 1", icon: plus-circle]
+    claimJob [label: "repository.py claim_job() - FOR UPDATE SKIP LOCKED then PROCESSING", icon: flag]
+    iterLines [label: "common/s3_stream.py iter_text_lines() - streams file line by line", icon: align-left]
+    validateCsv [label: "common/validation.py validate_csv() + validate_row() - checks every row", icon: filter]
+    loadUsers [label: "repository.py load_users() - COPY to TEMP table then upsert", icon: database]
+    saveRejects [label: "repository.py save_rejects() - stores bad rows with reason", icon: x-circle]
+    completeJob [label: "repository.py complete_job() - COMPLETED + counts, then COMMIT", icon: check]
+    failJob [label: "repository.py fail_job() - marks FAILED with error", icon: alert-triangle]
+    notifier [label: "common/notifier.py N8nWebhookNotifier - pings n8n after COMMIT only", icon: bell]
+  }
+
+  rdsGroup [label: "RDS PostgreSQL 16 - private, TLS forced, db.t4g.micro", icon: aws-rds, color: blue] {
+    appDb [label: "database app - 17 tables, see diagram 03", icon: database]
+    tUploadJobs [label: "upload_jobs - one waiting note per upload: status, attempts, counts", icon: table]
+    tUsers [label: "users - one row per person: income, score, job type, age", icon: table]
+    tRejects [label: "upload_rejects - one row per bad CSV row with reason", icon: table]
+    tLater [label: "pipeline_runs, match_classes, match_pairs, matches, notifications - written later by n8n", icon: table]
+    n8nDb [label: "database n8n - n8n's own notebook: workflows, credentials, execution history", icon: database]
+    noteRoles [label: "NOTE Logins: master (migrate Lambda only), app_ingest (api + ingest), n8n_workflows (n8n), n8n_meta (owns n8n database only). See diagram 04.", icon: info, color: yellow]
+  }
+
+  secretsMgr [label: "Secrets Manager - DB passwords, webhook secret (reached by a private VPC endpoint)", icon: aws-secrets-manager, color: red]
+}
+
+// =====================================================================
+// AWS services outside the VPC
+// =====================================================================
+s3Group [label: "S3 data bucket - public access blocked, encrypted", icon: aws-s3, color: green] {
+  s3Object [label: "raw/job_id.csv - the file lands here", icon: file-text]
+  noteS3 [label: "NOTE CORS allows POST from the API origin only. Raw files auto-delete after 7 days (personal data). S3 itself checks the signed pass: signature, expiry, exact key, text/csv, size.", icon: info, color: yellow]
+}
+
+sqsQueue [label: "SQS ingest queue - visibility 720 s, retries up to 3", icon: aws-sqs, color: pink]
+sqsDlq [label: "SQS dead-letter queue - kept 14 days", icon: aws-sqs, color: red]
+alarmFlow [label: "CloudWatch alarm DLQ not empty -> SNS -> email to your +alias", icon: aws-cloudwatch, color: red]
+
+// =====================================================================
+// n8n  (next lesson)
+// =====================================================================
+n8nGroup [label: "n8n on EC2 - Docker, reached only via SSM tunnel", icon: aws-ec2, color: purple] {
+  webhookB [label: "Workflow B webhook /webhook/ingest-complete (header X-Webhook-Secret)", icon: webhook]
+  sweeper [label: "Workflow B sweeper - every 10 min finds COMPLETED jobs nobody matched", icon: clock]
+  workflowB [label: "Workflow B matching - SQL classes, rules, LLM only on the rest", icon: git-merge]
+  workflowC [label: "Workflow C - one email per user to a Gmail +alias via SES", icon: mail]
+}
+
+// =====================================================================
+// NOTES (yellow)
+// =====================================================================
+noteOrder [label: "NOTE Order matters: the DB note is written BEFORE the pass is signed, so S3 only ever receives files for jobs the DB knows. Limit 50 CSV uploads per day.", icon: info, color: yellow]
+notePass [label: "NOTE The pass: key raw/job_id.csv only, Content-Type text/csv, size 1 B to 50 MB, expires in 600 s. Proof lives in the form FIELDS (policy + signature), not in headers.", icon: info, color: yellow]
+noteQueue [label: "NOTE Why a queue: retries, a dead-letter queue, and max 2 workers so the small DB is not flooded. Visibility 720 s = 6 x the Lambda timeout 120 s, so a slow run is never handed out twice.", icon: info, color: yellow]
+noteClaim [label: "NOTE Only one worker can claim a job. A duplicate event gets False and exits quietly (Outcome DUPLICATE).", icon: info, color: yellow]
+noteValidate [label: "NOTE Pure Python, no I/O. Header matched by name. Bad row -> reject with reason (e.g. credit_score_out_of_range for row 6). Same user_id twice: last wins, earlier = duplicate_in_file. Only a missing column or non-UTF-8 fails the WHOLE file.", icon: info, color: yellow]
+noteLoad [label: "NOTE COPY into a private TEMP table, then ONE upsert. IS DISTINCT FROM = unchanged users are not touched, so they are not re-matched. xmax = 0 tells insert from update.", icon: info, color: yellow]
+noteCommit [label: "NOTE COMMIT makes users, rejects and COMPLETED visible together. Any error before = full rollback.", icon: info, color: yellow]
+noteNotify [label: "NOTE Best effort: 4 tries, waits 1 s 2 s 4 s, 5 s timeout each. If n8n is down the sweeper recovers the job. The webhook is a shortcut, not a dependency.", icon: info, color: yellow]
+noteResult [label: "NOTE Result for five.csv: total_rows 5, inserted 4, updated 0, unchanged 0, rejected 1. Re-upload of the same file: inserted 0, unchanged 4.", icon: info, color: yellow]
+noteStates [label: "NOTE Stored states: AWAITING_UPLOAD, PROCESSING, COMPLETED, FAILED. Computed only when asked: RETRYING (attempts > 0) and EXPIRED (no attempt after 15 min).", icon: info, color: yellow]
+
+// =====================================================================
+// HAPPY PATH (numbered)
+// =====================================================================
+submitHandler > createTicket: 0 user clicks upload
+createTicket > apiGateway: 1 POST /uploads body filename five.csv
+apiGateway > handlerFn: 2 event version 2.0 routeKey POST /uploads
+handlerFn > createUpload: 3 Mangum hands the request to FastAPI
+createUpload > postPolicy: 4 get the pass rules
+createUpload > createJob: 5 write the note FIRST
+createJob > tUploadJobs: 6 INSERT status AWAITING_UPLOAD attempts 0
+createUpload > presignPost: 7 sign the pass
+createUpload > apiGateway: 8 returns dict, Mangum makes statusCode 201
+apiGateway > createTicket: 9 HTTP 201 JSON job_id + upload url + fields + delete_key, cache-control no-store
+createTicket > uploadToS3: 10 hands over the pass
+uploadToS3 > s3Object: 11 POST multipart/form-data, signed fields first, file LAST, Origin header added by browser
+s3Object --> uploadToS3: 12 HTTP 204 success (or 403 if the pass is wrong, nothing stored)
+s3Object > sqsQueue: 13 ObjectCreated event, only prefix raw/ and suffix .csv
+sqsQueue > ingestHandler: 14 wakes the worker, ApproximateReceiveCount 1
+ingestHandler > parseSqs: 15 open the message
+parseSqs > jobIdFromKey: 16 validate the S3 key
+jobIdFromKey > credsFn: 17 key ok, now log in
+credsFn > secretsMgr: 18 read DB password via VPC endpoint
+credsFn > connectDb: 19 password in hand
+connectDb > bumpAttempts: 20 connected
+bumpAttempts > tUploadJobs: 21 attempts + 1 (autocommit, survives rollback)
+bumpAttempts > claimJob: 22 next
+claimJob > tUploadJobs: 23 SELECT FOR UPDATE SKIP LOCKED then status PROCESSING (inside the transaction)
+claimJob > iterLines: 24 claimed, now read the file
+iterLines > s3Object: 25 get_object streamed line by line, BOM stripped
+iterLines > validateCsv: 26 lines flow in
+validateCsv > loadUsers: 27 4 valid rows (Aarav, Meera, Kabir, Ananya)
+loadUsers > tUsers: 28 COPY staging_users then upsert, 4 inserted
+loadUsers > saveRejects: 29 1 rejected row
+saveRejects > tRejects: 30 COPY row 6 reason credit_score_out_of_range
+saveRejects > completeJob: 31 almost done
+completeJob > tUploadJobs: 32 status COMPLETED + counts, COMMIT
+completeJob > notifier: 33 only after COMMIT
+notifier > webhookB: 34 POST job_id with X-Webhook-Secret, private network, port 5678 open to Lambda SG only
+webhookB > workflowB: 35 Workflow B takes over
+workflowB > tLater: 36 writes pipeline_runs, classes, pairs, matches
+workflowB > workflowC: 37 run finished
+workflowC > tLater: 38 writes notifications
+
+// =====================================================================
+// POLLING PATH (the browser keeps asking)
+// =====================================================================
+pollRender > apiGateway: P1 GET /uploads/job_id every 2 s until finished (stops after 20 min)
+apiGateway > getUpload: P2 route GET /uploads/job_id
+getUpload > getJobProgress: P3 load progress
+getJobProgress > tUploadJobs: P4 read the note
+getJobProgress > tRejects: P4 read first 20 rejects
+getJobProgress > tLater: P4 read latest match run and notification counts
+getJobProgress > deriveStatus: P5 add computed states
+getUpload > pollRender: P6 JSON job + rejects + match_run + notifications, render() draws the steps
+
+// =====================================================================
+// FAILURE AND RETRY PATHS (dotted)
+// =====================================================================
+claimJob -- ingestHandler: F1 no row to claim = duplicate or already done, exit quietly
+validateCsv -- failJob: F2 missing column or not UTF-8, FAILED at once, no retry
+ingestHandler -- sqsQueue: F3 random error, re-raise, SQS redelivers after 720 s, up to 3 receives
+ingestHandler -- failJob: F4 on the 3rd try mark FAILED in a separate transaction, message consumed
+failJob -- tUploadJobs: F4 status FAILED + error text
+sqsQueue -- sqsDlq: F5 Lambda killed (timeout or out of memory) 3 times, message moves to the dead-letter queue
+sqsDlq -- alarmFlow: F6 alarm emails you
+notifier -- sweeper: F7 n8n down, webhook gave up quietly
+sweeper -- tUploadJobs: F8 within 10 min finds COMPLETED jobs with match_status empty and picks them up
+sweeper -- workflowB: F9 starts matching
+s3Object -- tUploadJobs: F10 pass invalid or file never uploaded, note stays AWAITING_UPLOAD, shown as EXPIRED after 15 min
+
+// =====================================================================
+// NOTES ATTACHED TO THEIR STEPS (dotted)
+// =====================================================================
+noteThrottle -- apiGateway
+noteOrder -- createUpload
+notePass -- postPolicy
+noteS3 -- s3Object
+noteQueue -- sqsQueue
+noteClaim -- claimJob
+noteValidate -- validateCsv
+noteLoad -- loadUsers
+noteCommit -- completeJob
+noteNotify -- notifier
+noteResult -- tUploadJobs
+noteStates -- deriveStatus
+noteRoles -- appDb

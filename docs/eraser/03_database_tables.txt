@@ -1,0 +1,282 @@
+// Eraser diagram type: ENTITY RELATIONSHIP DIAGRAM
+// What it shows: every table in database `app` (17 incl. schema_migrations), its columns, and the foreign keys.
+// Source of truth: sql/001_schema.sql, 002_crawler_v2.sql, 003_matching.sql, 004_dashboard.sql,
+// 005_accounts.sql, 006_data_reset.sql (and loan_engine/migrate/handler.py for schema_migrations).
+// Colours = purpose:
+//   BLUE   upload tables      (written by the ingest worker - this is what your 5-row CSV touches)
+//   GREEN  loan product tables (written by Workflow A, the crawler)
+//   ORANGE matching tables     (written by Workflow B)
+//   PURPLE notification + error tables (Workflow C and the error handler)
+//   PINK   dashboard + account tables (the extras, written by the api Lambda)
+//   GRAY   bookkeeping
+// Line reading: users.upload_job_id > upload_jobs.job_id  means MANY users belong to ONE upload job.
+// "-" means one-to-one.
+// Note: llm_decisions (in PLAN.md) was DROPPED by 003_matching.sql and replaced by criteria_rules.
+
+title Database app - all tables and how they connect
+colorMode pastel
+styleMode shadow
+typeface clean
+
+// ============================ BLUE: UPLOAD ============================
+upload_jobs [icon: clipboard, color: blue] {
+  job_id uuid pk
+  s3_key string
+  original_filename string
+  status string
+  attempts int
+  total_rows int
+  inserted int
+  updated int
+  unchanged int
+  rejected int
+  error string
+  created_at timestamp
+  completed_at timestamp
+  match_status string
+  match_started_at timestamp
+  matched_at timestamp
+  source string
+  purged_at timestamp
+}
+
+users [icon: user, color: blue] {
+  user_id uuid pk
+  name string
+  email string
+  monthly_income int
+  credit_score int
+  employment_status string
+  age int
+  upload_job_id uuid
+  created_at timestamp
+  updated_at timestamp
+}
+
+upload_rejects [icon: x-circle, color: blue] {
+  id bigint pk
+  job_id uuid
+  row_number int
+  raw_line string
+  reason string
+}
+
+// ============================ GREEN: LOAN PRODUCTS ============================
+crawl_sources [icon: globe, color: green] {
+  source_id string pk
+  channel string
+  discovery string
+  url string
+  link_pattern string
+  lender_slug string
+  fetch_mode string
+  enabled boolean
+  notes string
+}
+
+loan_products [icon: credit-card, color: green] {
+  product_id uuid pk
+  lender string
+  lender_key string
+  channel string
+  source_url string
+  product_name string
+  product_url string
+  interest_rate_min numeric
+  interest_rate_max numeric
+  rate_type string
+  min_monthly_income int
+  min_credit_score int
+  max_credit_score int
+  min_age int
+  max_age int
+  employment_types string_array
+  loan_amount_min bigint
+  loan_amount_max bigint
+  tenure_months_max int
+  other_criteria_text string
+  raw_extracted jsonb
+  criteria_json jsonb
+  criteria_hash string
+  verification string
+  is_active boolean
+  first_seen_at timestamp
+  last_seen_at timestamp
+  last_changed_at timestamp
+}
+
+crawl_runs [icon: search, color: green] {
+  run_id uuid pk
+  source_url string pk
+  status string
+  products_found int
+  error string
+  started_at timestamp
+  finished_at timestamp
+  channel string
+  lender_slug string
+  http_status int
+  changed boolean
+  llm_input_tokens int
+  llm_output_tokens int
+}
+
+// ============================ ORANGE: MATCHING ============================
+pipeline_runs [icon: activity, color: orange] {
+  run_id uuid pk
+  mode string
+  job_id uuid
+  status string
+  started_at timestamp
+  finished_at timestamp
+  users_in int
+  products_in int
+  naive_pairs bigint
+  pairs_after_sql bigint
+  classes int
+  class_product_pairs int
+  rule_decided int
+  llm_candidates int
+  llm_cache_hits int
+  llm_calls int
+  llm_input_tokens int
+  llm_output_tokens int
+  llm_cost_usd_est numeric
+  matches_new int
+  matches_superseded int
+  matches_unchanged int
+  emails_sent int
+  emails_skipped_demo int
+  emails_failed int
+  scope_product_ids uuid_array
+  cuts jsonb
+  residual_texts int
+  rules_compiled int
+  not_eligible_pairs int
+  correctness_ok boolean
+  error string
+}
+
+criteria_rules [icon: book, color: orange] {
+  criteria_text_hash string pk
+  prompt_version string pk
+  rules jsonb
+  requirements jsonb
+  model_id string
+  llm_input_tokens int
+  llm_output_tokens int
+  created_at timestamp
+}
+
+match_classes [icon: layers, color: orange] {
+  run_id uuid pk
+  class_id int pk
+  income_floor int
+  score_floor int
+  age_floor int
+  employment_status string
+  users int
+}
+
+match_pairs [icon: git-merge, color: orange] {
+  run_id uuid pk
+  class_id int pk
+  product_id uuid pk
+  tier string
+  stage string
+  requirements string
+}
+
+matches [icon: check-square, color: orange] {
+  match_id bigint pk
+  user_id uuid
+  product_id uuid
+  job_id uuid
+  match_run_id uuid
+  tier string
+  requirements string
+  stage_decided string
+  llm_reason string
+  status string
+  created_at timestamp
+  superseded_at timestamp
+  notified_at timestamp
+  fit_score numeric
+  fit_reasons jsonb
+}
+
+// ============================ PURPLE: NOTIFICATION + ERRORS ============================
+notifications [icon: mail, color: purple] {
+  id bigint pk
+  user_id uuid
+  alias_email string
+  job_id uuid
+  run_id uuid
+  status string
+  ses_message_id string
+  error string
+  created_at timestamp
+}
+
+workflow_errors [icon: alert-triangle, color: purple] {
+  id bigint pk
+  workflow string
+  node string
+  message string
+  execution_id string
+  created_at timestamp
+}
+
+// ============================ PINK: DASHBOARD + ACCOUNTS ============================
+user_preferences [icon: star, color: pink] {
+  user_id uuid pk
+  shortlist uuid_array
+  top3 uuid_array
+  hidden uuid_array
+  alerts boolean
+  updated_at timestamp
+}
+
+accounts [icon: users, color: pink] {
+  account_id string pk
+  email string
+  daily_picks boolean
+  created_at timestamp
+  last_seen_at timestamp
+}
+
+account_profiles [icon: link, color: pink] {
+  account_id string pk
+  user_id uuid pk
+  saved_at timestamp
+}
+
+// ============================ GRAY: BOOKKEEPING ============================
+schema_migrations [icon: list, color: gray] {
+  filename string pk
+}
+
+// ============================ RELATIONSHIPS (foreign keys) ============================
+// upload tables
+users.upload_job_id > upload_jobs.job_id
+upload_rejects.job_id > upload_jobs.job_id
+
+// matching tables
+pipeline_runs.job_id > upload_jobs.job_id
+match_classes.run_id > pipeline_runs.run_id
+match_pairs.run_id > match_classes.run_id
+match_pairs.product_id > loan_products.product_id
+matches.user_id > users.user_id
+matches.product_id > loan_products.product_id
+matches.job_id > upload_jobs.job_id
+matches.match_run_id > pipeline_runs.run_id
+
+// notifications
+notifications.user_id > users.user_id
+notifications.job_id > upload_jobs.job_id
+notifications.run_id > pipeline_runs.run_id
+
+// dashboard + accounts
+user_preferences.user_id - users.user_id
+account_profiles.account_id > accounts.account_id
+account_profiles.user_id - users.user_id

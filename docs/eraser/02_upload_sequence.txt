@@ -1,0 +1,107 @@
+// Eraser diagram type: SEQUENCE DIAGRAM
+// What it shows: the same five.csv upload, but as a conversation over TIME (top to bottom).
+// Read it like a chat log: who says what to whom, and what comes back.
+// Messages are numbered by hand. Solid arrow = a request. Dashed arrow = a reply.
+
+title Upload of five.csv - who talks to whom, in order
+colorMode pastel
+styleMode shadow
+typeface clean
+
+Browser [icon: monitor, color: blue]
+ApiGateway [icon: aws-api-gateway, color: purple]
+ApiLambda [icon: aws-lambda, color: orange]
+Postgres [icon: aws-rds, color: blue]
+S3 [icon: aws-s3, color: green]
+SQS [icon: aws-sqs, color: pink]
+IngestLambda [icon: aws-lambda, color: orange]
+SecretsManager [icon: aws-secrets-manager, color: red]
+N8n [icon: server, color: purple]
+
+// ------------------------------------------------------------------
+// PHASE 1 - ask for a pass  (ui.html createTicket -> api/handler.py create_upload)
+// ------------------------------------------------------------------
+Browser > ApiGateway: 1 POST /uploads with filename five.csv (nothing else, the file stays on your machine)
+ApiGateway > ApiLambda: 2 after throttle 10 per s burst 20, passes an event dictionary to handler() via Mangum
+ApiLambda > ApiLambda: 3 create_upload makes job_id, post_policy_for writes the pass rules (key raw/job_id.csv, text/csv, 1 B to 50 MB, 600 s)
+ApiLambda > Postgres: 4 create_job INSERT into upload_jobs, status AWAITING_UPLOAD, attempts 0
+Postgres --> ApiLambda: 5 row saved
+ApiLambda > ApiLambda: 6 generate_presigned_post signs the pass locally, no network call
+ApiLambda --> ApiGateway: 7 dict becomes statusCode 201 + headers + JSON body
+ApiGateway --> Browser: 8 HTTP 201 with job_id, upload url + signed fields, max_bytes, expires_in, delete_key (cache-control no-store)
+
+// ------------------------------------------------------------------
+// PHASE 2 - carry the file to S3  (ui.html uploadToS3)
+// ------------------------------------------------------------------
+Browser > S3: 9 POST multipart/form-data. Fields first (Content-Type, key, policy, x-amz-signature ...), file LAST. No Authorization header, the form fields are the proof
+S3 > S3: 10 checks signature, expiry, exact key, Content-Type text/csv, size, and the CORS origin
+alt [label: "pass is valid"] {
+  S3 --> Browser: 11 HTTP 204 No Content (CORS header lets the page read it)
+  S3 > SQS: 12 ObjectCreated event, only for prefix raw/ and suffix .csv
+}
+else [label: "pass invalid or expired"] {
+  S3 --> Browser: 11 HTTP 403 XML error, nothing stored. Job stays AWAITING_UPLOAD and shows EXPIRED after 15 min
+}
+
+// ------------------------------------------------------------------
+// PHASE 3 - the ingest worker  (loan_engine/ingest/handler.py)
+// ------------------------------------------------------------------
+SQS > IngestLambda: 13 wakes handler() with 1 message (batch 1, max 2 workers), ApproximateReceiveCount 1
+IngestLambda > IngestLambda: 14 parse_sqs_record opens the body, skips TestEvent, job_id_from_event_key demands exactly raw/uuid.csv
+IngestLambda > SecretsManager: 15 cached_db_credentials reads the DB password (private VPC endpoint, cached after the first call)
+SecretsManager --> IngestLambda: 16 username + password
+IngestLambda > Postgres: 17 connect() with TLS, 5 s timeout, 1 retry
+IngestLambda > Postgres: 18 bump_attempts UPDATE attempts + 1 (own commit, survives a later rollback)
+IngestLambda > Postgres: 19 BEGIN transaction. claim_job SELECT ... FOR UPDATE SKIP LOCKED then status PROCESSING (invisible to others until COMMIT)
+
+alt [label: "job claimed"] {
+  IngestLambda > S3: 20 get_object, iter_text_lines streams the file line by line (BOM stripped)
+  S3 --> IngestLambda: 21 7 lines of text, header + 5 rows
+  IngestLambda > IngestLambda: 22 validate_csv header by name, then validate_row on each row
+  IngestLambda > IngestLambda: 23 rows 2 to 5 valid. Row 6 Bad Row rejected: credit_score 950 above 900 -> credit_score_out_of_range
+  IngestLambda > Postgres: 24 load_users CREATE TEMP TABLE staging_users, COPY 4 rows, then one upsert (ON CONFLICT user_id, IS DISTINCT FROM). Result inserted 4 updated 0 unchanged 0
+  IngestLambda > Postgres: 25 save_rejects COPY 1 row into upload_rejects
+  IngestLambda > Postgres: 26 complete_job status COMPLETED, total_rows 5, inserted 4, rejected 1. COMMIT, everything becomes visible at once
+}
+else [label: "duplicate event or job already done"] {
+  IngestLambda > IngestLambda: 20 claim_job returns False, Outcome DUPLICATE, exit quietly, nothing changes
+}
+
+// ------------------------------------------------------------------
+// PHASE 4 - tell n8n  (common/notifier.py), only AFTER the commit
+// ------------------------------------------------------------------
+IngestLambda > N8n: 27 POST http://private-ip:5678/webhook/ingest-complete, header X-Webhook-Secret, body job_id
+alt [label: "n8n answers"] {
+  N8n --> IngestLambda: 28 HTTP 2xx, Workflow B starts matching
+}
+else [label: "n8n is down"] {
+  IngestLambda > IngestLambda: 28 retries after 1 s, 2 s, 4 s (5 s timeout each), then logs and gives up quietly
+  N8n > Postgres: 29 later the 10 minute sweeper finds COMPLETED jobs with no match_status and starts Workflow B anyway
+}
+
+// ------------------------------------------------------------------
+// PHASE 5 - the browser keeps asking  (ui.html poll -> api get_upload)
+// ------------------------------------------------------------------
+loop [label: "every 2 s until finished (gives up after 20 min)"] {
+  Browser > ApiGateway: P1 GET /uploads/job_id
+  ApiGateway > ApiLambda: P2 get_upload()
+  ApiLambda > Postgres: P3 get_job_progress runs 4 queries (job row, first 20 rejects, latest pipeline_runs, notification counts)
+  Postgres --> ApiLambda: P4 rows
+  ApiLambda > ApiLambda: P5 derive_status adds RETRYING or EXPIRED if needed
+  ApiLambda --> Browser: P6 JSON job + rejects + match_run + notifications. render() draws Uploaded, Ingested (5 rows, 4 inserted, 1 rejected), Matched, Notified
+}
+
+// ------------------------------------------------------------------
+// WHAT IF THE WORKER ITSELF FAILS?  (for the same message)
+// ------------------------------------------------------------------
+alt [label: "bad file - missing column or not UTF-8"] {
+  IngestLambda > Postgres: X1 fail_job status FAILED + error text, no retry (retrying cannot help)
+}
+else [label: "random error such as a DB blip"] {
+  IngestLambda > SQS: X2 exception re-raised, message hidden for 720 s, then redelivered (receive 2, receive 3)
+  IngestLambda > Postgres: X3 on the 3rd receive fail_job in a separate transaction, message consumed
+}
+else [label: "Lambda killed - timeout 120 s or out of memory"] {
+  SQS > SQS: X4 after 3 receives the message moves to the dead-letter queue (kept 14 days)
+  SQS > SQS: X5 CloudWatch alarm (DLQ not empty) emails your +alias through SNS. The browser keeps polling and shows EXPIRED after 15 min
+}
