@@ -1,0 +1,9 @@
+Subject: Dhruv, you may qualify for 18 personal loans (best: ICICI Bank)
+
+Hi Dhruv, here are your personal-loan matches.
+Profile: ₹1,31,000/month, credit score 725, self_employed, age 37.
+You match 31 offers from 18 lenders. Top 2:
+* BEST PICK: ICICI Bank (eligible) 9.99% – 16.5% p.a. on the lender's site. Why: your income is 4.4× the minimum, your credit score is +25 vs the minimum.
+- Evil <script>alert(1)</script> Bank (may qualify) from 12% p.a. via BankBazaar. Why: you meet the published criteria. Also needed: 2 years experience <img src=x onerror=alert(1)>
+View all your matches (link valid 14 days): https://example.com/app/dashboard?t=abc
+Indicative eligibility, not a loan offer. Demo: routed to a test inbox, not the CSV address.

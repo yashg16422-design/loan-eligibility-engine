@@ -1,0 +1,159 @@
+"""Golden master: the visible outcome of ingest + matching must not change by accident.
+
+Builds a fresh database, ingests the pinned synthetic 10k file (plus a few bad rows) through
+the production ingest code, runs Workflow B's SQL in order (claim -> Stage 1+2 -> statistics
+-> Stage 3 -> brute-force proof) and compares an order-independent fingerprint with
+tests/fixtures/golden_fingerprint.json.
+
+The fingerprint may only change in a commit that intends to change outcomes, and that commit
+must say why. To regenerate it:
+    GOLDEN_UPDATE=1 PG_TEST_PORT=55432 pytest tests/integration/test_golden.py
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+
+import psycopg
+import pytest
+
+from tests.integration.matching_setup import (
+    PORT,
+    PROMPT_VERSION,
+    ROOT,
+    connect,
+    fresh_schema,
+    ingest_csv,
+    load_products_and_rules,
+    run_sql,
+    stage3,
+)
+from tests.synthetic_users import synthetic_users_csv
+
+pytestmark = pytest.mark.skipif(not PORT, reason="set PG_TEST_PORT to run DB integration tests")
+
+GOLDEN = ROOT / "tests" / "fixtures" / "golden_fingerprint.json"
+# One row per reject reason the validator knows, plus a duplicate of the first data row
+# (the duplicate wins, the original is rejected as duplicate_in_file).
+BAD_ROWS = [
+    "not-a-uuid,Bad Id,bad.id@example.com,50000,700,Salaried,30",
+    "8f14e45f-ceea-467a-9575-0b6bd2e5a001,Bad Email,not-an-email,50000,700,Salaried,30",
+    "8f14e45f-ceea-467a-9575-0b6bd2e5a002,Low Score,low.score@example.com,50000,120,Salaried,30",
+    "8f14e45f-ceea-467a-9575-0b6bd2e5a003,Bad Job,bad.job@example.com,50000,700,Astronaut,30",
+    "8f14e45f-ceea-467a-9575-0b6bd2e5a004,Too Young,too.young@example.com,50000,700,Salaried,12",
+    "8f14e45f-ceea-467a-9575-0b6bd2e5a005,Short Row,short.row@example.com,50000",
+]
+COUNTERS = (
+    "users_in",
+    "products_in",
+    "naive_pairs",
+    "classes",
+    "class_product_pairs",
+    "pairs_after_sql",
+    "rule_decided",
+    "llm_candidates",
+    "not_eligible_pairs",
+    "residual_texts",
+)
+
+
+def golden_csv() -> bytes:
+    base = synthetic_users_csv().decode()
+    first_data_row = base.split("\r\n")[1]
+    extra = [*BAD_ROWS, first_data_row]
+    return (base + "\r\n".join(extra) + "\r\n").encode()
+
+
+def claim(db: psycopg.Connection, job_id: object) -> str:
+    return run_sql(db, "claim.sql", "upload", str(job_id), "")["run_id"]
+
+
+def match(db: psycopg.Connection, job_id: object) -> dict:
+    """Workflow B1 for one upload, in production order."""
+    run_id = claim(db, job_id)
+    funnel = run_sql(db, "stage1_classes.sql", run_id, PROMPT_VERSION)
+    expand = stage3(db, run_id)
+    proof = run_sql(db, "brute_force_check.sql", run_id, PROMPT_VERSION)
+    return {"funnel": funnel, "expand": expand, "proof": proof}
+
+
+def ingest_counts(db: psycopg.Connection, job_id: object) -> dict:
+    row = db.execute(
+        "SELECT status, total_rows, inserted, updated, unchanged, rejected "
+        "FROM upload_jobs WHERE job_id = %s",
+        (job_id,),
+    ).fetchone()
+    reasons = db.execute(
+        "SELECT reason, count(*) FROM upload_rejects WHERE job_id = %s GROUP BY 1 ORDER BY 1",
+        (job_id,),
+    ).fetchall()
+    keys = ("status", "total_rows", "inserted", "updated", "unchanged", "rejected")
+    return {**dict(zip(keys, row, strict=True)), "reject_reasons": dict(reasons)}
+
+
+def fingerprint(db: psycopg.Connection, job_id: object, result: dict) -> dict:
+    rows = db.execute(
+        "SELECT user_id::text, product_id::text, tier, coalesce(requirements, ''), stage_decided "
+        "FROM matches WHERE status = 'active'"
+    ).fetchall()
+    lines = sorted("|".join(r) for r in rows)
+    by_tier = db.execute(
+        "SELECT tier, count(*) FROM matches WHERE status = 'active' GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    by_product = db.execute(
+        "SELECT product_id::text, count(*) FROM matches WHERE status = 'active' "
+        "GROUP BY 1 ORDER BY 1"
+    ).fetchall()
+    return {
+        "ingest": ingest_counts(db, job_id),
+        "matching": {k: result["funnel"][k] for k in COUNTERS}
+        | {
+            "matches_new": result["expand"]["matches_new"],
+            "cuts": result["funnel"]["cuts"],
+            "correctness_ok": result["proof"]["correctness_ok"],
+            "mismatches": result["proof"]["mismatches"],
+        },
+        "matches_by_tier": dict(by_tier),
+        "matches_by_product": dict(by_product),
+        "matches_sha256": hashlib.sha256("\n".join(lines).encode()).hexdigest(),
+    }
+
+
+@pytest.fixture(scope="module")
+def db() -> psycopg.Connection:
+    conn = connect()
+    fresh_schema(conn)
+    load_products_and_rules(conn)
+    yield conn
+    conn.close()
+
+
+@pytest.fixture(scope="module")
+def first_upload(db) -> tuple[object, dict]:
+    job_id = ingest_csv(db, golden_csv())
+    return job_id, match(db, job_id)
+
+
+def test_golden_fingerprint_unchanged(db, first_upload):
+    job_id, result = first_upload
+    got = fingerprint(db, job_id, result)
+    if os.environ.get("GOLDEN_UPDATE") == "1":
+        GOLDEN.write_text(json.dumps(got, indent=2, sort_keys=True) + "\n")
+    expected = json.loads(GOLDEN.read_text())
+    # Compare section by section so a failure names what changed.
+    for section in expected:
+        assert got[section] == expected[section], f"golden section changed: {section}"
+    assert got["matching"]["correctness_ok"] is True
+
+
+def test_same_file_again_changes_nothing(db, first_upload):
+    """Re-uploading the same file: nothing new in users, matches or emails."""
+    job_id = ingest_csv(db, golden_csv())
+    counts = ingest_counts(db, job_id)
+    assert (counts["inserted"], counts["updated"]) == (0, 0)
+    assert counts["unchanged"] == 10_000
+    result = match(db, job_id)
+    assert (result["expand"]["matches_new"], result["expand"]["matches_superseded"]) == (0, 0)
+    assert result["proof"]["mismatches"] == 0

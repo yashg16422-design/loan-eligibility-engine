@@ -541,3 +541,15 @@ test('compile: a lender that publishes no criteria is "may qualify", never plain
   assert.deepEqual(C.pipelineNotes('a; Eligibility details could not be verified automatically: confirm with the lender'),
     ['Eligibility details could not be verified automatically: confirm with the lender']);
 });
+
+// Golden snapshot of Workflow C's wording: any change to the email text must be deliberate.
+// Regenerate with: UPDATE_SNAPSHOT=1 node --test n8n/code/code.test.js
+test('composeEmail output matches the committed snapshot (subject + text body)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const file = path.join(__dirname, '..', '..', 'tests', 'fixtures', 'email_snapshot.txt');
+  const { subject, text } = E.composeEmail({ ...USER, dashboard_url: 'https://example.com/app/dashboard?t=abc' });
+  const got = `Subject: ${subject}\n\n${text}\n`;
+  if (process.env.UPDATE_SNAPSHOT === '1') fs.writeFileSync(file, got);
+  assert.equal(got, fs.readFileSync(file, 'utf8'));
+});
