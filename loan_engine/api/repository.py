@@ -787,6 +787,15 @@ def stored_analytics(conn: psycopg.Connection, job_id: uuid.UUID, version: str) 
     return row[0] if row else None
 
 
+def analytics_snapshot(conn: psycopg.Connection, job_id: uuid.UUID) -> Any:  # noqa: ANN401 - JSON
+    """The last analytics stored for an upload, whatever its version: what the charts showed
+    before its customer records were deleted."""
+    row = conn.execute(
+        "SELECT payload FROM analytics_cache WHERE job_id = %s", (job_id,)
+    ).fetchone()
+    return row[0] if row else None
+
+
 def store_analytics(
     conn: psycopg.Connection, job_id: uuid.UUID, version: str, payload: dict[str, Any]
 ) -> None:

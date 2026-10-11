@@ -524,6 +524,11 @@ def test_upload_tickets_have_a_daily_cap(deps, monkeypatch, lambda_context):
 
 
 class TestDataReset:
+    @pytest.fixture(autouse=True)
+    def no_snapshot(self, monkeypatch):
+        # The analytics snapshot taken before a delete is tested on its own below.
+        monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: None)
+
     CLAIMS: ClassVar[dict[str, str]] = TestAccounts.CLAIMS
     ADMIN: ClassVar[dict[str, str]] = {**TestAccounts.CLAIMS, "cognito:groups": "[admin]"}
     JOB = uuid.UUID("0b7f9c1e-2a51-4f6e-9d3c-3f5d8a1c2b4e")
@@ -865,8 +870,10 @@ def test_analytics_are_cached_until_the_upload_is_rematched_or_deleted(monkeypat
     assert api.cached_analytics(object(), job) == {"n": 1} and len(calls) == 1
     version["v"] = ("2026-10-11T02:00", None)  # re-matched: fresh numbers
     assert api.cached_analytics(object(), job) == {"n": 2}
-    version["v"] = ("2026-10-11T02:00", "2026-10-11T03:00")  # customers deleted
-    assert api.cached_analytics(object(), job) == {"n": 3}
+    version["v"] = ("2026-10-11T02:00", "2026-10-11T03:00")  # customer records deleted
+    monkeypatch.setattr(api.repository, "analytics_snapshot", lambda c, j: {"n": 2})
+    # The charts keep the figures taken before the delete (not a recount of empty tables).
+    assert api.cached_analytics(object(), job) == {"n": 2, "data_deleted": True}
 
 
 class TestConnectionReuse:
@@ -926,3 +933,18 @@ class TestConnectionReuse:
         with api.db(self.DEPS) as conn:
             conn.info.transaction_status = api.TransactionStatus.INTRANS
         assert opened[0].rollbacks == 1
+
+
+def test_analytics_of_a_deleted_upload_are_the_snapshot_taken_before_the_delete(monkeypatch):
+    stored = {"users": 10000, "matches": 258941}
+    monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
+    monkeypatch.setattr(api.repository, "analytics_version", lambda c, j: ("t1", "deleted-at"))
+    monkeypatch.setattr(api.repository, "analytics_snapshot", lambda c, j: stored)
+    monkeypatch.setattr(
+        api.repository, "analytics", lambda c, j: pytest.fail("must not recompute zeros")
+    )
+    monkeypatch.setattr(
+        api.repository, "store_analytics", lambda *a: pytest.fail("must not overwrite")
+    )
+    got = api.cached_analytics(object(), uuid.uuid4())
+    assert got == {**stored, "data_deleted": True}

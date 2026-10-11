@@ -763,3 +763,27 @@ def test_cancel_stops_an_upload_before_its_file_is_loaded(db):
     db.execute("UPDATE upload_jobs SET match_status = 'DONE' WHERE job_id = %s", (loaded,))
     assert repository.cancel_upload(db, loaded) == "finished"
     assert repository.cancel_upload(db, uuid.uuid4()) is None
+
+
+def test_analytics_snapshot_survives_deleting_the_records(db):
+    """Deleting an upload's customers keeps the analytics taken just before (shown as kept)."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "INSERT INTO accounts (account_id, email) VALUES ('snap-sub', 'snap@example.org') "
+        "ON CONFLICT DO NOTHING"
+    )
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "s.csv", account_id="snap-sub")
+    db.execute("UPDATE upload_jobs SET status = 'COMPLETED' WHERE job_id = %s", (job,))
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age,"
+        " upload_job_id) SELECT gen_random_uuid(), 's' || g || '@example.com', 50000, 700,"
+        " 'salaried', 30, %s FROM generate_series(1, 4) g",
+        (job,),
+    )
+    before = repository.analytics(db, job)
+    repository.store_analytics(db, job, "t|None", before)
+    assert repository.purge_upload(db, job) == 4
+    assert repository.analytics(db, job)["users"] == 0  # the tables really are empty now
+    assert repository.analytics_snapshot(db, job)["users"] == before["users"] == 4

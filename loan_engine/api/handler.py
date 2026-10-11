@@ -603,6 +603,11 @@ def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
     version = repository.analytics_version(conn, job_id)
     if version is None:
         return repository.analytics(conn, job_id)
+    if version[1] is not None:
+        # Records deleted (to keep the shared database small): keep showing the analytics
+        # taken just before the delete, marked as such. Never overwrite them with zeros.
+        snapshot = repository.analytics_snapshot(conn, job_id)
+        return {**(snapshot or repository.analytics(conn, job_id)), "data_deleted": True}
     key = (job_id, version)
     if key not in _ANALYTICS_CACHE:
         if len(_ANALYTICS_CACHE) >= _ANALYTICS_CACHE_SIZE:
@@ -797,6 +802,9 @@ def purge_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]
     """Delete one upload's users (owner or admin), so the file can be uploaded again as new."""
     with db(deps) as conn:
         own_upload(conn, job_id, who)
+        version = repository.analytics_version(conn, job_id)
+        if version is not None and version[1] is None:
+            cached_analytics(conn, job_id)  # snapshot the charts before any record goes
         deleted = repository.purge_upload(conn, job_id)
         if deleted is None:
             raise NotFoundError("job not found")

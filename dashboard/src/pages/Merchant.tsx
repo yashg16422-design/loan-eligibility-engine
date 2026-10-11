@@ -8,6 +8,7 @@ import { api, ApiError } from "../api/client";
 import type { Analytics, CrawlHealth, Run, UploadRecord, WorkflowError } from "../api/types";
 import { AnalyticsGrid } from "../components/AnalyticsGrid";
 import { EmailPreviews } from "../components/EmailPreviews";
+import { FreeUpDialog } from "../components/FreeUpDialog";
 import { WaitPanel } from "../components/WaitPanel";
 import { WorkflowMap } from "../components/WorkflowMap";
 import { CHANNEL_LABEL } from "../lib/offers";
@@ -91,11 +92,16 @@ export function Merchant() {
   // Signed in, an account sees only its own data (every account starts fresh); admins can also
   // open the reference dataset; visitors who are signed out see the reference as a demo.
   const showReference = !email || admin;
+  // Uploads whose records were deleted keep their analytics (a snapshot taken before the delete).
+  const kept = useMemo(() => (uploads ?? []).filter((u) => u.purged_at && (u.total_rows ?? 0) > 0), [uploads]);
+  const deletedJobs = useMemo(() => new Set(kept.map((u) => u.job_id)), [kept]);
   const datasets = useMemo(() => {
     const own = mine.map((u) => ({ value: u.job_id, label: `${u.original_filename ?? "users.csv"} · ${n(u.users_now)} customers · ${ago(u.created_at)}` }));
+    const gone = kept.map((u) => ({ value: u.job_id, label: `${u.original_filename ?? "users.csv"} · analytics kept · ${ago(u.created_at)}` }));
     const ref = showReference && reference?.job_id ? [{ value: reference.job_id, label: `Reference dataset · ${n(reference.users_in)} customers` }] : [];
-    return [...own, ...ref.filter((r) => !own.some((o) => o.value === r.value))];
-  }, [mine, reference, showReference]);
+    const all = [...own, ...gone];
+    return [...all, ...ref.filter((r) => !all.some((o) => o.value === r.value))];
+  }, [mine, kept, reference, showReference]);
   // Charts: what you picked, else your live upload once loaded, else your latest, else (visitors
   // and admins) the reference.
   const chartJob = picked ?? (live?.finished ? live.jobId : mine[0]?.job_id ?? (showReference ? reference?.job_id ?? null : null));
@@ -110,14 +116,41 @@ export function Merchant() {
     heading?.scrollIntoView({ behavior: "smooth", block: "start" });
     heading?.focus({ preventScroll: true });
   }, []);
-  const onChartsLoaded = useCallback(() => {
+  const [loadedJob, setLoadedJob] = useState<string | null>(null);
+  const onChartsLoaded = useCallback((jobId: string) => {
+    setLoadedJob(jobId);
     if (!focusCharts.current) return;
     focusCharts.current = false;
     goToAnalytics();
   }, [goToAnalytics]);
 
+  // Once a run is complete (matched, proved, emails recorded) and its charts are on screen, ask
+  // once per upload to delete its records: the shared demo database is small.
+  const [freeUp, setFreeUp] = useState<{ jobId: string; customers: number } | null>(null);
+  useEffect(() => {
+    if (!live?.finished || loadedJob !== live.jobId || live.progress?.job.match_status !== "DONE") return;
+    const customers = (live.progress.job.inserted ?? 0) + (live.progress.job.updated ?? 0);
+    if (customers < 100) return; // a tiny file costs nothing to keep
+    const asked = `clickpar-freeup-${live.jobId}`;
+    try {
+      if (sessionStorage.getItem(asked)) return;
+      sessionStorage.setItem(asked, "1");
+    } catch {
+      /* private mode: may ask again after a reload */
+    }
+    setFreeUp({ jobId: live.jobId, customers });
+  }, [live?.finished, live?.jobId, live?.progress, loadedJob]);
+
   return (
     <div className="mx-auto max-w-[1480px] px-5 pt-14 pb-20 sm:px-10 lg:pt-24 xl:grid xl:grid-cols-[minmax(0,1fr)_200px] xl:gap-16 xl:px-16">
+      {freeUp && (
+        <FreeUpDialog jobId={freeUp.jobId} customers={freeUp.customers} onClose={() => setFreeUp(null)}
+          onDeleted={() => {
+            setPicked(freeUp.jobId); // the charts stay on this upload (its kept snapshot)
+            setFreeUp(null);
+            void refreshUploads();
+          }} />
+      )}
       <div className="min-w-0">
         <header className="max-w-[900px]">
           <h1 className="text-[2.75rem] sm:text-[4.25rem]">Merchant console</h1>
@@ -175,8 +208,8 @@ export function Merchant() {
           <div className="mt-10">
             {chartJob ? (
               <>
-                <Charts jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} signedIn={!!email} onLoaded={onChartsLoaded} />
-                {email && <EmailPreviews jobId={chartJob} />}
+                <Charts key={`${chartJob}-${deletedJobs.has(chartJob) ? "kept" : "live"}`} jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} signedIn={!!email} onLoaded={onChartsLoaded} />
+                {email && !deletedJobs.has(chartJob) && <EmailPreviews jobId={chartJob} />}
               </>
             ) : email && uploads !== null ? (
               <div className="border border-dashed border-line-hi p-10">
@@ -476,7 +509,7 @@ function Readouts({ title, cells, cols }: { title: string; cells: Cell[]; cols: 
   );
 }
 
-function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: string; signedIn: boolean; onLoaded: () => void }) {
+function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: string; signedIn: boolean; onLoaded: (jobId: string) => void }) {
   const [data, setData] = useState<{ jobId: string; analytics: Analytics } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -505,8 +538,8 @@ function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: stri
   useEffect(() => setAttempt(0), [jobId]);
   const ready = data?.jobId === jobId;
   useEffect(() => {
-    if (ready) onLoaded();
-  }, [ready, onLoaded]);
+    if (ready) onLoaded(jobId);
+  }, [ready, onLoaded, jobId]);
   if (failed)
     return (
       <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-coral">
@@ -516,7 +549,17 @@ function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: stri
     );
   if (!ready || !data)
     return <LoadingBar label={attempt ? `Still computing the analytics for ${name}: retrying (${attempt} of 3)` : `Loading analytics for ${name}`} />;
-  return <AnalyticsGrid data={data.analytics} />;
+  return (
+    <>
+      {data.analytics.data_deleted && (
+        <p className="mb-6 border-l-2 border-acc pl-4 text-sm text-mute">
+          This upload's customer records were deleted to keep the shared database small. These are its figures, kept from
+          just before the delete.
+        </p>
+      )}
+      <AnalyticsGrid data={data.analytics} />
+    </>
+  );
 }
 
 /** A thin indeterminate bar with a label: something is loading, and what. */

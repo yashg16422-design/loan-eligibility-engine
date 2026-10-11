@@ -161,6 +161,7 @@ export interface Band {
 }
 
 export interface Analytics {
+  data_deleted?: boolean; // records deleted; these are the figures kept from just before
   users: number;
   matches: number;
   users_with_eligible: number;
