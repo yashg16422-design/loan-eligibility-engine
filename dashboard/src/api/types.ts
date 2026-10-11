@@ -116,6 +116,7 @@ export interface Run {
   matches_new: number | null;
   matches_superseded: number | null;
   matches_unchanged: number | null;
+  prewrite_ok?: boolean | null; // the proof run BEFORE matches are written
   correctness_ok: boolean | null;
   emails_sent: number | null;
   emails_failed: number | null;

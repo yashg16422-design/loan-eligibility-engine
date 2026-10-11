@@ -222,13 +222,17 @@ row above (its SES alert is rate-limited by the `Alert due?` check). No real fai
 ## 9. CI
 
 ```
-$ gh run view 38120103618 --json jobs,headSha,conclusion
-{"sha":"54eefb4","conclusion":"success","jobs":[{"name":"dashboard","conclusion":"success"},{"name":"test","conclusion":"success"},{"name":"web","conclusion":"success"}]}
+$ gh run view 38140481660 --json jobs,headSha,conclusion
+{"sha":"7705e87","conclusion":"success","jobs":[{"name":"web","conclusion":"success"},{"name":"test","conclusion":"success"},{"name":"dashboard","conclusion":"success"}]}
 ```
 
 Every push to `main` runs the same three jobs (GitHub > Actions). Locally, at the latest commit
-(2026-10-11, ~16:10 IST): 379 Python tests (unit + Postgres integration, coverage 91.7%), 52 n8n
-Code-node tests and 36 dashboard tests all pass; `ruff` and `mypy` are clean.
+(2026-10-11, ~18:20 IST): 384 Python tests (unit + Postgres integration, including an end-to-end
+test of every upload, limit, stop and delete route through the Lambda entry point; coverage
+92.5%), 52 n8n Code-node tests and 37 dashboard tests all pass; `ruff` and `mypy` are clean.
+
+On the live stack the same day: all 34 upload runs passed both proofs (pre-write and
+post-write: 0 mismatches), as `GET /ops/runs` shows (`prewrite_ok`, `correctness_ok`).
 
 ## How these were captured
 

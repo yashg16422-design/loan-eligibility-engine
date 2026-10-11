@@ -252,7 +252,7 @@ _RUN_COLUMNS = """
     users_in, products_in, naive_pairs, pairs_after_sql, classes,
     class_product_pairs, rule_decided, llm_candidates, llm_cache_hits,
     llm_calls, llm_input_tokens, llm_output_tokens, llm_cost_usd_est,
-    matches_new, matches_superseded, matches_unchanged, correctness_ok,
+    matches_new, matches_superseded, matches_unchanged, prewrite_ok, correctness_ok,
     emails_sent, emails_failed, emails_skipped_demo,
     (SELECT j.purged_at IS NOT NULL FROM upload_jobs j
        WHERE j.job_id = pipeline_runs.job_id) AS purged,
