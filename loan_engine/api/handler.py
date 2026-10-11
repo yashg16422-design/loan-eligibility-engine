@@ -35,6 +35,8 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from functools import cache
 from typing import Annotated, Any
@@ -48,6 +50,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from mangum import Mangum
+from psycopg.pq import TransactionStatus
 from starlette.exceptions import HTTPException
 
 from loan_engine.api import instant_check, repository, static, tokens
@@ -251,9 +254,51 @@ def token_key(secret_arn: str) -> bytes:
     return client.get_secret_value(SecretId=secret_arn)["SecretString"].encode()
 
 
-def db(deps: Dependencies) -> psycopg.Connection:
-    creds = cached_db_credentials(deps.db_secret_arn)
-    return connect(deps.db_host, "app", creds, autocommit=True, application_name="api")
+# One database connection per container, reused across requests. Opening a TLS connection is
+# what a busy RDS is slowest at (a matching run writing 250k matches made new connections time
+# out: seen live as 503s); a Lambda container serves one request at a time, so sharing is safe.
+_CONN: psycopg.Connection | None = None
+_CONN_USED_AT = 0.0
+_CONN_CHECK_AFTER_S = 60  # an idle connection is pinged before use (it may have been dropped)
+
+
+def _usable(conn: psycopg.Connection | None) -> bool:
+    if conn is None or conn.closed or conn.broken:
+        return False
+    if time.monotonic() - _CONN_USED_AT < _CONN_CHECK_AFTER_S:
+        return True
+    try:
+        conn.execute("SELECT 1")
+        return True
+    except psycopg.Error:
+        return False
+
+
+@contextmanager
+def db(deps: Dependencies) -> Iterator[psycopg.Connection]:
+    """The container's connection (autocommit; routes open their own transactions). A broken
+    connection is dropped, so the next request reconnects instead of failing again."""
+    global _CONN, _CONN_USED_AT
+    conn = _CONN
+    if conn is None or not _usable(conn):
+        if conn is not None:
+            with suppress(psycopg.Error):
+                conn.close()
+        creds = cached_db_credentials(deps.db_secret_arn)
+        conn = connect(deps.db_host, "app", creds, autocommit=True, application_name="api")
+        _CONN = conn
+    try:
+        yield conn
+    except psycopg.OperationalError:
+        with suppress(psycopg.Error):
+            conn.close()
+        _CONN = None
+        raise
+    finally:
+        _CONN_USED_AT = time.monotonic()
+        if _CONN is conn and conn.info.transaction_status != TransactionStatus.IDLE:
+            with suppress(psycopg.Error):
+                conn.rollback()  # never hand a half-open transaction to the next request
 
 
 def parse_json(raw: bytes | str) -> dict[str, Any]:

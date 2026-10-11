@@ -865,3 +865,62 @@ def test_analytics_are_cached_until_the_upload_is_rematched_or_deleted(monkeypat
     assert api.cached_analytics(object(), job) == {"n": 2}
     version["v"] = ("2026-10-11T02:00", "2026-10-11T03:00")  # customers deleted
     assert api.cached_analytics(object(), job) == {"n": 3}
+
+
+class TestConnectionReuse:
+    """The api keeps one DB connection per container (new connections are what a busy RDS is
+    slowest at) and never reuses a dead or half-open one."""
+
+    class Conn:
+        def __init__(self):
+            self.closed = self.broken = False
+            self.pings = self.rollbacks = 0
+            self.info = type("Info", (), {"transaction_status": api.TransactionStatus.IDLE})()
+
+        def execute(self, sql):
+            self.pings += 1
+            if self.broken:
+                raise api.psycopg.OperationalError("server closed the connection")
+
+        def close(self):
+            self.closed = True
+
+        def rollback(self):
+            self.rollbacks += 1
+            self.info.transaction_status = api.TransactionStatus.IDLE
+
+    @pytest.fixture
+    def opened(self, monkeypatch):
+        conns: list = []
+        monkeypatch.setattr(api, "cached_db_credentials", lambda arn: None)
+        monkeypatch.setattr(api, "connect", lambda *a, **k: conns.append(self.Conn()) or conns[-1])
+        return conns
+
+    DEPS = api.Dependencies(db_host="h", db_secret_arn="a", bucket="b", s3=None)
+
+    def test_one_connection_serves_many_requests(self, opened):
+        for _ in range(3):
+            with api.db(self.DEPS):
+                pass
+        assert len(opened) == 1 and opened[0].pings == 0  # recently used: no ping needed
+
+    def test_an_idle_connection_is_checked_and_a_dead_one_replaced(self, opened, monkeypatch):
+        with api.db(self.DEPS):
+            pass
+        monkeypatch.setattr(api, "_CONN_USED_AT", -1e9)  # long idle
+        opened[0].broken = True  # e.g. RDS dropped it
+        with api.db(self.DEPS) as conn:
+            assert conn is opened[1]
+        assert opened[0].closed and len(opened) == 2
+
+    def test_a_failing_connection_is_dropped(self, opened):
+        with pytest.raises(api.psycopg.OperationalError), api.db(self.DEPS):
+            raise api.psycopg.OperationalError("lost")
+        assert opened[0].closed and api._CONN is None
+        with api.db(self.DEPS) as conn:
+            assert conn is opened[1]
+
+    def test_a_half_open_transaction_is_rolled_back_before_reuse(self, opened):
+        with api.db(self.DEPS) as conn:
+            conn.info.transaction_status = api.TransactionStatus.INTRANS
+        assert opened[0].rollbacks == 1

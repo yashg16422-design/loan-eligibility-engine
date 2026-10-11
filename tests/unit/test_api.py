@@ -199,7 +199,12 @@ class TestCreateUploadRoute:
                     "fields": {"key": kwargs["Key"]},
                 }
 
-        class FakeConn:
+        class FakeConn:  # what db() needs from a psycopg connection
+            closed = broken = False
+
+            class info:  # noqa: N801 - mirrors psycopg's conn.info
+                transaction_status = api.TransactionStatus.IDLE
+
             def __enter__(self):
                 return self
 

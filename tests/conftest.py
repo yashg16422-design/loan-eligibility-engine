@@ -18,3 +18,11 @@ class FakeLambdaContext:
 @pytest.fixture
 def lambda_context() -> FakeLambdaContext:
     return FakeLambdaContext()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_api_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The api caches one DB connection per container; every test starts without one."""
+    from loan_engine.api import handler
+
+    monkeypatch.setattr(handler, "_CONN", None)

@@ -12,8 +12,11 @@ import psycopg
 
 from loan_engine.common.secrets import DbCredentials
 
-CONNECT_ATTEMPTS = 2  # one retry: seen live, a single connect timed out while RDS was idle
-RETRY_PAUSE_SECONDS = 0.3
+# Three tries of 8 s: a matching run writing hundreds of thousands of rows can make RDS slow to
+# accept a new connection (seen live). 3 x 8 s + pauses stays inside the api's 28 s budget.
+CONNECT_ATTEMPTS = 3
+CONNECT_TIMEOUT_S = 8
+RETRY_PAUSE_SECONDS = 0.5
 # Amazon's RDS CA bundle for ap-southeast-2 (https://truststore.pki.rds.amazonaws.com), shipped
 # inside the package so verification needs no network call.
 RDS_CA_BUNDLE = Path(__file__).with_name("certs") / "rds-ap-southeast-2-bundle.pem"
@@ -54,7 +57,7 @@ def connect(
                 user=creds.username,
                 password=creds.password,
                 **tls_options(os.environ),
-                connect_timeout=5,  # fail fast: a hanging connect would burn the Lambda timeout
+                connect_timeout=CONNECT_TIMEOUT_S,  # bounded: a hang must not burn the budget
                 autocommit=autocommit,
                 application_name=application_name,
             )
@@ -62,5 +65,5 @@ def connect(
             # Safe to retry: nothing has been sent yet. A wrong password fails twice, fast.
             if attempt == CONNECT_ATTEMPTS:
                 raise
-            time.sleep(RETRY_PAUSE_SECONDS)
+            time.sleep(RETRY_PAUSE_SECONDS * attempt)
     raise AssertionError("unreachable")
