@@ -72,7 +72,7 @@ def to_user_row(body: dict, user_id: uuid.UUID, rules: ValidationRules) -> UserR
     Raises:
         CheckInputError: with a message the visitor can act on.
     """
-    record = {
+    record: dict[str | None, str | list[str] | None] = {
         "user_id": str(user_id),
         "name": clean_name(body.get("name")),
         "email": placeholder_email(user_id),

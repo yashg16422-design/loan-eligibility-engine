@@ -6,6 +6,7 @@ import os
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import psycopg
 
@@ -18,7 +19,7 @@ RETRY_PAUSE_SECONDS = 0.3
 RDS_CA_BUNDLE = Path(__file__).with_name("certs") / "rds-ap-southeast-2-bundle.pem"
 
 
-def tls_options(env: Mapping[str, str]) -> dict[str, str]:
+def tls_options(env: Mapping[str, str]) -> dict[str, Any]:
     """libpq TLS settings from the environment.
 
     DB_SSLMODE=verify-full (the deployed Lambdas): encrypted AND the server certificate must be

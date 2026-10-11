@@ -11,6 +11,13 @@ from psycopg.rows import dict_row
 REJECTS_SHOWN = 20
 
 
+def _one(row: dict[str, Any] | None) -> dict[str, Any]:
+    """The single row of an INSERT ... RETURNING or an aggregate query (always exactly one)."""
+    if row is None:
+        raise RuntimeError("expected one row, got none")
+    return row
+
+
 def create_job(
     conn: psycopg.Connection,
     job_id: uuid.UUID,
@@ -211,8 +218,9 @@ def save_preferences(
 ) -> dict[str, Any]:
     """Upsert the whole preferences row (the client always sends the full state)."""
     with conn.cursor(row_factory=dict_row) as cur:
-        return cur.execute(
-            """
+        return _one(
+            cur.execute(
+                """
             INSERT INTO user_preferences (user_id, shortlist, top3, hidden, alerts)
             VALUES (%(user_id)s, %(shortlist)s, %(top3)s, %(hidden)s, %(alerts)s)
             ON CONFLICT (user_id) DO UPDATE SET
@@ -220,8 +228,9 @@ def save_preferences(
                 hidden = EXCLUDED.hidden, alerts = EXCLUDED.alerts, updated_at = now()
             RETURNING shortlist, top3, hidden, alerts, updated_at
             """,
-            {"user_id": user_id, **prefs},
-        ).fetchone()
+                {"user_id": user_id, **prefs},
+            ).fetchone()
+        )
 
 
 # ---------------------------------------------------------------- ops view (aggregates only)
@@ -344,8 +353,9 @@ def upsert_account(
     `admin` (a Cognito admin group member) is recorded on the row and never cleared here.
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        return cur.execute(
-            """
+        return _one(
+            cur.execute(
+                """
             WITH found AS (
                 UPDATE accounts SET last_seen_at = now(), is_admin = is_admin OR %(admin)s
                 WHERE lower(email) = lower(%(email)s)
@@ -359,8 +369,9 @@ def upsert_account(
             )
             SELECT * FROM found UNION ALL SELECT * FROM created
             """,
-            {"sub": account_id, "email": email, "admin": admin},
-        ).fetchone()
+                {"sub": account_id, "email": email, "admin": admin},
+            ).fetchone()
+        )
 
 
 def account_profiles(conn: psycopg.Connection, account_id: str) -> list[dict[str, Any]]:
@@ -689,4 +700,4 @@ def analytics(conn: psycopg.Connection, job_id: uuid.UUID | None) -> dict[str, A
     Aggregates only: no names, no emails, no ids leave the database.
     """
     with conn.cursor(row_factory=dict_row) as cur:
-        return cur.execute(_ANALYTICS_SQL, {"job": job_id}).fetchone()
+        return _one(cur.execute(_ANALYTICS_SQL, {"job": job_id}).fetchone())

@@ -24,3 +24,15 @@ select = ["E", "W", "F", "I", "B", "UP", "SIM", "N", "ANN", "RUF"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["loan_engine"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# boto3/botocore ship no type information (the separate boto3-stubs package is large and only
+# adds client types we do not rely on); everything else is checked.
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
+ignore_missing_imports = true

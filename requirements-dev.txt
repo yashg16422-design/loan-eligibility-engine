@@ -3,3 +3,4 @@ boto3==1.40.45
 pytest==8.4.2
 ruff==0.13.3
 pytest-cov==7.1.0
+mypy==2.4.0

@@ -132,7 +132,7 @@ class PlainRoute(APIRoute):
     JSON class above writes it as the number 10.5, exactly as before.
     """
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401 - APIRoute's own signature
         kwargs["response_model"] = None
         super().__init__(*args, **kwargs)
 
@@ -609,7 +609,7 @@ def create_email_tokens(request: Request, body: Body, deps: Deps) -> dict[str, A
 
 
 @app.get("/auth/config")
-def get_auth_config(deps: Deps) -> dict[str, str]:
+def get_auth_config(deps: Deps) -> dict[str, str | bool]:
     """Public identifiers only (no secret exists: the app client has none by design)."""
     return {
         "region": os.environ.get("AWS_REGION", ""),
@@ -684,7 +684,7 @@ def clear_profiles(who: SignedIn, deps: Deps) -> dict[str, int]:
     """Start fresh: remove every saved check. The account and its settings stay."""
     with db(deps) as conn:
         counts = repository.clear_account_profiles(conn, who.account_id)
-    logger.info("saved checks cleared", **counts)
+    logger.info("saved checks cleared", extra=counts)
     return counts
 
 
@@ -708,7 +708,7 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
         raise ForbiddenError
     with db(deps) as conn:
         counts = repository.purge_csv_uploads(conn, None if scope == "all" else who.account_id)
-    logger.info("uploads purged", scope=scope, **counts)
+    logger.info("uploads purged", extra={"scope": scope, **counts})
     return counts
 
 

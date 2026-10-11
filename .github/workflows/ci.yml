@@ -52,6 +52,9 @@ jobs:
           ruff check .
           ruff format --check .
 
+      - name: Type check (mypy, loan_engine)
+        run: mypy
+
       - name: JS unit tests (n8n Code-node logic)
         run: node --test n8n/code/code.test.js
 
