@@ -299,3 +299,41 @@ The B run that followed: 0 users changed, 0 new matches, both proofs `t`, no ema
   fails if raw free text ever reaches a query parameter again.
 - **Recovery:** the affected run was completed by re-running C. Its counters are 5 sent, 0
   failed, 7 skipped, and all 12 emails are stored. One test alias received one duplicate email.
+
+## 11. Under load (2026-10-11, 12:00-12:35 IST)
+
+**What went wrong.**
+- **One run hung.** A 10,000-user run (`3052b455`) wrote its matches, but n8n then lost its own
+  database connection. n8n's log shows "timeout exceeded when trying to connect" and "Driver not
+  Connected" about 2 minutes into every 10k run, and once the run did not survive it. The run
+  never recorded its emails and the upload screen waited forever.
+- **The api timed out.** Separately, some api requests passed the 10 s Lambda limit while a run
+  kept RDS busy. Each one was a cold container's first connection, or analytics recomputed per
+  container.
+
+**Fixes** (commits `cb8b521` to the C finish-step fix):
+- **n8n's pool:** 6 connections, a 60 s connect timeout, idle connections kept 10 min.
+- **Self-healing emails:** B's sweeper re-proves and finishes runs that matched but never
+  recorded emails, and C always reaches its finish step.
+- **The api:** 28 s timeout, one reused connection per container, analytics stored once per
+  upload version.
+- **The console:** it survives a reload and reconnects instead of erroring.
+
+**The same load, before and after.** Each test is a fresh 10,000-user upload plus an 8-row upload
+started during its heavy phase, with the public endpoints polled every few seconds.
+
+| | Before | After |
+|---|---|---|
+| api responses | 17 × 200, **4 × 503** ("database unavailable", connect timeout) | **52 × 200, 0 errors** |
+| n8n DB connection errors | on every 10k run | **0** |
+| Both runs: proofs, 5 emails each, every email stored | yes | yes |
+| Uploads list (signed in) | 17 s while emails were being composed | about 0.2 s warm |
+
+**The stuck run was recovered by the sweeper on its own:**
+
+```
+3052b455 | done | correctness_ok t | emails_sent 0 | recovered by the sweeper: proof re-run, emails sent
+still waiting for emails (last 24 h): 0
+```
+
+Its emails count is 0 because its customers had already been deleted by a workspace reset.

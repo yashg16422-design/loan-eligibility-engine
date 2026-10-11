@@ -639,6 +639,10 @@ published criteria**, never an approval probability.
 | User no longer qualifies | Match `superseded` (history kept), no email | B1 |
 | SES send fails | Retried twice in the node; then recorded as `failed` and the match stays un-notified, so re-running C for that run sends it | C |
 | n8n dies in the middle of the send loop | Each send was recorded as it happened: the re-run sends only the remainder, nobody twice (tested) | C |
+| n8n loses its database between matching and email | B's sweeper finds runs with matches but no email record, **re-runs the proof**, and lets C finish them. Found live when one run's screen waited for emails forever; it was recovered this way | B, C |
+| A busy database during a 10k run | n8n keeps 6 pooled connections with a 60 s connect timeout (it lost its database once on the default 2 and 20 s). The api reuses one connection per container and retries connects 3 × 8 s within a 28 s limit. Live load test, two uploads at once with the console polling: before, 4 × 503 and n8n connection errors; after, **0 errors** (52 of 52 requests OK) and both runs finished with emails | n8n, api |
+| A statement that outlives its execution | Postgres ends n8n statements after 10 minutes (n8n's own limit) and closes idle-in-transaction sessions | RDS |
+| Reload or a network blip during an upload | The console keeps tracking the same job after a reload; transient errors show "reconnecting" while polling continues; the charts retry by themselves | console |
 | Email or error text with newlines | Passed to Postgres as one JSON parameter (n8n's plain parameters broke on it; found live, fixed, guarded by a test) | C, E |
 | Any workflow fails | Error workflow **E**: `workflow_errors` row + rate-limited alert email | E |
 | Run dies mid-way (n8n restart) | Sweeper closes runs `running` > 30 min; a re-claimed job closes its old run | B |

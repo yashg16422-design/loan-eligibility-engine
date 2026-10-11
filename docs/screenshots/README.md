@@ -24,9 +24,9 @@ nodes in the screenshots and the video).
 | 6 | `06-credentials-list.png` | Credentials list | The three credentials | |
 | 7 | `07-workflow-A.png` | Workflow A canvas (Shift+1 = zoom to fit) | Schedule + manual trigger, robots, hubs, batching, Finish run, Crawl health | Workflow A |
 | 8 | `08-workflow-A1.png` | Workflow A1 canvas | Fetch, classify, hash, Changed?, Nova call, upsert | Crawler internals |
-| 9 | `09-workflow-B.png` | Workflow B canvas | Webhook, sweeper, product-mode trigger, claim, B1, C, late-compile re-match | Workflow B trigger |
+| 9 | `09-workflow-B.png` | Workflow B canvas | Webhook, sweeper (with the email-recovery branch), product-mode trigger, claim, B1, C, late-compile re-match | Workflow B trigger |
 | 10 | `10-workflow-B1.png` | Workflow B1 canvas | Compile, Stage 1+2, ANALYZE, **Pre-write proof**, Stage 3, post-write proof, finish | Treasure Hunt |
-| 11 | `11-workflow-C.png` | Workflow C canvas | Users to email, Sign links, Compose, SES loop, Record this send, Compose the rest (C1) loop | Workflow C |
+| 11 | `11-workflow-C.png` | Workflow C canvas | Run to notify, Users to email, Anyone to email?, Sign links, Compose, SES loop, Record this send, Compose the rest (C1) loop | Workflow C |
 | 11b | `11b-workflow-C1.png` | Workflow C1 canvas | Next users to compose, Compose (no send), Save composed emails | Every user's email built |
 | 12 | `12-B1-funnel-output.png` | B1 > Executions > a recent upload run > **Treasure Hunt funnel** node > Output | the funnel, plus `proof.before_write` and `proof.after_write` with 0 mismatches | Treasure Hunt numbers |
 | 13 | `13-workflow-E.png` | Workflow E canvas | Error Trigger, Record error, Alert due?, SES | Failure handling |
