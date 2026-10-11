@@ -209,6 +209,7 @@ export interface UploadRecord {
   match_status: "RUNNING" | "DONE" | "FAILED" | null;
   matched_at: string | null;
   purged_at: string | null;
+  mine: boolean; // the viewer's own upload (an admin also sees other accounts')
   users_now: number;
   matches: number;
   emails_sent: number;

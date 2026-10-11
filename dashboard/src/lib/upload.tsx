@@ -169,7 +169,6 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
   const start = useCallback(async (file: File) => {
     navigate("merchant");
-    setState({ phase: "sending", name: file.name, bytes: file.size });
     try {
       // Checked here first, so a wrong file never costs an upload ticket.
       if (!/\.csv$/i.test(file.name)) throw new ApiError(400, "This is not a CSV file. Choose a .csv file.");
@@ -185,6 +184,8 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         setState({ phase: "blocked", name: file.name, bytes: file.size, blocking });
         return;
       }
+      // Only now, with the server's go-ahead (no earlier upload in the way), does anything start.
+      setState({ phase: "sending", name: file.name, bytes: file.size });
       if (file.size > ticket.max_bytes) throw new ApiError(413, "That file is larger than 50 MB.");
       const form = new FormData();
       Object.entries(ticket.upload.fields).forEach(([k, v]) => form.append(k, v));

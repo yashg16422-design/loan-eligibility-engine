@@ -88,12 +88,12 @@ export function Merchant() {
 
   // The full-file run the API always lists: the measured Treasure Hunt numbers.
   const reference = runs?.find((r) => r.reference);
-  const mine = useMemo(() => (uploads ?? []).filter((u) => !u.purged_at && u.users_now > 0), [uploads]);
+  const mine = useMemo(() => (uploads ?? []).filter((u) => u.mine && !u.purged_at && u.users_now > 0), [uploads]);
   // Signed in, an account sees only its own data (every account starts fresh); admins can also
   // open the reference dataset; visitors who are signed out see the reference as a demo.
   const showReference = !email || admin;
   // Uploads whose records were deleted keep their analytics (a snapshot taken before the delete).
-  const kept = useMemo(() => (uploads ?? []).filter((u) => u.purged_at && (u.total_rows ?? 0) > 0), [uploads]);
+  const kept = useMemo(() => (uploads ?? []).filter((u) => u.mine && u.purged_at && (u.total_rows ?? 0) > 0), [uploads]);
   const deletedJobs = useMemo(() => new Set(kept.map((u) => u.job_id)), [kept]);
   const datasets = useMemo(() => {
     const own = mine.map((u) => ({ value: u.job_id, label: `${u.original_filename ?? "users.csv"} · ${n(u.users_now)} customers · ${ago(u.created_at)}` }));
@@ -457,7 +457,7 @@ function Metrics({
   // Your last run: the newest upload whose matching finished, preferring one that matched
   // customers (a re-run of unchanged rows has nothing new). Its measured figures stay after
   // its records are deleted, so the numbers do not drop to zero after "free up".
-  const done = (uploads ?? []).filter((u) => u.match_status === "DONE");
+  const done = (uploads ?? []).filter((u) => u.mine && u.match_status === "DONE");
   const last = done.find((u) => u.run_customers > 0) ?? done[0];
   const products = crawl?.products.reduce((s, p) => s + p.products, 0);
   const verified = crawl?.products.reduce((s, p) => s + p.verified, 0);
@@ -678,6 +678,7 @@ function UploadsTable({
                       <span className="block max-w-[260px] truncate">
                         {u.original_filename ?? "users.csv"}
                         {u.job_id === referenceJob && <span className="label ml-2 text-fg">reference</span>}
+                        {!u.mine && <span className="label ml-2 text-amber">other account</span>}
                       </span>
                       <span className="label normal-case tracking-normal">{ago(u.created_at)}</span>
                     </td>

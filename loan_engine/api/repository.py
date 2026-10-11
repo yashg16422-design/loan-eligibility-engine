@@ -522,9 +522,12 @@ def email_previews(conn: psycopg.Connection, job_id: uuid.UUID) -> list[dict[str
 UPLOADS_SHOWN = 20
 
 
-def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[str, Any]]:
+def list_uploads(
+    conn: psycopg.Connection, account_id: str | None, viewer: str | None = None
+) -> list[dict[str, Any]]:
     """Recent bulk uploads of one account (None = every account, for admins), one record each:
-    counts only, no personal data.
+    counts only, no personal data. `mine` marks the viewer's own uploads (an admin's list mixes
+    in other accounts', which do not count against the admin's one-upload limit).
 
     `users_now` is how many of the users this file added or changed are still in the database
     (0 after a delete); tickets whose file never arrived are left out after 15 minutes.
@@ -534,14 +537,18 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
             """
             WITH j AS (
                 SELECT job_id, original_filename, status, created_at, completed_at, total_rows,
-                       inserted, updated, unchanged, rejected, match_status, matched_at, purged_at
+                       inserted, updated, unchanged, rejected, match_status, matched_at, purged_at,
+                       account_id
                 FROM upload_jobs
                 WHERE source = 'csv'
                   AND (%s::text IS NULL OR account_id = %s::text)
                   AND (status <> 'AWAITING_UPLOAD' OR created_at > now() - interval '15 minutes')
                 ORDER BY created_at DESC LIMIT %s
             )
-            SELECT j.*,
+            SELECT j.job_id, j.original_filename, j.status, j.created_at, j.completed_at,
+                   j.total_rows, j.inserted, j.updated, j.unchanged, j.rejected, j.match_status,
+                   j.matched_at, j.purged_at,
+                   (j.account_id IS NOT DISTINCT FROM %s) AS mine,
                    (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
                        AS users_now,
                    -- Matches found for the file, from its runs' own counter: counting the
@@ -564,7 +571,7 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
             ) r
             ORDER BY j.created_at DESC
             """,
-            (account_id, account_id, UPLOADS_SHOWN),
+            (account_id, account_id, UPLOADS_SHOWN, viewer if viewer is not None else account_id),
         ).fetchall()
 
 

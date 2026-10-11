@@ -654,7 +654,9 @@ class TestUploadRecords:
         seen = []
         rows = [{"job_id": self.JOB, "original_filename": "users.csv", "users_now": 4}]
         monkeypatch.setattr(
-            api.repository, "list_uploads", lambda conn, account: seen.append(account) or rows
+            api.repository,
+            "list_uploads",
+            lambda conn, account, viewer=None: seen.append(account) or rows,
         )
         assert invoke({"routeKey": "GET /uploads"}, lambda_context)["statusCode"] == 401
         res = invoke({"routeKey": "GET /uploads", "requestContext": signed_in_as(MERCHANT)})
@@ -698,7 +700,9 @@ def test_one_account_per_verified_email_whatever_the_sign_in_method(
     )
     seen = []
     monkeypatch.setattr(
-        api.repository, "list_uploads", lambda conn, account: seen.append(account) or []
+        api.repository,
+        "list_uploads",
+        lambda conn, account, viewer=None: seen.append(account) or [],
     )
     google = {**MERCHANT, "sub": "google-sub", "identities": "[google]"}
     invoke({"routeKey": "GET /uploads", "requestContext": signed_in_as(google)}, lambda_context)
@@ -738,7 +742,7 @@ def test_admin_belongs_to_the_account_not_one_sign_in_method(deps, monkeypatch, 
         "purge_csv_uploads",
         lambda conn, account=None, **kw: {"deleted_users": 0, "uploads": 0},
     )
-    monkeypatch.setattr(api.repository, "list_uploads", lambda conn, account: [])
+    monkeypatch.setattr(api.repository, "list_uploads", lambda conn, account, viewer=None: [])
     google = {**MERCHANT, "sub": "google-sub"}  # not in the Cognito admin group
     every = {"routeKey": "DELETE /uploads", "queryStringParameters": {"scope": "all"}}
     assert invoke({**every, "requestContext": signed_in_as(google)})["statusCode"] == 403

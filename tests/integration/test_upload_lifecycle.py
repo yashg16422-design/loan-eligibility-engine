@@ -167,6 +167,11 @@ def test_the_whole_upload_lifecycle(stack):
     assert all(e["alias_email"] == "owner+one@gmail.com" for e in emails)
     rows = {u["job_id"]: u for u in call("GET /uploads", ANNA)[1]}
     assert rows[str(job)]["run_customers"] == 10_000 and rows[str(job)]["run_emails"] == 3
+    assert rows[str(job)]["mine"] is True and str(ben["job_id"]) not in rows
+    # An admin sees every account's uploads, each marked whose it is.
+    boss = {**ADMIN, "sub": "boss-sub", "email": "boss@example.org"}
+    seen = {u["job_id"]: u["mine"] for u in call("GET /uploads", boss)[1]}
+    assert seen[str(job)] is False and seen[ben["job_id"]] is False
     # Another merchant cannot read them, or learn the upload exists.
     assert call("GET /uploads/{job_id}/emails", BEN, job)[0] == 404
 
@@ -190,7 +195,6 @@ def test_the_whole_upload_lifecycle(stack):
 
     # 9. Workspace reset and the admin's delete-all answer cleanly with nothing left to delete.
     assert delete_until_done("DELETE /uploads", ANNA) == 0
-    boss = {**ADMIN, "sub": "boss-sub", "email": "boss@example.org"}
     assert delete_until_done("DELETE /uploads", boss, query={"scope": "all"}) == 0
 
     # 10. Signed out: no admin upload here, so no public dataset (never another merchant's).

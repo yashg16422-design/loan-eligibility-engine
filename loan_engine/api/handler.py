@@ -460,7 +460,9 @@ def get_ui() -> RedirectResponse:
 def get_uploads(who: SignedIn, deps: Deps) -> list[dict[str, Any]]:
     """My uploads as records; an admin sees every account's."""
     with db(deps) as conn:
-        return repository.list_uploads(conn, None if who.is_admin else who.account_id)
+        return repository.list_uploads(
+            conn, None if who.is_admin else who.account_id, viewer=who.account_id
+        )
 
 
 def own_upload(conn: psycopg.Connection, job_id: uuid.UUID, who: Account) -> None:
