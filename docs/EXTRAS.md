@@ -90,7 +90,6 @@ No decorative motion: bars move only when their numbers change.
 
 ![Borrower dashboard](screenshots/15-dashboard.png)
 ![Compare view](screenshots/16-dashboard-compare.png)
-![Overview](screenshots/17-engine.png)
 
 ```bash
 scripts/build-frontends.sh   # web/ -> loan_engine/api/site/, dashboard/ -> loan_engine/api/static/

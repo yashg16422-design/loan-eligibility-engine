@@ -222,12 +222,13 @@ row above (its SES alert is rate-limited by the `Alert due?` check). No real fai
 ## 9. CI
 
 ```
-$ gh run view 38056945177 --json jobs,headSha,conclusion
-{"sha":"b95ef82","conclusion":"success","jobs":[{"name":"web","conclusion":"success"},{"name":"test","conclusion":"success"},{"name":"dashboard","conclusion":"success"}]}
+$ gh run view 38120103618 --json jobs,headSha,conclusion
+{"sha":"54eefb4","conclusion":"success","jobs":[{"name":"dashboard","conclusion":"success"},{"name":"test","conclusion":"success"},{"name":"web","conclusion":"success"}]}
 ```
 
-Locally, at the latest commit: 300 Python tests (unit + Postgres integration), 50 n8n Code-node tests, and 19
-dashboard tests all pass; `ruff` is clean.
+Every push to `main` runs the same three jobs (GitHub > Actions). Locally, at the latest commit
+(2026-10-11, ~16:10 IST): 379 Python tests (unit + Postgres integration, coverage 91.7%), 52 n8n
+Code-node tests and 36 dashboard tests all pass; `ruff` and `mypy` are clean.
 
 ## How these were captured
 
