@@ -24,6 +24,8 @@ GRANT SELECT, INSERT, UPDATE ON accounts, account_profiles TO app_ingest;
 -- account unlinks its saved checks. Child rows (matches, notifications, preferences, links)
 -- go by ON DELETE CASCADE, which runs as the table owner, so no DELETE grant is needed there.
 GRANT DELETE ON users, account_profiles TO app_ingest;
+-- Analytics computed once per upload version (013), shared by every api container.
+GRANT SELECT, INSERT, UPDATE ON analytics_cache TO app_ingest;
 
 -- n8n_workflows: the n8n Postgres credential (Workflows A, B, C).
 -- Reads users; may only touch the match-progress columns of upload_jobs.
@@ -39,3 +41,11 @@ GRANT SELECT ON crawl_sources TO n8n_workflows;
 -- PostgreSQL 17 MAINTAIN: lets Workflow B ANALYZE the tables it bulk-writes (fresh planner
 -- statistics between Stage 1 and Stage 3), without owning them or being an admin.
 GRANT MAINTAIN ON match_classes, match_pairs, matches TO n8n_workflows;
+
+-- Guards (sessions opened after this runs): no Workflow statement outlives its execution.
+-- n8n stops an execution after 10 minutes but cannot stop the SQL it started, which would keep
+-- running and holding locks; the same limit on the database side ends it. An open transaction
+-- left idle (a crashed client) is closed too.
+ALTER ROLE n8n_workflows SET statement_timeout = '10min';
+ALTER ROLE n8n_workflows SET idle_in_transaction_session_timeout = '10min';
+ALTER ROLE app_ingest SET idle_in_transaction_session_timeout = '10min';

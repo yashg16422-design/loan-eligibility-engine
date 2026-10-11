@@ -610,3 +610,57 @@ def test_products_compiled_late_are_rematched_once(db):
         ).fetchone()[0]
     )
     assert run_sql(db, "products_compiled_late.sql", follow, PROMPT_VERSION)["product_ids"] == []
+
+
+def test_analytics_are_stored_once_per_upload_version(db):
+    """013: every api container reads the same stored analytics until the upload changes."""
+    from loan_engine.api import repository
+
+    job = db.job_id  # type: ignore[attr-defined]
+    payload = repository.analytics(db, job)
+    repository.store_analytics(db, job, "v1|None", payload)
+    assert repository.stored_analytics(db, job, "v1|None") == json.loads(
+        json.dumps(payload, default=str)
+    )
+    assert repository.stored_analytics(db, job, "v2|None") is None  # re-matched: recompute
+    repository.store_analytics(db, job, "v2|None", {"users": 0})
+    assert repository.stored_analytics(db, job, "v2|None") == {"users": 0}
+    assert db.execute(
+        "SELECT count(*) FROM analytics_cache WHERE job_id = %s", (job,)
+    ).fetchone() == (1,)
+
+
+def test_sweeper_finds_runs_that_matched_but_never_emailed(db):
+    """A run whose n8n execution died after Stage 3 is found again and finishes its emails."""
+
+    def recovery() -> list[str]:
+        return [r[0] for r in db.execute(sql("notify_recovery.sql")).fetchall()]
+
+    def run(**cols) -> str:
+        names = ", ".join(cols)
+        marks = ", ".join(["%s"] * len(cols))
+        return str(
+            db.execute(
+                f"INSERT INTO pipeline_runs (mode, {names}) VALUES ('upload', {marks}) "
+                "RETURNING run_id",
+                tuple(cols.values()),
+            ).fetchone()[0]
+        )
+
+    abandoned = run(status="failed", error="abandoned: still running after 30 min", matches_new=9)
+    stale_done = run(status="done", matches_new=4, finished_at="2000-01-01")
+    fresh_done = run(status="done", matches_new=4, finished_at="now()")  # C may still be running
+    emailed = run(status="done", matches_new=4, emails_sent=5, finished_at="2000-01-01")
+    proof_failed = run(status="failed", error="abandoned: x", matches_new=3, correctness_ok=False)
+    nothing_new = run(status="failed", error="abandoned: x", matches_new=0)
+    found = recovery()
+    assert abandoned in found and stale_done in found
+    assert not {fresh_done, emailed, proof_failed, nothing_new} & set(found)
+
+    done = run_sql(db, "mark_run_recovered.sql", abandoned)
+    assert done["status"] == "done"
+    assert (
+        db.execute("SELECT error FROM pipeline_runs WHERE run_id = %s", (abandoned,))
+        .fetchone()[0]
+        .startswith("recovered by the sweeper")
+    )

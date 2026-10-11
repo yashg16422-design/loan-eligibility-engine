@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 REJECTS_SHOWN = 20
 
@@ -692,6 +696,39 @@ def analytics_version(conn: psycopg.Connection, job_id: uuid.UUID) -> tuple[Any,
         "SELECT matched_at, purged_at FROM upload_jobs WHERE job_id = %s", (job_id,)
     ).fetchone()
     return tuple(row) if row else None
+
+
+def stored_analytics(conn: psycopg.Connection, job_id: uuid.UUID, version: str) -> Any:  # noqa: ANN401 - JSON
+    """The analytics computed earlier for this exact version of the upload, or None."""
+    row = conn.execute(
+        "SELECT payload FROM analytics_cache WHERE job_id = %s AND version = %s", (job_id, version)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def store_analytics(
+    conn: psycopg.Connection, job_id: uuid.UUID, version: str, payload: dict[str, Any]
+) -> None:
+    """Keep the analytics for this version (shared by every api container)."""
+    conn.execute(
+        "INSERT INTO analytics_cache (job_id, version, payload) VALUES (%s, %s, %s)"
+        " ON CONFLICT (job_id) DO UPDATE SET version = EXCLUDED.version,"
+        " payload = EXCLUDED.payload, computed_at = now()",
+        (job_id, version, Jsonb(payload, dumps=_json_dumps)),
+    )
+
+
+def _json_dumps(value: object) -> str:
+    """JSON for stored payloads: database decimals become numbers, dates ISO strings."""
+
+    def default(o: object) -> object:
+        if isinstance(o, Decimal):
+            return float(o)
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        raise TypeError(f"not JSON serializable: {type(o).__name__}")
+
+    return json.dumps(value, default=default)
 
 
 def analytics(conn: psycopg.Connection, job_id: uuid.UUID | None) -> dict[str, Any]:

@@ -5,7 +5,7 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## B · User-loan matching\n**Triggers**\n- **Webhook** `POST /webhook/ingest-complete` (header secret, private network) right after a CSV is ingested.\n- **Sweeper** every 10 min: recovers jobs whose webhook was missed (n8n down, network blip).\n- **From A** (product mode): re-match all users against new/changed products.\n\n**Claim** = atomic lock on the job, so duplicates and concurrent triggers never double-match. Then **B1** runs the Treasure Hunt, **C** notifies, and products whose criteria compiled late are re-matched for every user (product mode, never loops).",
+        "content": "## B · User-loan matching\n**Triggers**\n- **Webhook** `POST /webhook/ingest-complete` (header secret, private network) right after a CSV is ingested.\n- **Sweeper** every 10 min: recovers jobs whose webhook was missed (n8n down, network blip), and runs that matched but never recorded their emails (proved again, then C finishes them).\n- **From A** (product mode): re-match all users against new/changed products.\n\n**Claim** = atomic lock on the job, so duplicates and concurrent triggers never double-match. Then **B1** runs the Treasure Hunt, **C** notifies, and products whose criteria compiled late are re-matched for every user (product mode, never loops).",
         "width": 600,
         "height": 340
       },
@@ -285,6 +285,139 @@
     {
       "parameters": {
         "operation": "executeQuery",
+        "query": "-- Workflow B · Sweeper, second task: runs that wrote their matches but never recorded their\n-- emails, because n8n lost its database or restarted between Stage 3 and Workflow C (found live:\n-- the job showed \"matched\" and the screen waited for emails forever). No params.\n--\n-- Picked: a run with new matches, no email counters, whose proofs did not fail, that either\n-- finished more than 15 minutes ago (C normally ends within a few minutes of B1) or was closed as\n-- abandoned by the sweeper. Workflow B re-runs the post-write proof first and only then calls C,\n-- which is idempotent: users already emailed are skipped, nobody gets two emails.\nSELECT r.run_id::text AS run_id\nFROM pipeline_runs r\nWHERE r.matches_new > 0\n  AND r.emails_sent IS NULL\n  AND coalesce(r.prewrite_ok, true) AND coalesce(r.correctness_ok, true)\n  AND r.started_at > now() - interval '1 day'\n  AND (   (r.status = 'done'   AND r.finished_at < now() - interval '15 minutes')\n       OR (r.status = 'failed' AND r.error LIKE 'abandoned%'))\nORDER BY r.started_at\nLIMIT 2;",
+        "options": {}
+      },
+      "name": "Runs waiting for emails",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        -200
+      ],
+      "id": "LoanEngineWfB001-13",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Runs that wrote matches but never recorded emails (n8n died mid-run).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Correctness proof for the Treasure Hunt (PLAN.md §11.9).\n-- Params: $1 run_id, $2 prompt_version.\n--\n-- Re-decides EVERY user x product pair the naive way: real values, no classes, no floors,\n-- one row per pair. Then compares with what the optimized pipeline produced (class\n-- decisions expanded to users). The optimization is correct iff the two sets are identical.\nWITH run AS (\n    SELECT * FROM pipeline_runs WHERE run_id = $1::uuid\n), prods AS (\n    SELECT p.*, r.rules AS residual_rules, r.requirements AS residual_requirements\n    FROM loan_products p\n    LEFT JOIN criteria_rules r\n           ON r.prompt_version = $2\n          AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex')\n    WHERE p.is_active\n      AND ((SELECT mode FROM run) = 'upload' OR p.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[])))\n), usr AS (\n    SELECT u.* FROM users u\n    WHERE (SELECT mode FROM run) = 'products' OR u.upload_job_id = (SELECT job_id FROM run)\n), naive AS (  -- every user x every product, decided on the user's REAL values\n    SELECT u.user_id, p.product_id,\n        CASE\n            WHEN NOT ((p.min_monthly_income IS NULL OR u.monthly_income >= p.min_monthly_income)\n                  AND (p.min_credit_score   IS NULL OR u.credit_score  >= p.min_credit_score)\n                  AND (p.max_credit_score   IS NULL OR u.credit_score  <= p.max_credit_score)\n                  AND (p.min_age            IS NULL OR u.age           >= p.min_age)\n                  AND (p.max_age            IS NULL OR u.age           <= p.max_age)\n                  AND (p.employment_types   IS NULL OR u.employment_status = ANY (p.employment_types)))\n                THEN 'fails_hard_criteria'\n            WHEN p.other_criteria_text IS NULL THEN 'eligible'\n            WHEN p.residual_rules IS NULL THEN 'conditional'\n            WHEN NOT (SELECT coalesce(bool_and(CASE\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '>=' THEN u.monthly_income >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'monthly_income' AND x->>'op' = '<=' THEN u.monthly_income <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '>=' THEN u.credit_score  >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'credit_score'   AND x->>'op' = '<=' THEN u.credit_score  <= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '>=' THEN u.age           >= (x->>'value')::numeric\n                        WHEN x->>'field' = 'age'            AND x->>'op' = '<=' THEN u.age           <= (x->>'value')::numeric\n                        ELSE true END), true)\n                      FROM jsonb_array_elements(coalesce(p.residual_rules, '[]'::jsonb)) AS x\n                      WHERE x->>'applies_to' IN ('any', u.employment_status))\n                THEN 'not_eligible'\n            WHEN jsonb_array_length(p.residual_requirements) > 0 THEN 'conditional'\n            ELSE 'eligible' END AS tier\n    FROM usr u CROSS JOIN prods p\n), naive_kept AS (\n    SELECT user_id, product_id, tier FROM naive WHERE tier IN ('eligible', 'conditional')\n), optimized AS (  -- what the pipeline stored for this run\n    SELECT m.user_id, m.product_id, m.tier\n    FROM matches m\n    WHERE m.status = 'active' AND m.user_id IN (SELECT user_id FROM usr)\n      AND m.product_id IN (SELECT product_id FROM prods)\n), diff AS (\n    (SELECT * FROM naive_kept EXCEPT SELECT * FROM optimized)\n    UNION ALL\n    (SELECT * FROM optimized EXCEPT SELECT * FROM naive_kept)\n)\nUPDATE pipeline_runs SET correctness_ok = ((SELECT count(*) FROM diff) = 0)\nWHERE run_id = $1::uuid\nRETURNING run_id,\n    (SELECT count(*) FROM naive) AS naive_pairs_evaluated,\n    (SELECT count(*) FROM naive_kept) AS naive_matches,\n    (SELECT count(*) FROM optimized) AS optimized_matches,\n    (SELECT count(*) FROM diff) AS mismatches,\n    correctness_ok;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id, 'compile_v1' ] }}"
+        }
+      },
+      "name": "Prove again before emailing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        440,
+        -200
+      ],
+      "id": "LoanEngineWfB001-14",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Re-checks every pair of that run before anyone is emailed.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.correctness_ok === true && Number($json.mismatches) === 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Proof still passes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -200
+      ],
+      "id": "LoanEngineWfB001-15",
+      "notes": "Only an exact run is emailed; a failed proof leaves it for a human.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Workflow B · A recovered run passed its proof again: record it as done before C emails it.\n-- Params: $1 run_id.\nUPDATE pipeline_runs\nSET status = 'done', finished_at = coalesce(finished_at, now()),\n    error = CASE WHEN status = 'failed' THEN 'recovered by the sweeper: proof re-run, emails sent'\n                 ELSE error END\nWHERE run_id = $1::uuid\nRETURNING run_id::text, status, correctness_ok;",
+        "options": {
+          "queryReplacement": "={{ [ $json.run_id ] }}"
+        }
+      },
+      "name": "Mark run recovered",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        880,
+        -200
+      ],
+      "id": "LoanEngineWfB001-16",
+      "credentials": {
+        "postgres": {
+          "id": "PkRN0GO4XtFXA9pL",
+          "name": "RDS app (n8n_workflows)"
+        }
+      },
+      "notes": "Records the run as done, noting the sweeper recovered it.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "LoanEngineWfC001",
+          "mode": "id"
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "name": "Finish emails (C)",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1100,
+        -200
+      ],
+      "id": "LoanEngineWfB001-17",
+      "onError": "continueRegularOutput",
+      "notes": "C picks up where it stopped; users already emailed are skipped.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
         "query": "-- Workflow B · Products whose criteria were compiled for the FIRST time in this run.\n-- Params: $1 run_id, $2 prompt_version.\n--\n-- When the LLM fails to compile a product's criteria, that product counts as \"may qualify\" for\n-- every user (never wrongly eligible) and the text is retried on the next run. Once a later run\n-- compiles it, the users matched BEFORE still hold the provisional decision: B re-matches all\n-- users against exactly these products (product mode). The follow-up run finds every text\n-- cached (rules_compiled = 0), so this never loops.\nWITH run AS (\n    SELECT * FROM pipeline_runs WHERE run_id = $1::uuid\n)\nSELECT $1::text AS run_id,\n       coalesce(json_agg(DISTINCT p.product_id), '[]'::json) AS product_ids\nFROM loan_products p\nJOIN criteria_rules r\n  ON r.prompt_version = $2\n AND r.criteria_text_hash = encode(sha256(convert_to(p.other_criteria_text, 'UTF8')), 'hex')\nWHERE p.is_active\n  AND coalesce((SELECT rules_compiled FROM run), 0) > 0\n  AND r.created_at >= (SELECT started_at FROM run)\n  -- a product-mode run already re-decided every user for its own products\n  AND NOT ((SELECT mode FROM run) = 'products'\n           AND p.product_id = ANY (coalesce((SELECT scope_product_ids FROM run), ARRAY[]::uuid[])));",
         "options": {
           "queryReplacement": "={{ [ $('Claim job + start run').itemMatching($itemIndex).json.run_id, 'compile_v1' ] }}"
@@ -297,7 +430,7 @@
         1100,
         400
       ],
-      "id": "LoanEngineWfB001-13",
+      "id": "LoanEngineWfB001-18",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
@@ -338,7 +471,7 @@
         1320,
         400
       ],
-      "id": "LoanEngineWfB001-14",
+      "id": "LoanEngineWfB001-19",
       "notes": "Earlier users hold a provisional 'may qualify' for them: decide again.",
       "notesInFlow": true
     },
@@ -362,7 +495,7 @@
         1540,
         400
       ],
-      "id": "LoanEngineWfB001-15",
+      "id": "LoanEngineWfB001-20",
       "notes": "Product-mode run for those products; it compiles nothing, so it never loops.",
       "notesInFlow": true
     }
@@ -395,6 +528,11 @@
         [
           {
             "node": "Jobs waiting for matching",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Runs waiting for emails",
             "type": "main",
             "index": 0
           }
@@ -484,6 +622,50 @@
           },
           {
             "node": "Products compiled late",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Runs waiting for emails": {
+      "main": [
+        [
+          {
+            "node": "Prove again before emailing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prove again before emailing": {
+      "main": [
+        [
+          {
+            "node": "Proof still passes?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Proof still passes?": {
+      "main": [
+        [
+          {
+            "node": "Mark run recovered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark run recovered": {
+      "main": [
+        [
+          {
+            "node": "Finish emails (C)",
             "type": "main",
             "index": 0
           }

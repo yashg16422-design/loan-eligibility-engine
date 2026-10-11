@@ -10,7 +10,16 @@ export const MAX_BYTES = 50 * 1024 * 1024; // same limit the S3 upload policy en
 export type UploadState =
   | { phase: "idle" }
   | { phase: "sending"; name: string; bytes: number }
-  | { phase: "tracking"; name: string; bytes: number; jobId: string; progress?: UploadProgress; finished: boolean }
+  | {
+      phase: "tracking";
+      name: string;
+      bytes: number;
+      jobId: string;
+      progress?: UploadProgress;
+      finished: boolean;
+      startedAt: number; // epoch ms, for the "while you wait" timer
+      reconnecting?: boolean; // the last poll failed transiently; still tracking
+    }
   | { phase: "error"; name?: string; message: string };
 
 interface Ctx {
@@ -31,25 +40,62 @@ export function isFinished(p: UploadProgress | undefined): boolean {
   return handled || !p.match_run.matches_new; // nothing new = nobody to email
 }
 
+// The upload being tracked survives a reload (this tab only): the pipeline runs on the server
+// either way, so the page just picks the job up again.
+const KEY = "clickpar-upload";
+type Saved = { jobId: string; name: string; bytes: number; startedAt: number };
+
+function saved(): Saved | null {
+  try {
+    return JSON.parse(sessionStorage.getItem(KEY) ?? "null") as Saved | null;
+  } catch {
+    return null;
+  }
+}
+
+function remember(s: Saved | null) {
+  try {
+    if (s) sessionStorage.setItem(KEY, JSON.stringify(s));
+    else sessionStorage.removeItem(KEY);
+  } catch {
+    /* private mode: tracking just lasts for this page */
+  }
+}
+
+/** Initial state: resume a tracked upload after a reload. */
+export function resumed(): UploadState {
+  const s = saved();
+  return s ? { phase: "tracking", ...s, finished: false } : { phase: "idle" };
+}
+
 export function UploadProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<UploadState>({ phase: "idle" });
+  const [state, setState] = useState<UploadState>(resumed);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (state.phase !== "tracking" || state.finished) return;
+    if (state.phase !== "tracking") return;
+    if (state.finished) {
+      remember(null);
+      return;
+    }
+    // Faster while there is a lot to watch, gentler while reconnecting.
     const id = window.setTimeout(async () => {
       try {
         const progress = await api.upload(state.jobId);
-        setState((s) => (s.phase === "tracking" ? { ...s, progress, finished: isFinished(progress) } : s));
+        setState((s) =>
+          s.phase === "tracking" ? { ...s, progress, finished: isFinished(progress), reconnecting: false } : s,
+        );
       } catch (err) {
-        // Signed out / no longer yours: stop and say so. Anything else is transient: poll again.
+        // Signed out / no longer yours: stop and say so. Anything else (a timeout while the
+        // database is busy, a network blip) is transient: keep tracking and say "reconnecting".
         if (err instanceof ApiError && [401, 403, 404].includes(err.status)) {
+          remember(null);
           setState((s) => (s.phase === "tracking" ? { phase: "error", name: s.name, message: err.message } : s));
         } else {
-          setState((s) => ({ ...s }));
+          setState((s) => (s.phase === "tracking" ? { ...s, reconnecting: true } : s));
         }
       }
-    }, 1500);
+    }, state.reconnecting ? 4000 : 1500);
     return () => window.clearTimeout(id);
   }, [state]);
 
@@ -68,7 +114,9 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       form.append("file", new Blob([file], { type: "text/csv" }), file.name);
       const res = await fetch(ticket.upload.url, { method: "POST", body: form });
       if (!res.ok) throw new ApiError(res.status, "Storage refused the file. Check it is a CSV under 50 MB.");
-      setState({ phase: "tracking", name: file.name, bytes: file.size, jobId: ticket.job_id, finished: false });
+      const track = { jobId: ticket.job_id, name: file.name, bytes: file.size, startedAt: Date.now() };
+      remember(track);
+      setState({ phase: "tracking", ...track, finished: false });
     } catch (err) {
       setState({ phase: "error", name: file.name, message: err instanceof Error ? err.message : "The upload failed." });
     }
@@ -77,7 +125,10 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   const value: Ctx = {
     state,
     pick: () => input.current?.click(),
-    reset: () => setState({ phase: "idle" }),
+    reset: () => {
+      remember(null);
+      setState({ phase: "idle" });
+    },
   };
 
   return (

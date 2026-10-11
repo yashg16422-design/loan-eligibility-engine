@@ -552,7 +552,9 @@ _ANALYTICS_CACHE_SIZE = 32
 
 
 def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, Any]:
-    """repository.analytics, reused while the upload's (matched_at, purged_at) is unchanged."""
+    """repository.analytics, reused while the upload's (matched_at, purged_at) is unchanged:
+    first from this container's memory, then from the database (computed once for all
+    containers), and only then computed."""
     version = repository.analytics_version(conn, job_id)
     if version is None:
         return repository.analytics(conn, job_id)
@@ -560,7 +562,12 @@ def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
     if key not in _ANALYTICS_CACHE:
         if len(_ANALYTICS_CACHE) >= _ANALYTICS_CACHE_SIZE:
             _ANALYTICS_CACHE.pop(next(iter(_ANALYTICS_CACHE)))  # oldest first
-        _ANALYTICS_CACHE[key] = repository.analytics(conn, job_id)
+        stamp = "|".join(str(v) for v in version)
+        stored = repository.stored_analytics(conn, job_id, stamp)
+        if stored is None:
+            stored = repository.analytics(conn, job_id)
+            repository.store_analytics(conn, job_id, stamp, stored)
+        _ANALYTICS_CACHE[key] = stored
     return _ANALYTICS_CACHE[key]
 
 

@@ -811,6 +811,8 @@ class TestAnalyticsIsolation:
         )
         monkeypatch.setattr(api.repository, "analytics", lambda conn, j: {"job": str(j)})
         monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: ("v1", None))
+        monkeypatch.setattr(api.repository, "stored_analytics", lambda conn, j, v: None)
+        monkeypatch.setattr(api.repository, "store_analytics", lambda conn, j, v, p: None)
         monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
 
     def public(self, job_id=None):
@@ -849,8 +851,16 @@ def test_analytics_are_cached_until_the_upload_is_rematched_or_deleted(monkeypat
         api.repository, "analytics", lambda conn, j: calls.append(j) or {"n": len(calls)}
     )
     monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
+    shared: dict = {}  # stands in for the analytics_cache table
+    monkeypatch.setattr(api.repository, "stored_analytics", lambda c, j, v: shared.get((j, v)))
+    monkeypatch.setattr(
+        api.repository, "store_analytics", lambda c, j, v, p: shared.__setitem__((j, v), p)
+    )
     job = uuid.uuid4()
     assert api.cached_analytics(object(), job) == api.cached_analytics(object(), job) == {"n": 1}
+    # A new container (empty memory) reads the stored result instead of recomputing.
+    monkeypatch.setattr(api, "_ANALYTICS_CACHE", {})
+    assert api.cached_analytics(object(), job) == {"n": 1} and len(calls) == 1
     version["v"] = ("2026-10-11T02:00", None)  # re-matched: fresh numbers
     assert api.cached_analytics(object(), job) == {"n": 2}
     version["v"] = ("2026-10-11T02:00", "2026-10-11T03:00")  # customers deleted

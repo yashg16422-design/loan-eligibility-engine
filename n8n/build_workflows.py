@@ -141,6 +141,11 @@ NODE_NOTES: dict[str, dict[str, str]] = {
         "Matching failed?": "A failed or stopped B1 run marks the job FAILED instead of hanging.",
         "Mark job failed": "Visible in the upload UI; the sweeper retries it later.",
         "Notify users (C)": "Emails users with new matches (sub-workflow C).",
+        "Runs waiting for emails": "Runs that wrote matches but never recorded emails (n8n died mid-run).",
+        "Prove again before emailing": "Re-checks every pair of that run before anyone is emailed.",
+        "Proof still passes?": "Only an exact run is emailed; a failed proof leaves it for a human.",
+        "Mark run recovered": "Records the run as done, noting the sweeper recovered it.",
+        "Finish emails (C)": "C picks up where it stopped; users already emailed are skipped.",
         "Products compiled late": "Products whose criteria compiled for the first time in this run.",
         "Re-match them?": "Earlier users hold a provisional 'may qualify' for them: decide again.",
         "Re-match all users (B, product mode)": "Product-mode run for those products; it compiles nothing, so it never loops.",
@@ -1476,7 +1481,8 @@ def workflow_b() -> dict:
     f.sticky(
         "## B · User-loan matching\n**Triggers**\n- **Webhook** `POST /webhook/ingest-complete` (header "
         "secret, private network) right after a CSV is ingested.\n- **Sweeper** every 10 min: recovers jobs "
-        "whose webhook was missed (n8n down, network blip).\n- **From A** (product mode): re-match all users "
+        "whose webhook was missed (n8n down, network blip), and runs that matched but never recorded their emails "
+        "(proved again, then C finishes them).\n- **From A** (product mode): re-match all users "
         "against new/changed products.\n\n**Claim** = atomic lock on the job, so duplicates and concurrent "
         "triggers never double-match. Then **B1** runs the Treasure Hunt, **C** notifies, and products "
         "whose criteria compiled late are re-matched for every user (product mode, never loops).",
@@ -1625,6 +1631,61 @@ RETURNING job_id::text
         f.link(a, b)
     f.link("Matching failed?", "Mark job failed", out=0)
     f.link("Matching failed?", "Notify users (C)", out=1)
+    # Second sweeper task: runs that wrote matches but never recorded emails (n8n lost its
+    # database or restarted between Stage 3 and C). Prove again, then let C finish: C is
+    # idempotent, so nobody is emailed twice.
+    f.add(
+        "Runs waiting for emails",
+        PG_T,
+        2.5,
+        pg_query(sql_file("notify_recovery.sql")),
+        (220, -200),
+        credentials=PG,
+    )
+    f.add(
+        "Prove again before emailing",
+        PG_T,
+        2.5,
+        pg_query(
+            sql_file("brute_force_check.sql"),
+            f"={{{{ [ $json.run_id, '{COMPILE_PROMPT_VERSION}' ] }}}}",
+        ),
+        (440, -200),
+        credentials=PG,
+    )
+    f.add(
+        "Proof still passes?",
+        IF_T,
+        2,
+        if_true("={{ $json.correctness_ok === true && Number($json.mismatches) === 0 }}"),
+        (660, -200),
+    )
+    f.add(
+        "Mark run recovered",
+        PG_T,
+        2.5,
+        pg_query(sql_file("mark_run_recovered.sql"), "={{ [ $json.run_id ] }}"),
+        (880, -200),
+        credentials=PG,
+    )
+    f.add(
+        "Finish emails (C)",
+        "n8n-nodes-base.executeWorkflow",
+        1.2,
+        {
+            "source": "database",
+            "workflowId": {"__rl": True, "value": WF_C, "mode": "id"},
+            "mode": "each",
+            "options": {"waitForSubWorkflow": True},
+        },
+        (1100, -200),
+        onError="continueRegularOutput",
+    )
+    f.link("Sweeper every 10 min", "Runs waiting for emails")
+    f.link("Runs waiting for emails", "Prove again before emailing")
+    f.link("Prove again before emailing", "Proof still passes?")
+    f.link("Proof still passes?", "Mark run recovered", out=0)
+    f.link("Mark run recovered", "Finish emails (C)")
     if REMATCH_LATE_COMPILES:
         f.add(
             "Products compiled late",

@@ -75,6 +75,14 @@ umask 077
   echo "DB_POSTGRESDB_USER=$(jq -r .username <<<"$meta_json")"
   echo "DB_POSTGRESDB_PASSWORD=$(jq -r .password <<<"$meta_json")"
   echo "DB_POSTGRESDB_SSL_ENABLED=true"
+  # n8n's own connection pool (defaults: 2 connections, 20 s connect timeout, idle ones evicted
+  # after 30 s). During a 10,000-user run RDS is busy writing matches, and reconnecting took
+  # longer than that: n8n lost its database mid-run once (found live). Keep more connections
+  # open and give a reconnect time.
+  echo "DB_POSTGRESDB_POOL_SIZE=6"
+  echo "DB_POSTGRESDB_CONNECTION_TIMEOUT=60000"
+  echo "DB_POSTGRESDB_IDLE_CONNECTION_TIMEOUT=600000"
+  echo "DB_CONNECTION_ACQUISITION_TIMEOUT_MS=120000"
   echo "DB_POSTGRESDB_SSL_CA_FILE=/certs/rds-ca.pem"
   # Trust the RDS CA process-wide too, so the workflows' Postgres credential can use
   # "SSL: Require" WITH certificate verification (no "ignore SSL issues").

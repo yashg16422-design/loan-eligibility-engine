@@ -134,7 +134,10 @@ functions:
     handler: loan_engine/api/handler.handler
     description: Upload UI, presigned POST, job status, borrower dashboard API + app, ops view
     role: ApiRole
-    timeout: 10
+    # Under the HTTP API's 30 s limit. Normal requests take 0.1-0.7 s; the headroom is for a cold
+    # container's first database connection while a matching run keeps RDS busy (10 s was not
+    # enough: seen live as "internal error").
+    timeout: 28
     memorySize: 256
     vpc:
       securityGroupIds:

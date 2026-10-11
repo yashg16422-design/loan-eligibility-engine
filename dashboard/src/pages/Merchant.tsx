@@ -4,10 +4,11 @@
 import { FileCsv, SealCheck, SignOut, UploadSimple, WarningCircle, XCircle } from "@phosphor-icons/react";
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { auth } from "../api/auth";
-import { api } from "../api/client";
+import { api, ApiError } from "../api/client";
 import type { Analytics, CrawlHealth, Run, UploadRecord, WorkflowError } from "../api/types";
 import { AnalyticsGrid } from "../components/AnalyticsGrid";
 import { EmailPreviews } from "../components/EmailPreviews";
+import { WaitPanel } from "../components/WaitPanel";
 import { WorkflowMap } from "../components/WorkflowMap";
 import { CHANNEL_LABEL } from "../lib/offers";
 import { useUpload } from "../lib/upload";
@@ -104,13 +105,16 @@ export function Merchant() {
   useEffect(() => {
     if (live?.finished) focusCharts.current = true;
   }, [live?.finished]);
-  const onChartsLoaded = useCallback(() => {
-    if (!focusCharts.current) return;
-    focusCharts.current = false;
+  const goToAnalytics = useCallback(() => {
     const heading = document.getElementById("analytics-title");
     heading?.scrollIntoView({ behavior: "smooth", block: "start" });
     heading?.focus({ preventScroll: true });
   }, []);
+  const onChartsLoaded = useCallback(() => {
+    if (!focusCharts.current) return;
+    focusCharts.current = false;
+    goToAnalytics();
+  }, [goToAnalytics]);
 
   return (
     <div className="mx-auto max-w-[1480px] px-5 pt-14 pb-20 sm:px-10 lg:pt-24 xl:grid xl:grid-cols-[minmax(0,1fr)_200px] xl:gap-16 xl:px-16">
@@ -136,8 +140,9 @@ export function Merchant() {
               admin={admin}
               records={
                 <UploadsTable uploads={uploads} admin={admin} selected={chartJob} referenceJob={reference?.job_id ?? null} onView={(id) => {
-                  focusCharts.current = true; // scroll there once its charts have loaded
+                  // Straight to Analytics: the loading bar shows there while its charts load.
                   setPicked(id);
+                  window.requestAnimationFrame(goToAnalytics);
                 }} onDeleted={async () => {
                   setPicked(null);
                   upload.reset();
@@ -296,6 +301,9 @@ function Bulk() {
     <div className="grid gap-8 [&>*]:min-w-0">
       <DropZone />
       <WorkflowMap state={upload.state} />
+      {(upload.state.phase === "sending" || (upload.state.phase === "tracking" && !upload.state.finished)) && (
+        <WaitPanel state={upload.state} />
+      )}
       {p && (
         <div className="grid gap-px border border-line bg-line lg:grid-cols-2 [&>*]:min-w-0" aria-live="polite">
           <section className="bg-bg p-7">
@@ -372,7 +380,7 @@ function DropZone() {
           <h3 className="text-xl font-light">Drop a customers CSV, or choose one</h3>
           <p className="mt-2 max-w-[64ch] text-sm text-mute">
             A .csv with a header row: user_id, name, email, monthly_income, credit_score, employment_status, age. Up to
-            50 MB, 50 uploads a day. Rows that fail a check are set aside with the reason; the rest are matched.
+            50 MB, 10 uploads per account a day. Rows that fail a check are set aside with the reason; the rest are matched.
           </p>
           {state.phase === "error" && (
             <p role="alert" className="mt-4 flex items-start gap-2 text-sm text-coral">
@@ -468,22 +476,43 @@ function Readouts({ title, cells, cols }: { title: string; cells: Cell[]; cols: 
 function Charts({ jobId, name, signedIn, onLoaded }: { jobId: string; name: string; signedIn: boolean; onLoaded: () => void }) {
   const [data, setData] = useState<{ jobId: string; analytics: Analytics } | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [nonce, setNonce] = useState(0); // "Try again" after the automatic retries
   useEffect(() => {
     let gone = false;
+    let retry = 0;
     setFailed(null);
     (signedIn ? api.uploadAnalytics(jobId) : api.analytics(jobId))
       .then((a) => !gone && setData({ jobId, analytics: a }))
-      .catch((err) => !gone && setFailed(err instanceof Error ? err.message : "The charts could not be loaded."));
+      .catch((err) => {
+        if (gone) return;
+        // A busy database (a run is writing matches) can make the first computation slow:
+        // try again by itself a few times before showing an error.
+        if (attempt < 3 && !(err instanceof ApiError && [401, 403, 404].includes(err.status))) {
+          retry = window.setTimeout(() => setAttempt((n) => n + 1), 3000 * (attempt + 1));
+        } else {
+          setFailed(err instanceof Error ? err.message : "The charts could not be loaded.");
+        }
+      });
     return () => {
       gone = true;
+      window.clearTimeout(retry);
     };
-  }, [jobId, signedIn]);
+  }, [jobId, signedIn, attempt, nonce]);
+  useEffect(() => setAttempt(0), [jobId]);
   const ready = data?.jobId === jobId;
   useEffect(() => {
     if (ready) onLoaded();
   }, [ready, onLoaded]);
-  if (failed) return <p role="alert" className="flex items-center gap-2 text-sm text-coral"><WarningCircle size={16} aria-hidden /> {failed}</p>;
-  if (!ready || !data) return <LoadingBar label={`Loading analytics for ${name}`} />;
+  if (failed)
+    return (
+      <p role="alert" className="flex flex-wrap items-center gap-2 text-sm text-coral">
+        <WarningCircle size={16} aria-hidden /> {failed}
+        <button type="button" className="underline underline-offset-4" onClick={() => (setAttempt(0), setNonce((x) => x + 1))}>Try again</button>
+      </p>
+    );
+  if (!ready || !data)
+    return <LoadingBar label={attempt ? `Still computing the analytics for ${name}: retrying (${attempt} of 3)` : `Loading analytics for ${name}`} />;
   return <AnalyticsGrid data={data.analytics} />;
 }
 

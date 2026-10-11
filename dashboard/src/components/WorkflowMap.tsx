@@ -57,7 +57,10 @@ export function stages(state: UploadState): Node[] {
       status: notify,
       lines: notify === "done"
         ? emails ? [`${n(p?.notifications.sent ?? 0)} sent`, `${n(p?.notifications.skipped_demo ?? 0)} held by the demo cap`] : ["No new matches, so no emails"]
-        : ["Best pick and top picks per user, to test inboxes only"],
+        : run?.status === "failed" && notify === "active"
+          // n8n died between matching and email: the sweeper proves the run again and finishes it.
+          ? ["Interrupted after matching", "The sweeper re-checks and finishes these emails within 10 minutes"]
+          : ["Best pick and top picks per user, to test inboxes only"],
     },
   ];
 }
