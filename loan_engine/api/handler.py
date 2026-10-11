@@ -786,10 +786,18 @@ def purge_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]
     with db(deps) as conn:
         own_upload(conn, job_id, who)
         deleted = repository.purge_upload(conn, job_id)
-    if deleted is None:
-        raise NotFoundError("job not found")
-    logger.info("upload purged", job_id=str(job_id), deleted_users=deleted, admin=who.is_admin)
-    return {"job_id": str(job_id), "deleted_users": deleted}
+        if deleted is None:
+            raise NotFoundError("job not found")
+        left = repository.users_left(conn, job_id)
+    logger.info(
+        "upload purged",
+        job_id=str(job_id),
+        deleted_users=deleted,
+        remaining=left,
+        admin=who.is_admin,
+    )
+    # remaining > 0: a big upload is deleted in chunks; the client calls again until 0.
+    return {"job_id": str(job_id), "deleted_users": deleted, "remaining": left}
 
 
 # ---------------------------------------------------------------- built front ends (last)

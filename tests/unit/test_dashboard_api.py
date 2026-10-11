@@ -552,6 +552,7 @@ class TestDataReset:
             api.repository, "upload_owner", lambda conn, j: (j in owners, owners.get(j))
         )
         monkeypatch.setattr(api.repository, "purge_upload", lambda conn, j: purged.append(j) or 7)
+        monkeypatch.setattr(api.repository, "users_left", lambda conn, j: 0)
         monkeypatch.setattr(
             api.repository,
             "purge_csv_uploads",
@@ -565,7 +566,8 @@ class TestDataReset:
         assert res["statusCode"] == 404 and purged == []
         for who in (MERCHANT, ADMIN):  # the owner, and an admin
             res = invoke({**one, "requestContext": signed_in_as(who)}, lambda_context)
-            assert (res["statusCode"], json.loads(res["body"])["deleted_users"]) == (200, 7)
+            body = json.loads(res["body"])
+            assert (res["statusCode"], body["deleted_users"], body["remaining"]) == (200, 7, 0)
         every = {"routeKey": "DELETE /uploads", "queryStringParameters": {"scope": "all"}}
         assert invoke({**every, "requestContext": signed_in_as(MERCHANT)})["statusCode"] == 403
         res = invoke({**every, "requestContext": signed_in_as(ADMIN)}, lambda_context)

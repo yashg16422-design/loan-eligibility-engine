@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
@@ -551,53 +552,103 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
         ).fetchall()
 
 
-def purge_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> int | None:
-    """Delete the users one upload added or changed, so the same file can be uploaded as new.
+# Deletes run in chunks: one 10,000-customer upload cascades to ~260,000 matches, which took
+# longer than the API timeout in one transaction (found live). Each chunk is its own short
+# transaction, and a call stops after a time budget and reports what is left; the client calls
+# again until nothing is. A half-deleted upload is simply resumed by the next call.
+PURGE_CHUNK = 2000
+PURGE_BUDGET_S = 15.0
 
-    Returns how many users were deleted, or None if the job does not exist. The job row is
-    locked first, so ingest or Workflow B cannot claim it halfway through the delete.
+
+def users_left(conn: psycopg.Connection, job_id: uuid.UUID) -> int:
+    row = conn.execute("SELECT count(*) FROM users WHERE upload_job_id = %s", (job_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def purge_upload(
+    conn: psycopg.Connection,
+    job_id: uuid.UUID,
+    chunk: int = PURGE_CHUNK,
+    budget_s: float = PURGE_BUDGET_S,
+) -> int | None:
+    """Delete (part of) the users one upload added or changed, so the same file can be uploaded
+    as new. Returns how many were deleted by this call (users_left tells what remains), or None
+    if the job does not exist. The job row is locked in every chunk, so ingest or Workflow B
+    cannot claim it halfway; it is stamped purged_at once no user is left.
     """
-    with conn.transaction():
-        row = conn.execute(
-            f"SELECT {_BUSY} FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
-        ).fetchone()
-        if row is None:
-            return None
-        if row[0]:
-            raise JobBusyError
-        deleted = conn.execute("DELETE FROM users WHERE upload_job_id = %s", (job_id,)).rowcount
-        conn.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (job_id,))
-    return deleted
+    started, deleted = time.monotonic(), 0
+    while True:
+        with conn.transaction():
+            row = conn.execute(
+                f"SELECT {_BUSY} FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if row[0]:
+                raise JobBusyError
+            n = conn.execute(
+                "DELETE FROM users WHERE user_id IN"
+                " (SELECT user_id FROM users WHERE upload_job_id = %s LIMIT %s)",
+                (job_id, chunk),
+            ).rowcount
+            deleted += n
+            if n < chunk:
+                conn.execute(
+                    "UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (job_id,)
+                )
+                return deleted
+        if time.monotonic() - started > budget_s:
+            return deleted
 
 
-def purge_csv_uploads(conn: psycopg.Connection, account_id: str | None = None) -> dict[str, int]:
+def purge_csv_uploads(
+    conn: psycopg.Connection,
+    account_id: str | None = None,
+    chunk: int = PURGE_CHUNK,
+    budget_s: float = PURGE_BUDGET_S,
+) -> dict[str, int]:
     """Delete the customers of one account's uploads ("reset my workspace"), or of every
-    bulk upload when account_id is None (admins).
+    bulk upload when account_id is None (admins), in chunks (see PURGE_CHUNK).
 
-    Instant checks stay: they belong to the people who ran them, who can delete their own.
+    Returns what this call deleted, how many uploads are now fully cleared, and how many
+    customers are still left for the next call. Instant checks stay: they belong to the people
+    who ran them, who can delete their own.
     """
     mine = "(%(a)s::text IS NULL OR account_id = %(a)s::text)"
-    with conn.transaction():
-        busy = conn.execute(
-            f"SELECT bool_or({_BUSY}) FROM"
-            " (SELECT status, match_status, matched_at FROM upload_jobs"
-            f" WHERE source = 'csv' AND {mine} FOR UPDATE) j",
-            {"a": account_id},
-        ).fetchone()
-        if busy and busy[0]:
-            raise JobBusyError
-        deleted = conn.execute(
-            "DELETE FROM users u USING upload_jobs j"
-            " WHERE j.job_id = u.upload_job_id AND j.source = 'csv'"
-            " AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)",
-            {"a": account_id},
-        ).rowcount
-        uploads = conn.execute(
-            "UPDATE upload_jobs SET purged_at = now()"
-            f" WHERE source = 'csv' AND purged_at IS NULL AND {mine}",
-            {"a": account_id},
-        ).rowcount
-    return {"deleted_users": deleted, "uploads": uploads}
+    started, deleted, uploads = time.monotonic(), 0, 0
+    while True:
+        with conn.transaction():
+            busy = conn.execute(
+                f"SELECT bool_or({_BUSY}) FROM"
+                " (SELECT status, match_status, matched_at FROM upload_jobs"
+                f" WHERE source = 'csv' AND {mine} FOR UPDATE) j",
+                {"a": account_id},
+            ).fetchone()
+            if busy and busy[0]:
+                raise JobBusyError
+            n = conn.execute(
+                "DELETE FROM users WHERE user_id IN (SELECT u.user_id FROM users u"
+                " JOIN upload_jobs j ON j.job_id = u.upload_job_id WHERE j.source = 'csv'"
+                " AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text) LIMIT %(n)s)",
+                {"a": account_id, "n": chunk},
+            ).rowcount
+            deleted += n
+            uploads += conn.execute(
+                "UPDATE upload_jobs j SET purged_at = now()"
+                f" WHERE source = 'csv' AND purged_at IS NULL AND {mine}"
+                " AND NOT EXISTS (SELECT 1 FROM users u WHERE u.upload_job_id = j.job_id)",
+                {"a": account_id},
+            ).rowcount
+            if n < chunk:
+                return {"deleted_users": deleted, "uploads": uploads, "remaining": 0}
+        if time.monotonic() - started > budget_s:
+            row = conn.execute(
+                "SELECT count(*) FROM users u JOIN upload_jobs j ON j.job_id = u.upload_job_id"
+                " WHERE j.source = 'csv' AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)",
+                {"a": account_id},
+            ).fetchone()
+            left = int(row[0]) if row else 0
+            return {"deleted_users": deleted, "uploads": uploads, "remaining": left}
 
 
 def delete_check(conn: psycopg.Connection, user_id: uuid.UUID) -> str:

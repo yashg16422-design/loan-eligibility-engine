@@ -81,3 +81,23 @@ describe("merchant calls carry the sign-in", () => {
     expect(explain(400, "body must be JSON")).toBe("body must be JSON");
   });
 });
+
+describe("big deletes", () => {
+  it("keeps deleting in chunks until nothing is left, adding up the totals", async () => {
+    const { untilDone } = await import("./client");
+    const answers = [
+      { deleted_users: 4000, remaining: 6000 },
+      { deleted_users: 4000, remaining: 2000 },
+      { deleted_users: 2000, remaining: 0 },
+    ];
+    const seen: number[][] = [];
+    const r = await untilDone(async () => answers.shift()!, (d, left) => seen.push([d, left]));
+    expect(r.deleted_users).toBe(10000);
+    expect(seen).toEqual([[4000, 6000], [8000, 2000], [10000, 0]]);
+  });
+
+  it("works with a server that answers in one go (no remaining field)", async () => {
+    const { untilDone } = await import("./client");
+    expect((await untilDone(async () => ({ deleted_users: 7 }))).deleted_users).toBe(7);
+  });
+});

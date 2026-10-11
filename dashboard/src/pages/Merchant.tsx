@@ -556,6 +556,9 @@ function UploadsTable({
   onDeleted: () => Promise<void>;
 }) {
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  // Big deletes run in chunks: show how far along they are.
+  const progress = (deleted: number, left: number) =>
+    left > 0 && setResult({ ok: true, text: `Deleting… ${n(deleted)} customers deleted, ${n(left)} to go.` });
   const report = async (work: () => Promise<string>) => {
     try {
       setResult({ ok: true, text: await work() });
@@ -576,14 +579,14 @@ function UploadsTable({
         <span className="flex flex-wrap items-center gap-3">
           <ConfirmDelete small label="Reset my workspace" question="Delete the customers of every upload you made?"
             onConfirm={() => report(async () => {
-              const r = await api.purgeUploads("mine");
-              return `Your workspace is empty again: ${n(r.deleted_users)} customers from ${n(r.uploads)} uploads deleted.`;
+              const r = await api.purgeUploads("mine", progress);
+              return `Your workspace is empty again: ${n(r.deleted_users)} customers deleted.`;
             })} />
           {admin && (
             <ConfirmDelete small label="Delete every account's uploads" question="Delete every customer that came from any account's CSV?"
               onConfirm={() => report(async () => {
-                const r = await api.purgeUploads("all");
-                return `Deleted ${n(r.deleted_users)} customers from ${n(r.uploads)} uploads across all accounts.`;
+                const r = await api.purgeUploads("all", progress);
+                return `Deleted ${n(r.deleted_users)} customers across all accounts.`;
               })} />
           )}
         </span>
@@ -635,7 +638,7 @@ function UploadsTable({
                               ? `This is the reference dataset behind the default charts. Delete its ${n(u.users_now)} customers?`
                               : `Delete ${n(u.users_now)} customers?`}
                             onConfirm={() => report(async () => {
-                              const r = await api.purgeUpload(u.job_id);
+                              const r = await api.purgeUpload(u.job_id, progress);
                               return `Deleted ${n(r.deleted_users)} customers from ${u.original_filename ?? "that upload"}. Upload it again to run it as new.`;
                             })} />
                         )}

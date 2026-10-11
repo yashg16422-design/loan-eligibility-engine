@@ -171,9 +171,31 @@ export const api = {
       false,
       true,
     ).then((r) => r.body),
-  purgeUpload: (jobId: string) =>
-    request<{ deleted_users: number }>(`/uploads/${jobId}`, { method: "DELETE" }, false, true).then((r) => r.body),
+  /** Delete one upload's customers. A big upload is deleted in chunks: keep calling until
+   *  nothing is left, reporting progress (each call stays well inside the API time limit). */
+  purgeUpload: (jobId: string, onProgress?: Progress) =>
+    untilDone((): Promise<Purged> =>
+      request<Purged>(`/uploads/${jobId}`, { method: "DELETE" }, false, true).then((r) => r.body), onProgress),
   /** "mine" resets this account's workspace; "all" (admins) clears every account's uploads. */
-  purgeUploads: (scope: "mine" | "all") =>
-    request<{ deleted_users: number; uploads: number }>(`/uploads?scope=${scope}`, { method: "DELETE" }, false, true).then((r) => r.body),
+  purgeUploads: (scope: "mine" | "all", onProgress?: Progress) =>
+    untilDone((): Promise<Purged> =>
+      request<Purged>(`/uploads?scope=${scope}`, { method: "DELETE" }, false, true).then((r) => r.body), onProgress),
 };
+
+type Purged = { deleted_users: number; remaining?: number; uploads?: number };
+type Progress = (deleted: number, remaining: number) => void;
+
+/** Repeat a chunked delete until the server says nothing is left; totals across calls. */
+export async function untilDone(call: () => Promise<Purged>, onProgress?: Progress, maxCalls = 200): Promise<Purged> {
+  let deleted = 0;
+  let uploads = 0;
+  for (let i = 0; i < maxCalls; i++) {
+    const r = await call();
+    deleted += r.deleted_users;
+    uploads += r.uploads ?? 0;
+    const left = r.remaining ?? 0;
+    onProgress?.(deleted, left);
+    if (left === 0) return { deleted_users: deleted, remaining: 0, uploads };
+  }
+  throw new ApiError(504, "Deleting is taking unusually long. Run Delete again to continue where it stopped.");
+}

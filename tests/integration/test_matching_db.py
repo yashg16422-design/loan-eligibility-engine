@@ -451,7 +451,11 @@ def test_data_reset_runs_as_app_ingest_and_keeps_history(db):
     assert owned in mine and csv_job not in mine
     assert repository.list_uploads(db, "nobody") == []
     # "Reset my workspace" touches only that account's uploads.
-    assert repository.purge_csv_uploads(db, "nobody") == {"deleted_users": 0, "uploads": 0}
+    assert repository.purge_csv_uploads(db, "nobody") == {
+        "deleted_users": 0,
+        "uploads": 0,
+        "remaining": 0,
+    }
     assert repository.purge_csv_uploads(db, "sub-reset")["uploads"] == 1  # only "mine.csv"
 
 
@@ -688,3 +692,51 @@ def test_upload_list_reads_match_counts_from_its_runs(db):
     db.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (job,))
     row = next(u for u in repository.list_uploads(db, "list-sub") if u["job_id"] == job)
     assert row["matches"] == 0
+
+
+def test_a_big_delete_runs_in_chunks_and_resumes_until_done(db):
+    """A 10k-user delete took longer than the API timeout in one transaction (found live): it
+    now deletes in short chunks, reports what is left, and the next call carries on."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "INSERT INTO accounts (account_id, email) VALUES ('chunk-sub', 'chunk@example.org') "
+        "ON CONFLICT DO NOTHING"
+    )
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "big.csv", account_id="chunk-sub")
+    db.execute("UPDATE upload_jobs SET status = 'COMPLETED' WHERE job_id = %s", (job,))
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age,"
+        " upload_job_id) SELECT gen_random_uuid(), 'u' || g || '@example.com', 50000, 700,"
+        " 'salaried', 30, %s FROM generate_series(1, 7) g",
+        (job,),
+    )
+    # A zero budget stops after one chunk of 3: deleted, but not done yet.
+    assert repository.purge_upload(db, job, chunk=3, budget_s=0) == 3
+    assert repository.users_left(db, job) == 4
+    assert db.execute("SELECT purged_at FROM upload_jobs WHERE job_id = %s", (job,)).fetchone() == (
+        None,
+    )
+    assert repository.purge_upload(db, job, chunk=3, budget_s=0) == 3
+    assert repository.purge_upload(db, job, chunk=3, budget_s=0) == 1  # the last chunk
+    assert repository.users_left(db, job) == 0
+    assert db.execute(
+        "SELECT purged_at IS NOT NULL FROM upload_jobs WHERE job_id = %s", (job,)
+    ).fetchone() == (True,)
+
+    # Reset my workspace works the same way across all of the account's uploads.
+    job2 = uuid.uuid4()
+    repository.create_job(db, job2, f"raw/{job2}.csv", "b.csv", account_id="chunk-sub")
+    db.execute("UPDATE upload_jobs SET status = 'COMPLETED' WHERE job_id = %s", (job2,))
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age,"
+        " upload_job_id) SELECT gen_random_uuid(), 'v' || g || '@example.com', 50000, 700,"
+        " 'salaried', 30, %s FROM generate_series(1, 5) g",
+        (job2,),
+    )
+    first = repository.purge_csv_uploads(db, "chunk-sub", chunk=2, budget_s=0)
+    assert (first["deleted_users"], first["remaining"]) == (2, 3)
+    while first["remaining"]:
+        first = repository.purge_csv_uploads(db, "chunk-sub", chunk=2, budget_s=0)
+    assert repository.users_left(db, job2) == 0
