@@ -23,7 +23,11 @@ sign-up and a Google sign-in with the same address resolve to the same account r
 and saved checks follow the person. Cognito owns identity (passwords never reach our code or database). Its default
 email sender delivers verification codes to **any** address, which our own SES cannot do while
 in the sandbox. API Gateway's **JWT authorizer** verifies the Cognito ID token on every
-`/account` route before the Lambda runs (verified live: no token or a fake one → 401). Our
+`/account` route before the Lambda runs (verified live: no token or a fake one → 401).
+Google always shows its account chooser (managed login forwards `prompt=select_account`), and
+sign-out revokes the refresh token and ends Cognito's one-hour session. A Google-only account
+has no password: the reset screen says so (Cognito deliberately sends nothing, to avoid
+revealing which emails exist) and offers Google, or adding a password with the same email. Our
 database stores `accounts` (Cognito `sub`, email, daily-picks flag) and `account_profiles`
 (which checks an account saved; whoever saves a check first owns it, enforced by a UNIQUE key).
 Saving needs the results link, proving the person ran (or was emailed) that check.

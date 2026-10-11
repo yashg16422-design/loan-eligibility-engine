@@ -235,3 +235,67 @@ dashboard tests all pass; `ruff` is clean.
   tunnel was closed afterwards.
 - **n8n database and Docker state:** an SSM Run Command on the EC2 host ran `psql` in a throwaway
   `postgres:16` container, reading the connection from n8n's own `.env` so no password left the host.
+
+## 10. Re-checked after the hardening (2026-10-11, ~01:50 IST)
+
+Everything below ran on the live stack after the changes of 2026-10-11 were deployed (commits
+`db62361` … `e9dadb2`).
+
+**n8n:** the same database query as section 2. All eight workflows are present; every one except
+the E1 drill is active.
+
+```
+ A1 · Process page batch (sub-workflow)        | t
+ A · Loan product discovery (crawler)          | t
+ B1 · Match one run (Treasure Hunt)            | t
+ B · User-loan matching                        | t
+ C1 · Compose a batch of emails (sub-workflow) | t
+ C · Notify matched users (SES)                | t
+ E1 · Error drill (fails on purpose)           | f
+ E · Error handler                             | t
+```
+
+**A fresh upload went through the whole automatic path** (10 new customers + 1 bad row, webhook
+→ B → B1 → C → C1, no manual step), in about 9 seconds:
+
+```
+  status   | total_rows | inserted | rejected | matches_new | prewrite_ok | correctness_ok | emails_sent | emails_skipped_demo | emails_stored
+-----------+------------+----------+----------+-------------+-------------+----------------+-------------+---------------------+---------------
+ COMPLETED |         11 |       10 |        1 |         267 | t           | t              |           5 |                   5 |            10
+```
+
+- **Both proofs passed** (`prewrite_ok`, `correctness_ok`).
+- **5 real emails** went to the aliases.
+- **All 10 emails are stored:** subject and text for the 5 sent, and C1 built the other 5.
+- **0 rows in `workflow_errors`.**
+
+**Streaming ingest at 10,000 rows in Lambda** (the same `users.csv` re-uploaded by the same
+account, which also proves idempotency):
+
+```
+"total_rows":10000 "inserted":0 "updated":0 "unchanged":10000 "rejected":0
+REPORT Duration: 1101.43 ms  Memory Size: 1024 MB  Max Memory Used: 127 MB
+```
+
+The B run that followed: 0 users changed, 0 new matches, both proofs `t`, no email.
+
+**TLS verification:** the migrate Lambda applied migrations 011 and 012 with
+`DB_SSLMODE=verify-full`. The live RDS certificate verified against the bundled CA
+(`pg_stat_ssl.ssl = true` with `sslmode=verify-ca`).
+
+**Account isolation** (no token):
+
+```
+401 /uploads   401 /account   401 /me   401 /uploads/<job>/analytics
+404 /analytics?job_id=<any other job>
+200 /analytics            -> the reference dataset only (users 10000)
+/ops/runs                 -> merchant-owned runs listed with job_id null
+```
+
+**An incident during the change, found and fixed live.**
+- **What happened:** n8n's plain query parameters broke on the email body (newlines). "Record
+  this send" failed after the first send of one test upload.
+- **The fix:** both send and error records now go to Postgres as one JSON parameter. A test
+  fails if raw free text ever reaches a query parameter again.
+- **Recovery:** the affected run was completed by re-running C. Its counters are 5 sent, 0
+  failed, 7 skipped, and all 12 emails are stored. One test alias received one duplicate email.

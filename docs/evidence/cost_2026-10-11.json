@@ -1,0 +1,40 @@
+{
+ "source": "AWS Cost Explorer (get-cost-and-usage), RECORD_TYPE=Usage (gross, before credits), ap-southeast-2, 2026-10-07..2026-10-11 (10 Oct partial: Cost Explorer lags ~24 h)",
+ "captured": "2026-10-11 ~02:30 IST",
+ "credits": "All usage was offset by account credits (net cost 0.00 USD).",
+ "total_usage_usd": 4.369,
+ "by_service_usd": {
+  "Amazon Virtual Private Cloud": 1.6662,
+  "Amazon Relational Database Service": 1.2502,
+  "Amazon Elastic Compute Cloud - Compute": 0.6394,
+  "Amazon Bedrock": 0.4693,
+  "EC2 - Other": 0.1678,
+  "AWS Secrets Manager": 0.156,
+  "Amazon Simple Email Service": 0.0122,
+  "Amazon Simple Storage Service": 0.0048,
+  "Amazon API Gateway": 0.0028
+ },
+ "by_usage_type_usd": {
+  "APS2-VpcEndpoint-Hours": 1.144,
+  "APS2-InstanceUsage:db.t4g.micro": 1.0918,
+  "APS2-BoxUsage:t4g.micro": 0.6394,
+  "APS2-PublicIPv4:InUseAddress": 0.5221,
+  "APS2-NovaPro-output-tokens": 0.2638,
+  "APS2-NovaPro-input-tokens": 0.2013,
+  "APS2-EBS:VolumeUsage.gp3": 0.1677,
+  "APS2-RDS:GP3-Storage": 0.1583,
+  "APS2-Nova2.0Lite-output-tokens-cross-region-global": 0.0042
+ },
+ "daily_usd": {
+  "2026-10-07": 0.0,
+  "2026-10-08": 0.965,
+  "2026-10-09": 2.235,
+  "2026-10-10": 1.169
+ },
+ "not_part_of_the_stack": "APS2-BoxUsage:t4g.micro (0.639 USD) is EC2 instance i-0e45949ba6c64872a named 'recover' (launched 2026-10-07, no CloudFormation stack tag). The n8n host is a t4g.small, billed at 0.00 (EC2 t4g.small free trial).",
+ "llm_from_pipeline_runs": {
+  "first_10k_matching_run_usd_est": 0.0243,
+  "every_later_run_usd_est": 0.0,
+  "note": "compile cost estimated from tokens in pipeline_runs (Nova Pro list price); see pipeline_runs_2026-10-10.json"
+ }
+}

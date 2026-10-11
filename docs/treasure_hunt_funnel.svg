@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 390" font-family="Helvetica, Arial, sans-serif" role="img" aria-label="Treasure Hunt funnel for the 10,000-user run">
+<rect width="860" height="390" fill="#ffffff"/>
+<text x="24" y="34" font-size="18" font-weight="700" fill="#111">The Optimization Treasure Hunt: 10,000 users × 59 products</text>
+<text x="24" y="54" font-size="12" fill="#555">Measured run e7115e09 (pipeline_runs). Log scale.</text>
+<text x="24" y="92" font-size="13" fill="#111">User × product pairs (naive)</text>
+<text x="24" y="108" font-size="11" fill="#666">every user against every product</text>
+<rect x="300" y="80" width="440.0" height="26" rx="3" fill="#2b6cb0"/>
+<text x="750.0" y="98" font-size="15" font-weight="700" fill="#111">590,000</text>
+<text x="24" y="150" font-size="13" fill="#111">Pairs passing published rules</text>
+<text x="24" y="166" font-size="11" fill="#666">SQL hard filter on real values</text>
+<rect x="300" y="138" width="414.9" height="26" rx="3" fill="#2b6cb0"/>
+<text x="724.9" y="156" font-size="15" font-weight="700" fill="#111">276,594</text>
+<text x="24" y="208" font-size="13" fill="#111">Class × product decisions</text>
+<text x="24" y="224" font-size="11" fill="#666">164 classes</text>
+<rect x="300" y="196" width="303.9" height="26" rx="3" fill="#2b6cb0"/>
+<text x="613.9" y="214" font-size="15" font-weight="700" fill="#111">9,676</text>
+<text x="24" y="266" font-size="13" fill="#111">LLM calls</text>
+<text x="24" y="282" font-size="11" fill="#666">one per batch of distinct criteria texts</text>
+<rect x="300" y="254" width="53.3" height="26" rx="3" fill="#d69e2e"/>
+<text x="363.3" y="272" font-size="15" font-weight="700" fill="#111">5</text>
+<text x="24" y="324" font-size="13" fill="#111">Mismatches vs brute force</text>
+<text x="24" y="340" font-size="11" fill="#666">every pair re-checked</text>
+<rect x="300" y="312" width="0.0" height="26" rx="3" fill="#2f855a"/>
+<text x="310.0" y="330" font-size="15" font-weight="700" fill="#111">0</text>
+<text x="24" y="376" font-size="11" fill="#555">Later runs: 0 LLM calls (every criteria text cached). Source: docs/evidence/pipeline_runs_2026-10-10.json</text>
+</svg>

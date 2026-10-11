@@ -1,0 +1,59 @@
+{
+ "machine": "arm64 Darwin 25.6.0, Python 3.12.14, Postgres 17 in Docker (local laptop)",
+ "note": "Local benchmark, not RDS (db.t4g.micro is far smaller). Products: the 59-product live snapshot in tests/fixtures; compiled rules: the 3 test rules (others 'may qualify').",
+ "results": [
+  {
+   "users": 10000,
+   "products": 59,
+   "naive_pairs": 590000,
+   "classes": 329,
+   "class_product_decisions": 19411,
+   "matches_written": 271956,
+   "llm_calls": 0,
+   "prewrite_mismatches": 0,
+   "postwrite_mismatches": 0,
+   "seconds": {
+    "ingest (streaming)": 0.2,
+    "stage 1+2: classes and decisions": 0.1,
+    "planner statistics": 0.0,
+    "pre-write proof (every pair)": 0.5,
+    "stage 3: expand, score, diff": 4.3,
+    "post-write proof (every pair)": 0.6
+   },
+   "matching_seconds_total": 5.5
+  },
+  {
+   "users": 100000,
+   "products": 59,
+   "naive_pairs": 5900000,
+   "classes": 360,
+   "class_product_decisions": 21240,
+   "matches_written": 2704817,
+   "llm_calls": 0,
+   "prewrite_mismatches": 0,
+   "postwrite_mismatches": 0,
+   "seconds": {
+    "ingest (streaming)": 1.3,
+    "stage 1+2: classes and decisions": 0.4,
+    "planner statistics": 0.0,
+    "pre-write proof (every pair)": 5.4,
+    "stage 3: expand, score, diff": 48.2,
+    "post-write proof (every pair)": 25.3
+   },
+   "matching_seconds_total": 79.3
+  },
+  {
+   "users": 1000000,
+   "products": 59,
+   "naive_pairs": 59000000,
+   "classes": 360,
+   "class_product_decisions": 21240,
+   "llm_calls": 0,
+   "seconds": {
+    "ingest (streaming)": 13.3,
+    "stage 1+2: classes and decisions": 3.1
+   },
+   "scope": "ingest + Stage 1+2 only (no expansion or proofs at this size)"
+  }
+ ]
+}

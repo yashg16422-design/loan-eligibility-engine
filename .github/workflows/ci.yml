@@ -55,6 +55,9 @@ jobs:
       - name: Type check (mypy, loan_engine)
         run: mypy
 
+      - name: Funnel figure matches the evidence file
+        run: python scripts/funnel_svg.py --check
+
       - name: JS unit tests (n8n Code-node logic)
         run: node --test n8n/code/code.test.js
 
