@@ -219,6 +219,7 @@ class TestCreateUploadRoute:
         monkeypatch.setattr(
             api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0
         )  # under the cap
+        monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
         monkeypatch.setattr(
             api.repository,
             "upsert_account",
@@ -269,6 +270,31 @@ class TestDatabaseBlips:
         monkeypatch.setattr(dbmod, "RETRY_PAUSE_SECONDS", 0)
         assert dbmod.connect("h", "app", DbCredentials("u", "p")) == "conn"
         assert calls == ["h", "h"]
+
+    def test_patient_callers_outlast_a_busy_database(self, monkeypatch):
+        import psycopg
+
+        from loan_engine.common import db as dbmod
+        from loan_engine.common.secrets import DbCredentials
+        from loan_engine.ingest import handler as ingest
+
+        calls = []
+
+        def busy(**kwargs):
+            calls.append(1)
+            if len(calls) < ingest.CONNECT_ATTEMPTS:
+                raise psycopg.errors.ConnectionTimeout("connection timeout expired")
+            return "conn"
+
+        monkeypatch.setattr(dbmod.psycopg, "connect", busy)
+        monkeypatch.setattr(dbmod, "RETRY_PAUSE_SECONDS", 0)
+        creds = DbCredentials("u", "p")
+        # The API's default gives up after 3 tries; ingest keeps trying.
+        with pytest.raises(psycopg.errors.ConnectionTimeout):
+            dbmod.connect("h", "app", creds)
+        calls.clear()
+        assert dbmod.connect("h", "app", creds, attempts=ingest.CONNECT_ATTEMPTS) == "conn"
+        assert len(calls) == ingest.CONNECT_ATTEMPTS > dbmod.CONNECT_ATTEMPTS
 
     def test_unreachable_database_is_a_503_not_a_500(self, monkeypatch, lambda_context):
         import psycopg

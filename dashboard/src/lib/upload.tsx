@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError } from "../api/client";
 import type { UploadProgress } from "../api/types";
+import { UploadBlockedDialog } from "../components/UploadBlockedDialog";
 import { navigate } from "../router";
 
 export const MAX_BYTES = 50 * 1024 * 1024; // same limit the S3 upload policy enforces
@@ -21,7 +22,18 @@ export type UploadState =
       reconnecting?: boolean; // the last poll failed transiently; still tracking
     }
   | { phase: "error"; name?: string; message: string }
-  | { phase: "stopped"; name: string; message: string };
+  // The account's earlier upload is still running or still holds customers (server said 409).
+  | { phase: "blocked"; name: string; bytes: number; blocking: Blocking }
+  // cleaning: Stop is still clearing the upload's records (matching had to finish first).
+  | { phase: "stopped"; name: string; message: string; cleaning?: boolean };
+
+/** What blocks a new upload: the account's one live upload (see POST /uploads, 409). */
+export type Blocking = {
+  job_id: string;
+  filename: string | null;
+  stage: "loading" | "matching" | "emailing" | "stored";
+  customers: number;
+};
 
 interface Ctx {
   state: UploadState;
@@ -30,12 +42,57 @@ interface Ctx {
   stop: () => Promise<void>;
 }
 
+/** Nothing new can start: a file is going up, a run is tracked, or Stop is still clearing. */
+export function isBusy(s: UploadState): boolean {
+  return s.phase === "sending" || (s.phase === "tracking" && !s.finished) || (s.phase === "stopped" && !!s.cleaning);
+}
+
 /** What Stop did, in words (server outcome -> sentence). */
 export function stopMessage(outcome: string): string {
   if (outcome === "cancelled") return "Stopped. The file was never loaded, so nothing was matched or emailed.";
+  if (outcome === "cleared")
+    return "Stopped and cleaned up: its customers, matches and email records are deleted. The run history stays.";
   if (outcome === "running")
-    return "Stopped watching. The customers were already loaded and matching runs on the server until it finishes; delete the upload afterwards to remove its data.";
+    return "Stopping. Matching was already running on the server; it finishes in a minute or two, then this upload's records are deleted.";
   return "This upload had already finished. Delete it below if you want its customers removed.";
+}
+
+const n = (v: number) => new Intl.NumberFormat("en-IN").format(v);
+const pause = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+
+/** Wait until an upload can no longer change (failed, or matched and emailed). */
+export async function settle(jobId: string, pollMs = 4000, limitMs = 8 * 60_000): Promise<void> {
+  const until = Date.now() + limitMs;
+  while (Date.now() < until) {
+    try {
+      if (isFinished(await api.upload(jobId))) return;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return; // gone: nothing to wait for
+      // anything else is a blip while polling: keep waiting
+    }
+    await pause(pollMs);
+  }
+  throw new ApiError(504, "It is still running after 8 minutes. The server recovers stuck runs by itself; try again in a few minutes.");
+}
+
+/**
+ * Clear an upload completely, so the account can start again: stop it (a file not yet loaded
+ * is cancelled; a stuck run is ended), let a running match finish, then delete its records.
+ * `outcome` skips the stop call when the caller already made it.
+ */
+export async function clearUpload(jobId: string, onStatus: (s: string) => void, outcome?: string): Promise<void> {
+  if (!outcome) {
+    onStatus("Stopping it…");
+    outcome = (await api.cancelUpload(jobId)).outcome;
+  }
+  if (outcome === "running") {
+    onStatus("It is matching on the server and finishes on its own, usually within two minutes. Waiting…");
+    await settle(jobId);
+  }
+  onStatus("Deleting its records…");
+  await api.purgeUpload(jobId, (deleted, left, waiting) =>
+    onStatus(waiting ? "Waiting for its emails to finish…" : left > 0 ? `Deleting… ${n(deleted)} done, ${n(left)} to go.` : "Deleted."),
+  );
 }
 
 const UploadContext = createContext<Ctx | null>(null);
@@ -81,6 +138,7 @@ export function resumed(): UploadState {
 export function UploadProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<UploadState>(resumed);
   const input = useRef<HTMLInputElement>(null);
+  const pending = useRef<File | null>(null); // the file waiting while an earlier upload is cleared
 
   useEffect(() => {
     if (state.phase !== "tracking") return;
@@ -117,7 +175,16 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       if (!/\.csv$/i.test(file.name)) throw new ApiError(400, "This is not a CSV file. Choose a .csv file.");
       if (file.size === 0) throw new ApiError(400, "That file is empty.");
       if (file.size > MAX_BYTES) throw new ApiError(413, `That file is ${(file.size / 1048576).toFixed(1)} MB; the limit is 50 MB.`);
-      const ticket = await api.createUpload(file.name);
+      let ticket;
+      try {
+        ticket = await api.createUpload(file.name);
+      } catch (err) {
+        const blocking = err instanceof ApiError && err.status === 409 ? (err.detail?.blocking as Blocking | undefined) : undefined;
+        if (!blocking) throw err;
+        pending.current = file;
+        setState({ phase: "blocked", name: file.name, bytes: file.size, blocking });
+        return;
+      }
       if (file.size > ticket.max_bytes) throw new ApiError(413, "That file is larger than 50 MB.");
       const form = new FormData();
       Object.entries(ticket.upload.fields).forEach(([k, v]) => form.append(k, v));
@@ -139,15 +206,26 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       remember(null);
       setState({ phase: "idle" });
     },
+    // Stop is a clean exit: nothing of a stopped upload stays behind. A file not yet loaded is
+    // cancelled; a loaded one finishes matching on the server (it cannot be cut in half), then
+    // its records are deleted. If this tab closes first, the next upload asks to clear it.
     stop: async () => {
       if (state.phase !== "tracking") return;
       const { jobId, name } = state;
       remember(null);
+      const say = (message: string) => setState((s) => (s.phase === "stopped" && s.cleaning ? { ...s, message } : s));
       try {
         const { outcome } = await api.cancelUpload(jobId);
-        setState({ phase: "stopped", name, message: stopMessage(outcome) });
+        if (outcome === "cancelled" || outcome === "finished") {
+          setState({ phase: "stopped", name, message: stopMessage(outcome) });
+          return;
+        }
+        setState({ phase: "stopped", name, message: stopMessage("running"), cleaning: true });
+        await clearUpload(jobId, say, outcome);
+        setState({ phase: "stopped", name, message: stopMessage("cleared") });
       } catch (err) {
-        setState({ phase: "stopped", name, message: err instanceof Error ? err.message : "Could not reach the server. Stopped watching." });
+        const why = err instanceof Error ? err.message : "Could not reach the server.";
+        setState({ phase: "stopped", name, message: `${why} Delete it from Your uploads once it finishes.` });
       }
     },
   };
@@ -155,6 +233,23 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   return (
     <UploadContext.Provider value={value}>
       {children}
+      {state.phase === "blocked" && (
+        <UploadBlockedDialog
+          name={state.name}
+          blocking={state.blocking}
+          onClear={async (onStatus) => {
+            await clearUpload(state.blocking.job_id, onStatus);
+            const file = pending.current;
+            pending.current = null;
+            if (file) void start(file);
+            else setState({ phase: "idle" });
+          }}
+          onCancel={() => {
+            pending.current = null;
+            setState({ phase: "idle" });
+          }}
+        />
+      )}
       <input
         ref={input}
         type="file"

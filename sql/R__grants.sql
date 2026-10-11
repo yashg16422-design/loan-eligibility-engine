@@ -15,6 +15,8 @@ GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_ingest, n8n_workflows;
 -- Writes the ingestion tables; reads match/notify progress for the UI tracker.
 GRANT SELECT, INSERT, UPDATE ON upload_jobs, users, upload_rejects TO app_ingest;
 GRANT SELECT ON pipeline_runs, notifications TO app_ingest;
+-- Stop on a stalled matching run closes its run row (only these three columns).
+GRANT UPDATE (status, finished_at, error) ON pipeline_runs TO app_ingest;
 -- Borrower dashboard + ops view (api Lambda): read the results, own only the preferences.
 GRANT SELECT ON matches, loan_products, criteria_rules, crawl_runs, workflow_errors TO app_ingest;
 GRANT SELECT, INSERT, UPDATE ON user_preferences TO app_ingest;

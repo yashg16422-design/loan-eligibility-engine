@@ -12,7 +12,7 @@ import { FreeUpDialog } from "../components/FreeUpDialog";
 import { WaitPanel } from "../components/WaitPanel";
 import { WorkflowMap } from "../components/WorkflowMap";
 import { CHANNEL_LABEL } from "../lib/offers";
-import { useUpload } from "../lib/upload";
+import { useUpload, isBusy } from "../lib/upload";
 import { useIsAdmin, useSignedIn } from "../lib/useAccount";
 import { HBars } from "../ui/charts";
 import { ConfirmDelete } from "../ui/Confirm";
@@ -386,7 +386,7 @@ function Bulk() {
 function DropZone() {
   const { state, pick, reset } = useUpload();
   const [over, setOver] = useState(false);
-  const busy = state.phase === "sending" || (state.phase === "tracking" && !state.finished);
+  const busy = isBusy(state);
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setOver(false);
@@ -413,10 +413,11 @@ function DropZone() {
           <h3 className="text-xl font-light">Drop a customers CSV, or choose one</h3>
           <p className="mt-2 max-w-[64ch] text-sm text-mute">
             A .csv with a header row: user_id, name, email, monthly_income, credit_score, employment_status, age. Up to
-            50 MB, 10 uploads per account a day. Rows that fail a check are set aside with the reason; the rest are matched.
+            50 MB, one upload at a time per account (the last one is deleted first, its charts kept), 10 a day. Rows that
+            fail a check are set aside with the reason; the rest are matched.
           </p>
           {state.phase === "stopped" && (
-            <p role="status" className="mt-4 text-sm text-fg"><b className="font-medium">{state.name}: </b>{state.message}</p>
+            <p role="status" aria-live="polite" className="mt-4 text-sm text-fg"><b className="font-medium">{state.name}: </b>{state.message}</p>
           )}
           {state.phase === "error" && (
             <p role="alert" className="mt-4 flex items-start gap-2 text-sm text-coral">
@@ -427,7 +428,7 @@ function DropZone() {
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {(state.phase === "error" || state.phase === "stopped" || (state.phase === "tracking" && state.finished)) && (
+        {(state.phase === "error" || (state.phase === "stopped" && !state.cleaning) || (state.phase === "tracking" && state.finished)) && (
           <button type="button" onClick={reset} className="btn btn-ghost">Clear</button>
         )}
         <button type="button" onClick={pick} disabled={busy} className="btn btn-primary">
@@ -603,8 +604,10 @@ function UploadsTable({
 }) {
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   // Big deletes run in chunks: show how far along they are.
-  const progress = (deleted: number, left: number) =>
-    left > 0 && setResult({ ok: true, text: `Deleting… ${n(deleted)} customers deleted, ${n(left)} to go.` });
+  const progress = (deleted: number, left: number, waiting?: boolean) =>
+    waiting
+      ? setResult({ ok: true, text: "An upload is still sending its emails; deleting as soon as it finishes…" })
+      : left > 0 && setResult({ ok: true, text: `Deleting… ${n(deleted)} customers deleted, ${n(left)} to go.` });
   const report = async (work: () => Promise<string>) => {
     try {
       setResult({ ok: true, text: await work() });
@@ -685,7 +688,7 @@ function UploadsTable({
                               : `Delete ${n(u.users_now)} customers?`}
                             onConfirm={() => report(async () => {
                               const r = await api.purgeUpload(u.job_id, progress);
-                              return `Deleted ${n(r.deleted_users)} customers from ${u.original_filename ?? "that upload"}. Upload it again to run it as new.`;
+                              return `Deleted ${n(r.deleted_users)} customers from ${u.original_filename ?? "that upload"}. Its analytics are kept; you can upload again now.`;
                             })} />
                         )}
                       </span>

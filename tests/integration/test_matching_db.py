@@ -577,8 +577,12 @@ def test_reference_dataset_is_never_another_merchants_upload(db):
     # Caps count per account.
     assert repository.csv_uploads_last_24h(db, "t4-merchant") == 1
     assert repository.csv_uploads_last_24h(db) >= 2
-    # A purged reference upload stops being public.
+    # Deleted with its charts kept: still the public reference (the landing never goes empty).
+    repository.store_analytics(db, jobs["t4-admin"], "t|None", {"users": 50_000})
     db.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (jobs["t4-admin"],))
+    assert repository.reference_job(db) == jobs["t4-admin"]
+    # Deleted with no charts kept: it stops being public.
+    db.execute("DELETE FROM analytics_cache WHERE job_id = %s", (jobs["t4-admin"],))
     assert repository.reference_job(db) != jobs["t4-admin"]
 
 
@@ -763,6 +767,89 @@ def test_cancel_stops_an_upload_before_its_file_is_loaded(db):
     db.execute("UPDATE upload_jobs SET match_status = 'DONE' WHERE job_id = %s", (loaded,))
     assert repository.cancel_upload(db, loaded) == "finished"
     assert repository.cancel_upload(db, uuid.uuid4()) is None
+
+
+def test_stop_ends_a_matching_run_that_is_stuck(db):
+    """Clean exit: matching stuck for 15+ minutes can be stopped, so its records can be deleted
+    and the file run again; a run still inside that window is left to finish."""
+    from loan_engine.api import repository
+
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "stuck.csv")
+    db.execute(
+        "UPDATE upload_jobs SET status = 'COMPLETED', match_status = 'RUNNING',"
+        " match_started_at = now() - interval '5 minutes' WHERE job_id = %s",
+        (job,),
+    )
+    run = db.execute(
+        "INSERT INTO pipeline_runs (mode, job_id) VALUES ('upload', %s) RETURNING run_id", (job,)
+    ).fetchone()[0]
+    assert repository.cancel_upload(db, job) == "running"  # 5 minutes: still working
+    db.execute(
+        "UPDATE upload_jobs SET match_started_at = now() - interval '20 minutes' WHERE job_id = %s",
+        (job,),
+    )
+    assert repository.cancel_upload(db, job) == "stopped"
+    assert db.execute(
+        "SELECT match_status FROM upload_jobs WHERE job_id = %s", (job,)
+    ).fetchone() == ("FAILED",)
+    assert db.execute(
+        "SELECT status, error IS NOT NULL FROM pipeline_runs WHERE run_id = %s", (run,)
+    ).fetchone() == ("failed", True)
+    assert repository.purge_upload(db, job) == 0  # no longer busy: it can be deleted
+
+
+def test_one_live_upload_per_account(db):
+    """account_blocker: what stops an account from uploading another file, at each stage."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "INSERT INTO accounts (account_id, email) VALUES ('one-sub', 'one-live@example.org') "
+        "ON CONFLICT DO NOTHING"
+    )
+    assert repository.account_blocker(db, "one-sub") is None
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "users.csv", account_id="one-sub")
+
+    def stage():
+        found = repository.account_blocker(db, "one-sub")
+        return found and (found["job_id"], found["stage"], found["customers"])
+
+    assert stage() == (job, "loading", 0)  # file on its way
+    db.execute("UPDATE upload_jobs SET status = 'COMPLETED' WHERE job_id = %s", (job,))
+    assert stage() == (job, "matching", 0)  # loaded, B has not claimed it yet
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age,"
+        " upload_job_id) SELECT gen_random_uuid(), 'one' || g || '@example.com', 50000, 700,"
+        " 'salaried', 30, %s FROM generate_series(1, 3) g",
+        (job,),
+    )
+    db.execute(
+        "UPDATE upload_jobs SET match_status = 'DONE', matched_at = now() WHERE job_id = %s",
+        (job,),
+    )
+    assert stage() == (job, "emailing", 3)
+    db.execute(
+        "UPDATE upload_jobs SET matched_at = now() - interval '10 minutes' WHERE job_id = %s",
+        (job,),
+    )
+    assert stage() == (job, "stored", 3)  # finished, customers kept: delete first
+    assert repository.unpurged_csv_jobs(db, "one-sub") == [job]
+    assert repository.purge_upload(db, job) == 3
+    assert repository.account_blocker(db, "one-sub") is None
+    assert repository.unpurged_csv_jobs(db, "one-sub") == []
+    # A cancelled ticket, or one whose file never arrived (15+ minutes), never blocks.
+    gone = uuid.uuid4()
+    repository.create_job(db, gone, f"raw/{gone}.csv", "g.csv", account_id="one-sub")
+    db.execute(
+        "UPDATE upload_jobs SET created_at = now() - interval '20 minutes' WHERE job_id = %s",
+        (gone,),
+    )
+    assert repository.account_blocker(db, "one-sub") is None
+    other = uuid.uuid4()
+    repository.create_job(db, other, f"raw/{other}.csv", "o.csv", account_id="one-sub")
+    assert repository.cancel_upload(db, other) == "cancelled"
+    assert repository.account_blocker(db, "one-sub") is None
 
 
 def test_analytics_snapshot_survives_deleting_the_records(db):

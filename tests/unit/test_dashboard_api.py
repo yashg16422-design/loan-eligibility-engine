@@ -195,6 +195,9 @@ def deps(monkeypatch):
     monkeypatch.setattr(api, "dependencies", lambda: d)
     monkeypatch.setattr(api, "db", fake_db)
     monkeypatch.setattr(api, "token_key", lambda arn: KEY)
+    # No earlier upload in the way, nothing to snapshot (both tested on their own).
+    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
+    monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [])
     # Every signed-in route resolves the account row first (one per verified email).
     monkeypatch.setattr(
         api.repository,
@@ -803,6 +806,47 @@ def test_upload_cap_is_per_account_and_admins_are_exempt(deps, monkeypatch, lamb
     assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 201
     boss = {**ADMIN, "sub": MERCHANT["sub"]}  # the same account, as an admin: not capped
     assert invoke({**event, "requestContext": signed_in_as(boss)})["statusCode"] == 201
+
+
+def test_one_live_upload_per_account(deps, monkeypatch, lambda_context):
+    """A second upload is refused (409) while the first is running or still holds customers,
+    with what blocks it, so the console can offer to clear it. Admins are not exempt."""
+    created = []
+    blocking = {"job_id": str(USER), "filename": "users.csv", "stage": "stored", "customers": 10000}
+    monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
+    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: blocking)
+    monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
+    event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
+    for who in (MERCHANT, ADMIN):
+        res = invoke({**event, "requestContext": signed_in_as(who)}, lambda_context)
+        body = json.loads(res["body"])
+        assert res["statusCode"] == 409 and body["blocking"]["customers"] == 10000
+        assert "10,000 customers" in body["error"] and "Delete them first" in body["error"]
+    blocking.update(stage="matching", customers=10000)
+    res = invoke({**event, "requestContext": signed_in_as(MERCHANT)}, lambda_context)
+    assert res["statusCode"] == 409 and "still matching" in json.loads(res["body"])["error"]
+    assert created == []  # no ticket, so nothing counts against the daily cap
+
+
+def test_workspace_reset_keeps_each_uploads_charts(deps, monkeypatch, lambda_context):
+    kept, order = [], []
+    monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [USER])
+
+    def snapshot(conn, job_id):
+        kept.append(job_id)
+        order.append("snap")
+
+    monkeypatch.setattr(api, "cached_analytics", snapshot)
+
+    def purge(conn, account):
+        order.append("purge")
+        return {"deleted_users": 3, "uploads": 1, "remaining": 0}
+
+    monkeypatch.setattr(api.repository, "purge_csv_uploads", purge)
+    res = invoke(
+        {"routeKey": "DELETE /uploads", "requestContext": signed_in_as(MERCHANT)}, lambda_context
+    )
+    assert res["statusCode"] == 200 and kept == [USER] and order == ["snap", "purge"]
 
 
 class TestAnalyticsIsolation:

@@ -35,8 +35,8 @@ export function FreeUpDialog({
     setBusy(true);
     setFailed(false);
     try {
-      await api.purgeUpload(jobId, (deleted, left) =>
-        setStatus(left > 0 ? `Deleting… ${n(deleted)} done, ${n(left)} to go.` : "Deleted."),
+      await api.purgeUpload(jobId, (deleted, left, waiting) =>
+        setStatus(waiting ? "Waiting for its emails to finish…" : left > 0 ? `Deleting… ${n(deleted)} done, ${n(left)} to go.` : "Deleted."),
       );
       onDeleted();
     } catch (err) {
@@ -62,7 +62,7 @@ export function FreeUpDialog({
         <p className="mt-3 text-sm text-mute">
           Deleting removes this upload's {n(customers)} customer records, their matches and email records.{" "}
           <span className="text-fg">Your analytics stay on this page</span>, and the run history and Treasure Hunt numbers
-          are kept.
+          are kept. Each account keeps one upload at a time, so it is deleted before your next upload anyway.
         </p>
         {status && (
           <p role="status" className={`mt-4 text-sm ${failed ? "text-coral" : "text-fg"}`}>{status}</p>

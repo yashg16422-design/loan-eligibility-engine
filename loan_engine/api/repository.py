@@ -259,17 +259,24 @@ _RUN_COLUMNS = """
 """
 
 # The public showcase dataset: the largest completed upload that belongs to no one or to an
-# admin (the operator), and whose customers are still stored. Another merchant's upload can
-# never become public this way, however large it is.
+# admin (the operator), and whose customers are still stored or whose charts were kept when it
+# was deleted (analytics_cache). Deleting the operator's upload to free the database must not
+# empty the public analytics (found live). Another merchant's upload can never become public
+# this way, however large it is.
 _REFERENCE_RUN = f"""
     SELECT {_RUN_COLUMNS} FROM pipeline_runs
     WHERE mode = 'upload' AND status = 'done'
       AND EXISTS (SELECT 1 FROM upload_jobs ref
                   WHERE ref.job_id = pipeline_runs.job_id AND ref.source = 'csv'
-                    AND ref.purged_at IS NULL
+                    AND (ref.purged_at IS NULL
+                         OR EXISTS (SELECT 1 FROM analytics_cache c WHERE c.job_id = ref.job_id))
                     AND (ref.account_id IS NULL
                          OR ref.account_id IN (SELECT account_id FROM accounts WHERE is_admin)))
-    ORDER BY users_in DESC NULLS LAST, started_at DESC LIMIT 1
+    ORDER BY users_in DESC NULLS LAST,
+             (SELECT purged_at IS NULL FROM upload_jobs ref
+               WHERE ref.job_id = pipeline_runs.job_id) DESC,
+             started_at DESC
+    LIMIT 1
 """
 
 
@@ -601,6 +608,18 @@ def purge_upload(
             return deleted
 
 
+def unpurged_csv_jobs(conn: psycopg.Connection, account_id: str | None) -> list[uuid.UUID]:
+    """Uploads (of one account, or all) that still have customers: their charts are kept
+    before a workspace reset deletes them."""
+    rows = conn.execute(
+        "SELECT j.job_id FROM upload_jobs j WHERE j.source = 'csv' AND j.purged_at IS NULL"
+        " AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)"
+        " AND EXISTS (SELECT 1 FROM users u WHERE u.upload_job_id = j.job_id)",
+        {"a": account_id},
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
 def purge_csv_uploads(
     conn: psycopg.Connection,
     account_id: str | None = None,
@@ -651,19 +670,62 @@ def purge_csv_uploads(
             return {"deleted_users": deleted, "uploads": uploads, "remaining": left}
 
 
+# A matching run that has not finished after this long is stuck (a 10,000-customer run takes
+# about two minutes): Stop may then end it, so its records can be deleted and the file re-run.
+STALLED_MATCH = "interval '15 minutes'"
+
+
+def account_blocker(conn: psycopg.Connection, account_id: str) -> dict[str, Any] | None:
+    """The account's upload that must be dealt with before it can upload another, or None.
+
+    One live upload per account keeps the shared free-tier database small, and stops a new
+    file from being loaded while an older one is still running or half-deleted (found live: a
+    re-upload made during a delete counted the doomed rows as "unchanged", then lost them).
+    `state` is "running" (loading, matching or emailing) or "stored" (finished, customers kept).
+    A ticket whose file never arrived stops blocking after 15 minutes.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        return cur.execute(
+            f"""
+            SELECT j.job_id, j.original_filename AS filename,
+                   CASE WHEN j.status IN ('AWAITING_UPLOAD', 'PROCESSING')
+                        THEN 'loading'
+                        WHEN j.match_status = 'RUNNING' OR (j.status = 'COMPLETED'
+                             AND j.match_status IS NULL) THEN 'matching'
+                        WHEN j.matched_at > now() - interval '2 minutes' THEN 'emailing'
+                        ELSE 'stored' END AS stage,
+                   (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
+                       AS customers
+            FROM upload_jobs j
+            WHERE j.source = 'csv' AND j.account_id = %s AND j.purged_at IS NULL
+              AND (j.status = 'PROCESSING'
+                   OR (j.status = 'AWAITING_UPLOAD'
+                       AND j.created_at > now() - interval '15 minutes')
+                   OR (j.status = 'COMPLETED' AND ({_BUSY} OR j.match_status IS NULL))
+                   OR EXISTS (SELECT 1 FROM users u WHERE u.upload_job_id = j.job_id))
+            ORDER BY j.created_at DESC LIMIT 1
+            """,
+            (account_id,),
+        ).fetchone()
+
+
 def cancel_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> str | None:
     """Stop an upload. Before its file is loaded it is cancelled for real ("cancelled": the job
     is FAILED, so a later SQS delivery of the file is ignored by ingest's claim). Once loaded,
-    matching runs in n8n and cannot be stopped halfway ("running"), or it is already over
-    ("finished"). None if the job does not exist.
+    matching runs in n8n and cannot be stopped halfway ("running"), unless it has been stuck
+    for 15 minutes ("stopped": marked failed, so its records can be deleted), or it is already
+    over ("finished"). None if the job does not exist.
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT status, match_status FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
+            "SELECT status, match_status,"
+            f" coalesce(match_started_at, completed_at) < now() - {STALLED_MATCH}"
+            " FROM upload_jobs WHERE job_id = %s FOR UPDATE",
+            (job_id,),
         ).fetchone()
         if row is None:
             return None
-        status, match_status = row
+        status, match_status, stalled = row
         if status in ("AWAITING_UPLOAD", "PROCESSING"):
             conn.execute(
                 "UPDATE upload_jobs SET status = 'FAILED', completed_at = now(),"
@@ -672,7 +734,19 @@ def cancel_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> str | None:
             )
             return "cancelled"
         if status == "COMPLETED" and match_status in (None, "RUNNING"):
-            return "running"
+            if not stalled:
+                return "running"
+            # Stuck for 15+ minutes: end it, so the upload can be deleted and run again.
+            conn.execute(
+                "UPDATE upload_jobs SET match_status = 'FAILED' WHERE job_id = %s", (job_id,)
+            )
+            conn.execute(
+                "UPDATE pipeline_runs SET status = 'failed', finished_at = now(),"
+                " error = 'stopped by the owner after matching stalled'"
+                " WHERE job_id = %s AND status = 'running'",
+                (job_id,),
+            )
+            return "stopped"
         return "finished"
 
 

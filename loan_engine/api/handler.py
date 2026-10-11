@@ -109,6 +109,23 @@ class ConflictError(ApiError):
     status, message = 409, "conflict"
 
 
+class UploadBlockedError(ApiError):
+    """The account already has an upload that is running or still holds customers."""
+
+    status = 409
+
+    def __init__(self, blocking: dict[str, Any]) -> None:
+        name = blocking.get("filename") or "your last upload"
+        stage = blocking["stage"]
+        self.blocking = blocking
+        super().__init__(
+            f"{name} is still {stage}. Stop it or wait for it to finish, then upload again."
+            if stage != "stored"
+            else f"{name} still has {blocking['customers']:,} customers stored. Delete them"
+            " first (its analytics are kept), then upload again."
+        )
+
+
 class TooManyChecksError(ApiError):
     """A daily budget (instant checks or CSV uploads) is used up."""
 
@@ -154,6 +171,12 @@ app.router.route_class = PlainRoute
 @app.exception_handler(ApiError)
 def api_error(request: Request, err: ApiError) -> JSON:
     return JSON({"error": err.message}, err.status)
+
+
+@app.exception_handler(UploadBlockedError)
+def upload_blocked(request: Request, err: UploadBlockedError) -> JSON:
+    # The blocking upload is the caller's own, so the console can offer to clear it.
+    return JSON({"error": err.message, "blocking": err.blocking}, err.status)
 
 
 @app.exception_handler(repository.JobBusyError)
@@ -435,6 +458,10 @@ def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
         mine = repository.csv_uploads_last_24h(conn, who.account_id)
         if not who.is_admin and mine >= MAX_UPLOADS_PER_ACCOUNT_PER_DAY:
             raise TooManyChecksError
+        # One live upload per account, admins included (one shared free-tier database).
+        blocking = repository.account_blocker(conn, who.account_id)
+        if blocking is not None:
+            raise UploadBlockedError(blocking)
         repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
     # Local signing with the Lambda role's credentials: no network call.
@@ -764,7 +791,10 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
     if scope == "all" and not who.is_admin:
         raise ForbiddenError
     with db(deps) as conn:
-        counts = repository.purge_csv_uploads(conn, None if scope == "all" else who.account_id)
+        account = None if scope == "all" else who.account_id
+        for job_id in repository.unpurged_csv_jobs(conn, account):
+            cached_analytics(conn, job_id)  # keep each upload's charts, as a single delete does
+        counts = repository.purge_csv_uploads(conn, account)
     logger.info("uploads purged", extra={"scope": scope, **counts})
     return counts
 

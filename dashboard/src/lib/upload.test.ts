@@ -51,7 +51,43 @@ describe("Stop", () => {
   it("says plainly what stopping did", async () => {
     const { stopMessage } = await import("./upload");
     expect(stopMessage("cancelled")).toMatch(/never loaded/);
-    expect(stopMessage("running")).toMatch(/runs on the server/);
+    expect(stopMessage("running")).toMatch(/running on the server.*records are deleted/);
+    expect(stopMessage("cleared")).toMatch(/cleaned up/);
     expect(stopMessage("finished")).toMatch(/already finished/);
+  });
+
+  it("blocks new uploads while it is still cleaning up", async () => {
+    const { isBusy } = await import("./upload");
+    expect(isBusy({ phase: "stopped", name: "u.csv", message: "", cleaning: true })).toBe(true);
+    expect(isBusy({ phase: "stopped", name: "u.csv", message: "" })).toBe(false);
+    expect(isBusy({ phase: "sending", name: "u.csv", bytes: 1 })).toBe(true);
+    expect(isBusy({ phase: "idle" })).toBe(false);
+  });
+});
+
+describe("clearing an earlier upload", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("waits for a running match to finish, then deletes its records", async () => {
+    const { api } = await import("../api/client");
+    const { clearUpload } = await import("./upload");
+    const order: string[] = [];
+    vi.spyOn(api, "cancelUpload").mockImplementation(async () => (order.push("stop"), { job_id: "j", outcome: "running" }));
+    vi.spyOn(api, "upload").mockImplementation(async () => (order.push("poll"), progress({ notifications: { sent: 5 } })));
+    vi.spyOn(api, "purgeUpload").mockImplementation(async () => (order.push("delete"), { deleted_users: 10, remaining: 0 }));
+    const said: string[] = [];
+    await clearUpload("j", (s) => said.push(s));
+    expect(order).toEqual(["stop", "poll", "delete"]);
+    expect(said.join(" ")).toMatch(/matching on the server/);
+  });
+
+  it("deletes straight away when the file was never loaded or the run is over", async () => {
+    const { api } = await import("../api/client");
+    const { clearUpload } = await import("./upload");
+    const poll = vi.spyOn(api, "upload");
+    const purge = vi.spyOn(api, "purgeUpload").mockResolvedValue({ deleted_users: 0, remaining: 0 });
+    for (const outcome of ["cancelled", "finished", "stopped"]) await clearUpload("j", () => {}, outcome);
+    expect(poll).not.toHaveBeenCalled();
+    expect(purge).toHaveBeenCalledTimes(3);
   });
 });

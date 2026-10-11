@@ -22,6 +22,7 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly detail?: Record<string, unknown>, // the response body, for errors that carry data
   ) {
     super(message);
   }
@@ -82,7 +83,8 @@ async function request<T>(
   }
   const res = await fetchWithRetry(path, { ...init, headers });
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
-  if (!res.ok) throw new ApiError(res.status, explain(res.status, body.error ?? (body as { message?: string }).message));
+  if (!res.ok)
+    throw new ApiError(res.status, explain(res.status, body.error ?? (body as { message?: string }).message), body as Record<string, unknown>);
   return { status: res.status, body };
 }
 
@@ -187,14 +189,33 @@ export const api = {
 };
 
 type Purged = { deleted_users: number; remaining?: number; uploads?: number };
-type Progress = (deleted: number, remaining: number) => void;
+/** `waiting`: the upload is still sending its emails (409), so the delete is retried shortly. */
+export type Progress = (deleted: number, remaining: number, waiting?: boolean) => void;
+
+// A delete right after a run waits for its emails (the server says 409 for about two minutes)
+// instead of failing: retried every 8 s for up to ~3 minutes.
+const BUSY_RETRIES = 25;
 
 /** Repeat a chunked delete until the server says nothing is left; totals across calls. */
-export async function untilDone(call: () => Promise<Purged>, onProgress?: Progress, maxCalls = 200): Promise<Purged> {
+export async function untilDone(
+  call: () => Promise<Purged>,
+  onProgress?: Progress,
+  maxCalls = 200,
+  busyPauseMs = 8000,
+): Promise<Purged> {
   let deleted = 0;
   let uploads = 0;
+  let busy = 0;
   for (let i = 0; i < maxCalls; i++) {
-    const r = await call();
+    let r: Purged;
+    try {
+      r = await call();
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 409) || ++busy > BUSY_RETRIES) throw err;
+      onProgress?.(deleted, -1, true);
+      await new Promise((ok) => setTimeout(ok, busyPauseMs));
+      continue;
+    }
     deleted += r.deleted_users;
     uploads += r.uploads ?? 0;
     const left = r.remaining ?? 0;

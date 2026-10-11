@@ -23,7 +23,7 @@ then **0 calls** on every later run, and a brute-force check proves the optimize
 ### Reviewer quick start
 1. **Upload:** open the [merchant console](https://t7lcgp5o0j.execute-api.ap-southeast-2.amazonaws.com/app/merchant), sign up with any email (Cognito sends a 6-digit code; check Spam), then **Upload CSV** with [`tests/fixtures/demo_users.csv`](tests/fixtures/demo_users.csv). Your workspace starts empty.
 2. **Watch it run** (about 30 s): Uploaded → Validated and loaded (the row with credit score 950 is rejected, with its reason) → Matched (Workflow B) → Notified (Workflow C).
-3. **Emails** go only to the owner's three Gmail test `+aliases`, never to CSV addresses. The console shows the emails that were sent ("Emails sent for this upload"), and the received email is in the [screenshot](docs/screenshots/14-email.png) and the video.
+3. **Emails** go only to the owner's three Gmail test `+aliases`, never to CSV addresses. The console shows the emails that were sent ("Emails sent for this upload"), and the received email is shown in the video.
 4. **Treasure Hunt:** [§8](#8-the-optimization-treasure-hunt) and the raw measurements in [`docs/evidence/`](docs/evidence/). **Every required path checked live:** [`REQUIRED_PATH.md`](docs/evidence/REQUIRED_PATH.md).
 5. **n8n:** credential setup in [§5](#5-configuring-credentials-inside-n8n); workflows node by node in [§6](#6-workflows-a--b--c-node-by-node); to run n8n locally without AWS, see [§4.7](#47-run-n8n-locally-without-aws-for-reviewers).
 
@@ -277,7 +277,6 @@ From a terminal (the password is typed into `id-token.sh`, never echoed):
 export ID_TOKEN="$(scripts/id-token.sh you@example.com)"
 scripts/upload-sample.sh "$(scripts/stack-output.sh UploadUiUrl)" tests/fixtures/demo_users.csv
 ```
-![Upload UI after a run](docs/screenshots/01-upload-ui.png)
 
 ### 4.7 Run n8n locally without AWS (for reviewers)
 ```bash
@@ -305,8 +304,6 @@ scripts/tunnel-n8n.sh          # keep running; then open http://localhost:5678
 
 Prerequisites: AWS CLI v2 + the Session Manager plugin. On first visit n8n asks you to
 create the owner account.
-
-![n8n workflows](docs/screenshots/02-n8n-workflows.png)
 
 ### 5.1 Postgres: the engine database (`app`) as the least-privilege role
 
@@ -337,8 +334,6 @@ via `NODE_EXTRA_CA_CERTS` (set by `deploy/n8n/boot.sh`).
 `upload_jobs`, and read/write the matching tables. It cannot delete anything or change
 the schema (see [Security](#10-security)).
 
-![Postgres credential](docs/screenshots/03-cred-postgres.png)
-
 ### 5.2 AWS: for the SES (email) and Bedrock (Nova Pro) nodes, with no keys
 
 **Credentials → Create credential → AWS (Assume Role)**
@@ -357,8 +352,6 @@ instance profile, then assumes `loan-engine-dev-n8n-aws`. That role can only
 Its trust policy accepts only the n8n instance role **and** the External ID. The
 instance metadata hop limit is 2 so the container can reach the instance role.
 
-![AWS Assume Role credential](docs/screenshots/04-cred-aws-assume-role.png)
-
 ### 5.3 Header Auth: the ingest → n8n webhook secret
 
 ```bash
@@ -371,8 +364,6 @@ aws secretsmanager get-secret-value --region ap-southeast-2 \
 The ingest Lambda sends the same header; the webhook is also reachable only from the
 Lambda security group on the private network.
 
-![Header Auth credential](docs/screenshots/05-cred-header-auth.png)
-
 ![Credentials list](docs/screenshots/06-credentials-list.png)
 
 ---
@@ -384,7 +375,6 @@ that explains it, and **every node shows a one-line note under it on the canvas*
 and why; a test checks that none is missing).
 
 ### A · Loan product discovery (crawler), daily 06:00 IST + manual run
-![Workflow A](docs/screenshots/07-workflow-A.png)
 
 | Node | What it does |
 |---|---|
@@ -399,7 +389,6 @@ and why; a test checks that none is missing).
 | **Crawl health → Crawl degraded? → Email crawl alert (SES)** | A site redesign does not fail the crawl: its pages come back `failed` and old products are kept. [`crawl_health.sql`](sql/matching/crawl_health.sql) compares usable pages per channel with the previous crawl; a drop of more than 30% (or no usable page) is stored in `workflow_errors` and emails the operator at most once a day. |
 
 ### A1 · Process page batch (sub-workflow)
-![Workflow A1](docs/screenshots/08-workflow-A1.png)
 
 | Node | What it does |
 |---|---|
@@ -444,7 +433,6 @@ stops before notification: B marks the job failed, C is never called, Workflow E
 → matches → both proofs). The SQL is in [`sql/matching/`](sql/matching/).
 
 ### C · Notify matched users (SES)
-![Workflow C](docs/screenshots/11-workflow-C.png)
 
 | Node | What it does |
 |---|---|
@@ -460,14 +448,9 @@ skipped and whose email is not built yet) → **Compose (no send)** (`composeBat
 one user's bad data never stops the batch) → **Save composed emails** (subject + text on the
 notification row; returns how many remain). C1 has no SES node: it can never send.
 
-![Workflow C1](docs/screenshots/11b-workflow-C1.png)
-
 A received email (best pick, top picks with the reason, the dashboard button):
 
-![Notification email](docs/screenshots/14-email.png)
-
 ### E · Error handler (the error workflow of A, A1, B, B1 and C)
-![Workflow E](docs/screenshots/13-workflow-E.png)
 
 | Node | What it does |
 |---|---|
@@ -609,8 +592,6 @@ lender rule, and the email explains it ("your income is 3.6× the minimum"). We 
 model: there is no approval/outcome data, so the system reports **indicative eligibility from
 published criteria**, never an approval probability.
 
-![B1 funnel output](docs/screenshots/12-B1-funnel-output.png)
-
 ---
 
 ## 9. Failure handling
@@ -621,6 +602,7 @@ published criteria**, never an approval probability.
 | Malformed CSV (missing column, not UTF-8) | Job `FAILED` immediately with a clear error, no retries | ingest |
 | Bad rows | Stored in `upload_rejects` (line + reason), shown in the UI; good rows load | ingest |
 | Transient error (DB blip, S3) | Re-raised → SQS retries (720 s); on the 3rd attempt the handler marks the job `FAILED` (visible in the UI) and consumes the message | ingest + SQS |
+| Database too busy to accept a connection | Ingest keeps trying for about a minute (6 × 8 s) before handing back to SQS; found live: it gave up after 24 s while RDS was deleting a big upload, and SQS's 12-minute redelivery looked like a stuck upload | ingest |
 | Hard crash (timeout, DB unreachable before the claim) | SQS moves the message to the DLQ after 3 receives; the **`ingestDlq` Lambda** marks the job `FAILED` with "upload the file again" (the UI no longer shows "retrying" forever) and a **CloudWatch alarm** on its invocations emails the operator | SQS + Lambda + CloudWatch |
 | Two uploads sharing users at the same moment | The upsert locks rows in `user_id` order, so they can never deadlock (a concurrency test reproduced the deadlock before the fix) | ingest |
 | Huge file | Rows stream through `COPY`; memory stays flat (measured on 50 MB) | ingest |
@@ -635,7 +617,7 @@ published criteria**, never an approval probability.
 | Site down | S3 fixture used, `crawl_runs.status = fixture` | A1 |
 | Site blocks bots / robots.txt says no | Skipped and logged (`blocked` / `robots_disallowed`), never bypassed | A, A1 |
 | Site layout changes | No section found → page `failed`, existing products kept (not wiped); a channel whose usable pages drop by more than 30% raises a crawl-health alert (once a day) | A1, A |
-| Same CSV uploaded again | 0 inserted, 0 new matches, 0 emails (verified live) | ingest + B |
+| Same CSV loaded twice | The upsert only touches changed rows: 0 inserted, 0 new matches, 0 emails (tested). In the console each account keeps **one upload at a time**: a new file while the last one still runs or holds customers gets a 409 and the console offers to clear the old one first (stop, let it finish, delete; charts kept), then uploads the new file. Found live: a re-upload made during a delete counted the doomed rows as unchanged, then lost them | ingest + api, console |
 | User no longer qualifies | Match `superseded` (history kept), no email | B1 |
 | SES send fails | Retried twice in the node; then recorded as `failed` and the match stays un-notified, so re-running C for that run sends it | C |
 | n8n dies in the middle of the send loop | Each send was recorded as it happened: the re-run sends only the remainder, nobody twice (tested) | C |
@@ -644,7 +626,8 @@ published criteria**, never an approval probability.
 | A statement that outlives its execution | Postgres ends n8n statements after 10 minutes (n8n's own limit) and closes idle-in-transaction sessions | RDS |
 | Deleting a 10,000-customer upload | Deleted in chunks of 2,000 per short transaction; each call stops after ~15 s and reports what is left, and the console continues until done (one big transaction passed the API limit on the 1 GB database and rolled back; found live) | api, console |
 | The shared demo database filling up | After a run completes (matched, proved, emails recorded) and its charts load, the console asks once to **delete that upload's records**, giving the reason (AWS free plan: one 1 GB RDS shared by every reviewer). The analytics stay on the page: a snapshot is taken just before the delete and shown afterwards, marked as kept | console, api |
-| An upload you want to stop | **Stop** in the console: before its file is loaded it is cancelled for real (a later delivery of the file is ignored); once matching runs in n8n it finishes on its own and Stop just ends the tracking (delete the upload afterwards) | api, console |
+| The operator's reference upload deleted | The public analytics fall back to the charts kept at delete time (found live: they went empty), so signed-out visitors always see the 10,000-customer example | api |
+| An upload you want to stop | **Stop** is a clean exit: before its file is loaded it is cancelled for real (a later delivery of the file is ignored); once loaded, matching finishes on the server (it cannot be cut in half) and the console then deletes the upload's records by itself. A run stuck for 15+ minutes is ended by Stop so it can be deleted. If the tab closes first, the next upload asks to clear it | api, console |
 | Reload or a network blip during an upload | The console keeps tracking the same job after a reload; transient errors show "reconnecting" while polling continues; the charts retry by themselves | console |
 | Email or error text with newlines | Passed to Postgres as one JSON parameter (n8n's plain parameters broke on it; found live, fixed, guarded by a test) | C, E |
 | Any workflow fails | Error workflow **E**: `workflow_errors` row + rate-limited alert email | E |
@@ -788,7 +771,6 @@ $0.60. One IPv4 address, storage and secrets add about $0.20. That is roughly **
   - `dashboard`: typecheck, 24 tests, build.
   - `web`: lint, typecheck, 44 tests, build.
 
-  ![CI](docs/screenshots/18-github-ci.png)
 - Structured JSON logs (AWS Lambda Powertools) carrying `job_id`.
 
 ```bash

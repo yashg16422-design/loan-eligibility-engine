@@ -47,6 +47,10 @@ logger = Logger(service="ingest")
 
 # Must equal maxReceiveCount on the queue's redrive policy (serverless.yml).
 MAX_RECEIVES = 3
+# Ingest has a 120 s budget, so it waits out a busy database (~55 s worst case: 6 x 8 s connect
+# timeouts plus pauses) instead of giving up after 24 s. Found live: one failed connect while
+# RDS was busy deleting meant SQS's 12-minute redelivery, which looked like a stuck upload.
+CONNECT_ATTEMPTS = 6
 
 
 class Outcome(StrEnum):
@@ -110,6 +114,7 @@ def process_upload(upload: UploadRef, receive_count: int, deps: Dependencies) ->
         port=deps.db_port,
         autocommit=True,
         application_name="ingest",
+        attempts=CONNECT_ATTEMPTS,
     ) as conn:
         repository.bump_attempts(conn, job_id)
         try:

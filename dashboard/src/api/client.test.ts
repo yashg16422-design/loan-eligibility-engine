@@ -96,6 +96,35 @@ describe("big deletes", () => {
     expect(seen).toEqual([[4000, 6000], [8000, 2000], [10000, 0]]);
   });
 
+  it("waits while the upload is still emailing (409), then deletes", async () => {
+    const { untilDone, ApiError } = await import("./client");
+    let calls = 0;
+    const waits: boolean[] = [];
+    const r = await untilDone(
+      async () => {
+        if (++calls <= 2) throw new ApiError(409, "still emailing");
+        return { deleted_users: 5, remaining: 0 };
+      },
+      (_d, _left, waiting) => waits.push(Boolean(waiting)),
+      200,
+      0,
+    );
+    expect(r.deleted_users).toBe(5);
+    expect(waits).toEqual([true, true, false]);
+  });
+
+  it("does not retry other errors", async () => {
+    const { untilDone, ApiError } = await import("./client");
+    let calls = 0;
+    await expect(
+      untilDone(async () => {
+        calls++;
+        throw new ApiError(404, "gone");
+      }, undefined, 200, 0),
+    ).rejects.toThrow("gone");
+    expect(calls).toBe(1);
+  });
+
   it("works with a server that answers in one go (no remaining field)", async () => {
     const { untilDone } = await import("./client");
     expect((await untilDone(async () => ({ deleted_users: 7 }))).deleted_users).toBe(7);

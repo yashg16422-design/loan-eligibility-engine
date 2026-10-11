@@ -43,12 +43,14 @@ def connect(
     port: int = 5432,
     autocommit: bool = False,
     application_name: str = "loan-engine",
+    attempts: int = CONNECT_ATTEMPTS,
 ) -> psycopg.Connection:
     """Open a TLS connection to RDS (see tls_options: verify-full in the deployed Lambdas).
 
-    A failed connect is retried once (a transient network blip must not fail a request).
+    A failed connect is retried (a transient network blip must not fail a request). Callers
+    with time to spare (ingest) pass more `attempts` to outlast a busy database.
     """
-    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
             return psycopg.connect(
                 host=host,
@@ -63,7 +65,7 @@ def connect(
             )
         except psycopg.OperationalError:
             # Safe to retry: nothing has been sent yet. A wrong password fails twice, fast.
-            if attempt == CONNECT_ATTEMPTS:
+            if attempt == attempts:
                 raise
             time.sleep(RETRY_PAUSE_SECONDS * attempt)
     raise AssertionError("unreachable")

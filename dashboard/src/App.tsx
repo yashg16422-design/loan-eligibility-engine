@@ -1,5 +1,5 @@
 import { UploadSimple, UserCircle } from "@phosphor-icons/react";
-import { UploadProvider, useUpload } from "./lib/upload";
+import { UploadProvider, useUpload, isBusy } from "./lib/upload";
 import { useSignedIn } from "./lib/useAccount";
 import { Account, AuthCallback } from "./pages/Account";
 import { Check } from "./pages/Check";
@@ -51,7 +51,7 @@ const NAV: { to: Route; label: string; short: string }[] = [
 function Header({ route }: { route: Route }) {
   const { pick, state } = useUpload();
   const email = useSignedIn();
-  const busy = state.phase === "sending" || (state.phase === "tracking" && !state.finished);
+  const busy = isBusy(state);
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-bg/90 backdrop-blur-md">
       <div className="mx-auto grid h-16 max-w-[1480px] grid-cols-[auto_1fr_auto] items-center gap-4 px-5 sm:px-10 xl:px-16">

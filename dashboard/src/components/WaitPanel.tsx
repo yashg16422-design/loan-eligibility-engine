@@ -10,7 +10,7 @@ const FACTS = [
   "Every run re-checks every customer and lender pair the slow way, before and after writing. Mismatches so far: 0.",
   "In the scale test, one million customers still came down to 360 classes.",
   "Emails only ever reach the project's test inboxes, never the addresses in your file.",
-  "Upload the same file again and nothing changes: 0 new matches, 0 emails.",
+  "Each account keeps one upload at a time on the shared free-plan database; deleting one frees its rows and keeps its charts.",
   "A 50 MB file streams straight into PostgreSQL with flat memory: 0.1 MB of Python memory, measured.",
   "ICICI Bank asks self-employed applicants to be 28 or older. The AI turned that sentence into a rule that every class is checked against.",
 ];
@@ -71,7 +71,7 @@ export function WaitPanel({ state, onStop }: { state: UploadState; onStop?: () =
               <span className="text-mute">
                 {active?.key === "ingest" || !active
                   ? "Stop this upload? If its file is not loaded yet, nothing will be."
-                  : "Matching already runs on the server and finishes on its own. Stop watching?"}
+                  : "Stop and clean up? Matching finishes on the server first (it cannot be cut in half), then this upload's records are deleted."}
               </span>
               <button type="button" disabled={stopping} className="btn btn-ghost min-h-9 px-3 text-coral"
                 onClick={async () => { setStopping(true); await onStop(); }}>
