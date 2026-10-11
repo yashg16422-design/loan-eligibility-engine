@@ -212,6 +212,10 @@ export interface UploadRecord {
   users_now: number;
   matches: number;
   emails_sent: number;
+  // What the file's runs measured; kept after its records are deleted.
+  run_customers: number;
+  run_matches: number;
+  run_emails: number;
 }
 
 /** One email as Workflow C wrote it for a customer of an upload (GET /uploads/{id}/emails). */

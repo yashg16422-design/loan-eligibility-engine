@@ -209,7 +209,7 @@ export function Merchant() {
             {chartJob ? (
               <>
                 <Charts key={`${chartJob}-${deletedJobs.has(chartJob) ? "kept" : "live"}`} jobId={chartJob} name={datasets.find((d) => d.value === chartJob)?.label ?? "this upload"} signedIn={!!email} onLoaded={onChartsLoaded} />
-                {email && !deletedJobs.has(chartJob) && <EmailPreviews jobId={chartJob} />}
+                {email && <EmailPreviews key={chartJob} jobId={chartJob} kept={deletedJobs.has(chartJob)} />}
               </>
             ) : email && uploads !== null ? (
               <div className="border border-dashed border-line-hi p-10">
@@ -454,17 +454,31 @@ function Metrics({
   runs: Run[] | null;
   signedIn: boolean;
 }) {
-  const live = (uploads ?? []).filter((u) => !u.purged_at);
-  const sum = (k: "users_now" | "matches" | "emails_sent") => live.reduce((s, u) => s + u[k], 0);
+  // Your last run: the newest upload whose matching finished, preferring one that matched
+  // customers (a re-run of unchanged rows has nothing new). Its measured figures stay after
+  // its records are deleted, so the numbers do not drop to zero after "free up".
+  const done = (uploads ?? []).filter((u) => u.match_status === "DONE");
+  const last = done.find((u) => u.run_customers > 0) ?? done[0];
   const products = crawl?.products.reduce((s, p) => s + p.products, 0);
   const verified = crawl?.products.reduce((s, p) => s + p.verified, 0);
   const emailsAll = runs?.reduce((s, r) => s + (r.emails_sent ?? 0), 0);
-  const yours: Cell[] = [
-    { label: "Uploads", value: n(live.length), note: "files in your workspace" },
-    { label: "Customers", value: n(sum("users_now")), note: "loaded from your files" },
-    { label: "Matches", value: n(sum("matches")), note: "eligible or may qualify", tone: "text-acc" },
-    { label: "Emails sent", value: n(sum("emails_sent")), note: "to the project's test inboxes" },
-  ];
+  const yours: Cell[] = last
+    ? [
+        { label: "Customers", value: n(last.run_customers), note: `matched from ${last.original_filename ?? "your file"}, ${ago(last.matched_at ?? last.created_at)}` },
+        { label: "Matches", value: n(last.run_matches), note: "eligible or may qualify", tone: "text-acc" },
+        { label: "Emails sent", value: n(last.run_emails), note: "to the project's test inboxes" },
+        {
+          label: "Stored now",
+          value: n(last.users_now),
+          note: last.purged_at ? "records deleted, figures kept" : "customers in the database",
+        },
+      ]
+    : [
+        { label: "Customers", value: "-", note: "upload a CSV to see your last run" },
+        { label: "Matches", value: "-", note: "eligible or may qualify", tone: "text-acc" },
+        { label: "Emails sent", value: "-", note: "to the project's test inboxes" },
+        { label: "Stored now", value: "-", note: "customers in the database" },
+      ];
   const engine: Cell[] = [
     { label: "Lender products", value: n(products), note: `${n(verified)} with criteria verified on the page`, tone: "text-amber" },
     { label: "Pairs to check", value: n(reference?.naive_pairs), note: `${n(reference?.users_in)} customers in the reference run` },
@@ -485,7 +499,7 @@ function Metrics({
   ];
   return (
     <div className="mt-10 grid gap-10">
-      {signedIn && <Readouts title="Your workspace" cells={yours} cols="lg:grid-cols-4" />}
+      {signedIn && <Readouts title="Your last run" cells={yours} cols="lg:grid-cols-4" />}
       <Readouts title="Engine, shared by every account" cells={engine} cols="lg:grid-cols-3" />
     </div>
   );

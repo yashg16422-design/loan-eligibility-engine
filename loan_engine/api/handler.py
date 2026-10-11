@@ -67,6 +67,9 @@ logger = Logger(service="api")
 # Each upload can email up to the demo cap of users; the SES sandbox allows 200 emails a day.
 MAX_UPLOADS_PER_DAY = 50
 MAX_UPLOADS_PER_ACCOUNT_PER_DAY = 10  # one merchant cannot use up everyone's daily budget
+# Three full 10k uploads (~780k match rows) is what the 1 GB free-plan RDS serves well; a 4th
+# started swapping in testing. A new upload waits until others delete theirs.
+MAX_STORED_CUSTOMERS = 30_000
 MAX_EMAIL_TOKENS = 50  # Workflow C sends at most a handful per run (SES sandbox)
 ADMIN_GROUP = "admin"  # a Cognito user pool group (serverless.yml AdminGroup)
 
@@ -123,6 +126,26 @@ class UploadBlockedError(ApiError):
             if stage != "stored"
             else f"{name} still has {blocking['customers']:,} customers stored. Delete them"
             " first (its analytics are kept), then upload again."
+        )
+
+
+class DatabaseBusyError(ApiError):
+    """The shared demo database already holds as many uploaded customers as it serves well."""
+
+    status = 503
+
+    def __init__(self, admin: bool) -> None:
+        super().__init__(
+            "The shared demo database is busy: other reviewers' uploads hold"
+            f" {MAX_STORED_CUSTOMERS:,}+ customers right now."
+            + (
+                ' Use "Delete every account\'s uploads" in Your uploads to clear them'
+                " (their charts are kept)."
+                if admin
+                else " Please ask them to delete their uploads once their run is done"
+                " (Delete in Your uploads; their charts are kept), or try again in about"
+                " 10 minutes."
+            )
         )
 
 
@@ -462,6 +485,8 @@ def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
         blocking = repository.account_blocker(conn, who.account_id)
         if blocking is not None:
             raise UploadBlockedError(blocking)
+        if repository.stored_csv_customers(conn) >= MAX_STORED_CUSTOMERS:
+            raise DatabaseBusyError(who.is_admin)
         repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
     # Local signing with the Lambda role's credentials: no network call.
@@ -633,8 +658,11 @@ def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
     if version[1] is not None:
         # Records deleted (to keep the shared database small): keep showing the analytics
         # taken just before the delete, marked as such. Never overwrite them with zeros.
-        snapshot = repository.analytics_snapshot(conn, job_id)
-        return {**(snapshot or repository.analytics(conn, job_id)), "data_deleted": True}
+        snapshot = repository.analytics_snapshot(conn, job_id) or repository.analytics(conn, job_id)
+        # The kept example emails are served by their own (owner-only) route, never here:
+        # the reference dataset's analytics are public.
+        charts = {k: v for k, v in snapshot.items() if k != EMAILS_KEPT}
+        return {**charts, "data_deleted": True}
     key = (job_id, version)
     if key not in _ANALYTICS_CACHE:
         if len(_ANALYTICS_CACHE) >= _ANALYTICS_CACHE_SIZE:
@@ -646,6 +674,25 @@ def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
             repository.store_analytics(conn, job_id, stamp, stored)
         _ANALYTICS_CACHE[key] = stored
     return _ANALYTICS_CACHE[key]
+
+
+EMAILS_KEPT = "email_previews"
+
+
+def snapshot_before_delete(conn: psycopg.Connection, job_id: uuid.UUID) -> None:
+    """Keep an upload's charts and up to 3 of its sent emails before its records go, so the
+    console still shows both afterwards. Taken once: a delete runs in several calls, and later
+    calls must not overwrite it with half-deleted figures."""
+    version = repository.analytics_version(conn, job_id)
+    if version is None or version[1] is not None:
+        return
+    stamp = "|".join(str(v) for v in version)
+    stored = repository.stored_analytics(conn, job_id, stamp)
+    if stored is not None and EMAILS_KEPT in stored:
+        return
+    charts = cached_analytics(conn, job_id)
+    emails = repository.email_previews(conn, job_id)
+    repository.store_analytics(conn, job_id, stamp, {**charts, EMAILS_KEPT: emails})
 
 
 @app.get("/analytics")
@@ -793,7 +840,7 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
     with db(deps) as conn:
         account = None if scope == "all" else who.account_id
         for job_id in repository.unpurged_csv_jobs(conn, account):
-            cached_analytics(conn, job_id)  # keep each upload's charts, as a single delete does
+            snapshot_before_delete(conn, job_id)  # as a single delete does
         counts = repository.purge_csv_uploads(conn, account)
     logger.info("uploads purged", extra={"scope": scope, **counts})
     return counts
@@ -824,6 +871,11 @@ def get_email_previews(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> list[dic
     """Up to 3 of this upload's emails as Workflow C wrote them (owner or admin)."""
     with db(deps) as conn:
         own_upload(conn, job_id, who)
+        version = repository.analytics_version(conn, job_id)
+        if version is not None and version[1] is not None:
+            # Records deleted: the examples kept just before the delete (none if older).
+            kept = repository.analytics_snapshot(conn, job_id) or {}
+            return list(kept.get(EMAILS_KEPT, []))
         return repository.email_previews(conn, job_id)
 
 
@@ -832,9 +884,7 @@ def purge_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]
     """Delete one upload's users (owner or admin), so the file can be uploaded again as new."""
     with db(deps) as conn:
         own_upload(conn, job_id, who)
-        version = repository.analytics_version(conn, job_id)
-        if version is not None and version[1] is None:
-            cached_analytics(conn, job_id)  # snapshot the charts before any record goes
+        snapshot_before_delete(conn, job_id)  # charts and example emails, before any record goes
         deleted = repository.purge_upload(conn, job_id)
         if deleted is None:
             raise NotFoundError("job not found")

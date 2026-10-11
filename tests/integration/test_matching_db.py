@@ -835,7 +835,19 @@ def test_one_live_upload_per_account(db):
     )
     assert stage() == (job, "stored", 3)  # finished, customers kept: delete first
     assert repository.unpurged_csv_jobs(db, "one-sub") == [job]
+    db.execute(
+        "INSERT INTO pipeline_runs (mode, job_id, status, users_in, matches_new, emails_sent)"
+        " VALUES ('upload', %s, 'done', 3, 12, 2)",
+        (job,),
+    )
+    stored = repository.stored_csv_customers(db)
+    assert stored >= 3
     assert repository.purge_upload(db, job) == 3
+    assert repository.stored_csv_customers(db) == stored - 3
+    # The upload's own figures are gone, its run's measured figures stay ("last run").
+    row = next(u for u in repository.list_uploads(db, "one-sub") if u["job_id"] == job)
+    assert (row["users_now"], row["matches"]) == (0, 0)
+    assert (row["run_customers"], row["run_matches"], row["run_emails"]) == (3, 12, 2)
     assert repository.account_blocker(db, "one-sub") is None
     assert repository.unpurged_csv_jobs(db, "one-sub") == []
     # A cancelled ticket, or one whose file never arrived (15+ minutes), never blocks.

@@ -552,8 +552,17 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
                                WHERE r.job_id = j.job_id AND r.status = 'done') END)::int
                        AS matches,
                    (SELECT count(*) FROM notifications n
-                     WHERE n.job_id = j.job_id AND n.status = 'sent')::int AS emails_sent
-            FROM j ORDER BY j.created_at DESC
+                     WHERE n.job_id = j.job_id AND n.status = 'sent')::int AS emails_sent,
+                   -- What the file's runs measured, kept after a delete (pipeline_runs stays):
+                   -- the console's "last run" figures.
+                   r.run_customers, r.run_matches, r.run_emails
+            FROM j CROSS JOIN LATERAL (
+                SELECT coalesce(sum(users_in), 0)::int AS run_customers,
+                       coalesce(sum(matches_new), 0)::int AS run_matches,
+                       coalesce(sum(emails_sent), 0)::int AS run_emails
+                FROM pipeline_runs WHERE job_id = j.job_id AND status = 'done'
+            ) r
+            ORDER BY j.created_at DESC
             """,
             (account_id, account_id, UPLOADS_SHOWN),
         ).fetchall()
@@ -668,6 +677,16 @@ def purge_csv_uploads(
             ).fetchone()
             left = int(row[0]) if row else 0
             return {"deleted_users": deleted, "uploads": uploads, "remaining": left}
+
+
+def stored_csv_customers(conn: psycopg.Connection) -> int:
+    """Customers from bulk uploads stored right now, across every account (the capacity guard:
+    instant checks are single rows and never count)."""
+    row = conn.execute(
+        "SELECT count(*) FROM users u JOIN upload_jobs j ON j.job_id = u.upload_job_id"
+        " WHERE j.source = 'csv'"
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # A matching run that has not finished after this long is stuck (a 10,000-customer run takes

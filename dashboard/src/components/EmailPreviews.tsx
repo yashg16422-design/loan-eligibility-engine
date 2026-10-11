@@ -13,7 +13,7 @@ function rate(min: number | null, max: number | null): string {
   return max == null || max === min ? `from ${min}% p.a.` : `${min}% to ${max}% p.a.`;
 }
 
-export function EmailPreviews({ jobId }: { jobId: string }) {
+export function EmailPreviews({ jobId, kept = false }: { jobId: string; kept?: boolean }) {
   const [emails, setEmails] = useState<EmailPreview[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   useEffect(() => {
@@ -32,6 +32,7 @@ export function EmailPreviews({ jobId }: { jobId: string }) {
         <p className="max-w-[70ch] text-sm text-mute">
           Workflow C emails every matched customer. As the assignment requires, these go to the project's test inboxes,
           never to addresses in the file. Below are emails from this upload as they were sent: same picks, same order.
+          {kept && " This upload's records were deleted; these examples were kept from just before."}
         </p>
         {!emails ? (
           <p className="label mt-6">Loading emails</p>

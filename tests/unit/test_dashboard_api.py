@@ -198,6 +198,7 @@ def deps(monkeypatch):
     # No earlier upload in the way, nothing to snapshot (both tested on their own).
     monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
     monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [])
+    monkeypatch.setattr(api.repository, "stored_csv_customers", lambda conn: 0)
     # Every signed-in route resolves the account row first (one per verified email).
     monkeypatch.setattr(
         api.repository,
@@ -753,6 +754,8 @@ def test_email_previews_are_private_to_the_upload_owner(deps, monkeypatch, lambd
     monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (True, "merchant-sub"))
     preview = [{"user_id": USER, "name": "A", "alias_email": "x+one@gmail.com", "picks": []}]
     monkeypatch.setattr(api.repository, "email_previews", lambda conn, j: preview)
+    version = {"v": ("t", None)}
+    monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: version["v"])
     event = {"routeKey": "GET /uploads/{job_id}/emails", "pathParameters": {"job_id": str(job)}}
     other = {**MERCHANT, "sub": "someone-else", "email": "other@example.org"}
     assert invoke({**event, "requestContext": signed_in_as(other)})["statusCode"] == 404
@@ -760,6 +763,57 @@ def test_email_previews_are_private_to_the_upload_owner(deps, monkeypatch, lambd
     assert (
         res["statusCode"] == 200 and json.loads(res["body"])[0]["alias_email"] == "x+one@gmail.com"
     )
+    # Records deleted: the examples kept at delete time are served, never recomputed.
+    version["v"] = ("t", "deleted")
+    kept = [{**preview[0], "alias_email": "x+kept@gmail.com"}]
+    monkeypatch.setattr(api.repository, "email_previews", lambda conn, j: [])
+    monkeypatch.setattr(
+        api.repository, "analytics_snapshot", lambda conn, j: {"users": 4, api.EMAILS_KEPT: kept}
+    )
+    res = invoke({**event, "requestContext": signed_in_as(MERCHANT)})
+    assert json.loads(res["body"])[0]["alias_email"] == "x+kept@gmail.com"
+
+
+def test_kept_emails_are_never_in_public_analytics(monkeypatch):
+    monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: ("t", "deleted"))
+    monkeypatch.setattr(
+        api.repository,
+        "analytics_snapshot",
+        lambda conn, j: {"users": 4, api.EMAILS_KEPT: [{"name": "A"}]},
+    )
+    charts = api.cached_analytics(object(), USER)
+    assert charts == {"users": 4, "data_deleted": True}
+
+
+def test_snapshot_before_delete_keeps_charts_and_emails_once(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(api.repository, "analytics_version", lambda conn, j: ("t", None))
+    monkeypatch.setattr(api.repository, "stored_analytics", lambda conn, j, v: stored.get(v))
+    monkeypatch.setattr(
+        api.repository, "store_analytics", lambda conn, j, v, p: stored.__setitem__(v, p)
+    )
+    monkeypatch.setattr(api, "cached_analytics", lambda conn, j: {"users": 4})
+    emails = [[{"name": "A"}], []]  # the second call would see half-deleted records
+    monkeypatch.setattr(api.repository, "email_previews", lambda conn, j: emails.pop(0))
+    api.snapshot_before_delete(object(), USER)
+    api.snapshot_before_delete(object(), USER)
+    assert stored == {"t|None": {"users": 4, api.EMAILS_KEPT: [{"name": "A"}]}}
+
+
+def test_new_uploads_wait_while_the_shared_database_is_full(deps, monkeypatch, lambda_context):
+    created = []
+    monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
+    monkeypatch.setattr(
+        api.repository, "stored_csv_customers", lambda conn: api.MAX_STORED_CUSTOMERS
+    )
+    monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
+    event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
+    res = invoke({**event, "requestContext": signed_in_as(MERCHANT)}, lambda_context)
+    message = json.loads(res["body"])["error"]
+    assert res["statusCode"] == 503 and "ask them to delete" in message and "10 minutes" in message
+    res = invoke({**event, "requestContext": signed_in_as(ADMIN)}, lambda_context)
+    assert "Delete every account's uploads" in json.loads(res["body"])["error"]
+    assert created == []
 
 
 # ---------------------------------------------------------------- account isolation (T4)
@@ -836,7 +890,7 @@ def test_workspace_reset_keeps_each_uploads_charts(deps, monkeypatch, lambda_con
         kept.append(job_id)
         order.append("snap")
 
-    monkeypatch.setattr(api, "cached_analytics", snapshot)
+    monkeypatch.setattr(api, "snapshot_before_delete", snapshot)
 
     def purge(conn, account):
         order.append("purge")
