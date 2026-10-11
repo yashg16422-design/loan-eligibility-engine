@@ -71,10 +71,25 @@
     },
     {
       "parameters": {
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\nreturn [{ json: { run_id: $input.first().json.run_id } }];\n"
+      },
+      "name": "Run to notify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        330,
+        0
+      ],
+      "id": "LoanEngineWfC001-04",
+      "notes": "The run being notified, read by every later node.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
         "operation": "executeQuery",
         "query": "-- Workflow C · Users to email. Params: $1 run_id, $2 demo cap (emails per run).\n-- New, un-notified active matches of this run. The demo-capped first N users get their\n-- top picks: best offer PER LENDER (best platform), ranked by tier, fit score, rate.\nWITH new_m AS (\n  SELECT m.user_id, m.tier, m.requirements, m.fit_score, m.fit_reasons,\n         p.lender, p.lender_key, p.channel, p.product_url, p.product_name,\n         p.interest_rate_min, p.interest_rate_max, p.loan_amount_max\n  FROM matches m JOIN loan_products p USING (product_id)\n  WHERE m.match_run_id = $1::uuid AND m.status = 'active' AND m.notified_at IS NULL\n), per_user AS (\n  SELECT user_id, count(*)::int AS matches_total, count(DISTINCT lender_key)::int AS lenders_total\n  FROM new_m GROUP BY user_id\n), chosen AS (\n  -- The demo cap counts emails ALREADY sent for this run, so a re-run after a crash sends\n  -- only the remainder (each send is recorded the moment SES accepts it).\n  SELECT user_id FROM per_user ORDER BY user_id\n  LIMIT greatest($2::int - (SELECT count(*) FROM notifications\n                            WHERE run_id = $1::uuid AND status = 'sent'), 0)\n), best_per_lender AS (\n  SELECT DISTINCT ON (n.user_id, n.lender_key) n.*\n  FROM new_m n JOIN chosen USING (user_id)\n  ORDER BY n.user_id, n.lender_key, (n.tier = 'eligible') DESC, n.fit_score DESC,\n           n.interest_rate_min NULLS LAST, n.product_name\n), ranked AS (\n  SELECT b.*, row_number() OVER (PARTITION BY b.user_id ORDER BY (b.tier = 'eligible') DESC,\n         b.fit_score DESC, b.interest_rate_min NULLS LAST, b.product_name) AS rnk\n  FROM best_per_lender b\n)\nSELECT $1::text AS run_id, u.user_id::text, u.name, u.monthly_income, u.credit_score, u.employment_status, u.age,\n       pu.matches_total, pu.lenders_total,\n       json_agg(json_build_object(\n         'lender', r.lender, 'channel', r.channel, 'tier', r.tier, 'requirements', r.requirements,\n         'interest_rate_min', r.interest_rate_min, 'interest_rate_max', r.interest_rate_max,\n         'loan_amount_max', r.loan_amount_max, 'product_url', r.product_url,\n         'fit_score', r.fit_score, 'fit_reasons', r.fit_reasons) ORDER BY r.rnk)\n         FILTER (WHERE r.rnk <= 5) AS picks\nFROM ranked r JOIN users u USING (user_id) JOIN per_user pu USING (user_id)\nGROUP BY u.user_id, pu.matches_total, pu.lenders_total\nORDER BY u.user_id",
         "options": {
-          "queryReplacement": "={{ [ $json.run_id, 5 ] }}"
+          "queryReplacement": "={{ [ $('Run to notify').first().json.run_id, 5 ] }}"
         }
       },
       "name": "Users to email",
@@ -84,14 +99,50 @@
         440,
         0
       ],
-      "id": "LoanEngineWfC001-04",
+      "id": "LoanEngineWfC001-05",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
           "name": "RDS app (n8n_workflows)"
         }
       },
+      "alwaysOutputData": true,
       "notes": "Users with new matches: top 5 picks, one per lender, best platform.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ !!$('Users to email').first().json.user_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Anyone to email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        500,
+        120
+      ],
+      "id": "LoanEngineWfC001-06",
+      "notes": "Nobody left (already sent) goes straight to recording the run.",
       "notesInFlow": true
     },
     {
@@ -114,7 +165,7 @@
         550,
         0
       ],
-      "id": "LoanEngineWfC001-05",
+      "id": "LoanEngineWfC001-07",
       "credentials": {
         "httpHeaderAuth": {
           "id": "qaXP0OsyRtnbitga",
@@ -140,7 +191,7 @@
         770,
         0
       ],
-      "id": "LoanEngineWfC001-06",
+      "id": "LoanEngineWfC001-08",
       "notes": "email.js: personal HTML + text; recipient guarded to the test aliases.",
       "notesInFlow": true
     },
@@ -156,7 +207,7 @@
         880,
         0
       ],
-      "id": "LoanEngineWfC001-07",
+      "id": "LoanEngineWfC001-09",
       "notes": "Loop: one email per iteration.",
       "notesInFlow": true
     },
@@ -181,7 +232,7 @@
         1100,
         100
       ],
-      "id": "LoanEngineWfC001-08",
+      "id": "LoanEngineWfC001-10",
       "credentials": {
         "awsAssumeRole": {
           "id": "fa286DA3YraErW57",
@@ -206,7 +257,7 @@
         1320,
         100
       ],
-      "id": "LoanEngineWfC001-09",
+      "id": "LoanEngineWfC001-11",
       "notes": "SES message id, or the error.",
       "notesInFlow": true
     },
@@ -215,7 +266,7 @@
         "operation": "executeQuery",
         "query": "-- Workflow C · Record ONE send, right after SES answers (inside the send loop).\n-- Param: $1 = one JSON object {run_id, user_id, alias_email, status ('sent'|'failed'),\n--         ses_message_id, error, subject, body_text}.\n-- One JSON parameter, not eight: n8n's query parameters break on free text with newlines\n-- (the email body), while a JSON string is passed through intact (found live).\n-- Recording each send immediately means a crash mid-loop never emails anyone twice: the\n-- re-run's \"Users to email\" skips users whose matches are already notified, and its demo cap\n-- counts the sends already recorded. A failed send stays un-notified for a later retry.\nWITH s AS (\n    SELECT run_id, user_id, alias_email, status, nullif(ses_message_id, '') AS ses_message_id,\n           nullif(error, '') AS error, nullif(subject, '') AS subject,\n           nullif(body_text, '') AS body_text\n    FROM jsonb_to_record($1::jsonb) AS r(run_id uuid, user_id uuid, alias_email text, status text,\n                                         ses_message_id text, error text, subject text,\n                                         body_text text)\n), ins AS (\n    INSERT INTO notifications (user_id, alias_email, job_id, run_id, status, ses_message_id, error,\n                               subject, body_text)\n    SELECT s.user_id, s.alias_email, r.job_id, s.run_id, s.status, s.ses_message_id, s.error,\n           s.subject, s.body_text\n    FROM s JOIN pipeline_runs r ON r.run_id = s.run_id\n    RETURNING 1\n), mark AS (\n    UPDATE matches m SET notified_at = now()\n    FROM s\n    WHERE s.status = 'sent' AND m.match_run_id = s.run_id AND m.user_id = s.user_id\n      AND m.status = 'active' AND m.notified_at IS NULL\n    RETURNING 1\n)\nSELECT s.user_id::text, s.alias_email, s.status, s.ses_message_id, s.error,\n       (SELECT count(*) FROM ins) AS recorded, (SELECT count(*) FROM mark) AS matches_marked\nFROM s;",
         "options": {
-          "queryReplacement": "={{ [ JSON.stringify({ run_id: $('Users to email').first().json.run_id, user_id: $json.user_id, alias_email: $json.alias_email, status: $json.status, ses_message_id: $json.ses_message_id || '', error: $json.error || '', subject: $json.subject || '', body_text: $json.text || '' }) ] }}"
+          "queryReplacement": "={{ [ JSON.stringify({ run_id: $('Run to notify').first().json.run_id, user_id: $json.user_id, alias_email: $json.alias_email, status: $json.status, ses_message_id: $json.ses_message_id || '', error: $json.error || '', subject: $json.subject || '', body_text: $json.text || '' }) ] }}"
         }
       },
       "name": "Record this send",
@@ -225,7 +276,7 @@
         1540,
         100
       ],
-      "id": "LoanEngineWfC001-10",
+      "id": "LoanEngineWfC001-12",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
@@ -248,13 +299,13 @@
         1760,
         100
       ],
-      "id": "LoanEngineWfC001-11",
+      "id": "LoanEngineWfC001-13",
       "notes": "Paces the loop for the SES sandbox rate.",
       "notesInFlow": true
     },
     {
       "parameters": {
-        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// Sends were recorded one by one; the summary only needs the run.\nreturn [{ json: { run_id: $('Users to email').first().json.run_id, results: $input.all().length } }];\n"
+        "jsCode": "// ---- n8n entry ------------------------------------------------------------\n\n// Sends were recorded one by one; the summary only needs the run.\nreturn [{ json: { run_id: $('Run to notify').first().json.run_id, results: $input.all().length } }];\n"
       },
       "name": "All results -> one item",
       "type": "n8n-nodes-base.code",
@@ -263,7 +314,7 @@
         1100,
         -120
       ],
-      "id": "LoanEngineWfC001-12",
+      "id": "LoanEngineWfC001-14",
       "notes": "Collapses the loop output so the summary runs once.",
       "notesInFlow": true
     },
@@ -282,7 +333,7 @@
         1100,
         -120
       ],
-      "id": "LoanEngineWfC001-13",
+      "id": "LoanEngineWfC001-15",
       "credentials": {
         "postgres": {
           "id": "PkRN0GO4XtFXA9pL",
@@ -312,7 +363,7 @@
         1320,
         -120
       ],
-      "id": "LoanEngineWfC001-14",
+      "id": "LoanEngineWfC001-16",
       "notes": "Builds and stores every other user's email, 500 per sub-workflow run.",
       "notesInFlow": true
     },
@@ -347,7 +398,7 @@
         1540,
         -120
       ],
-      "id": "LoanEngineWfC001-15",
+      "id": "LoanEngineWfC001-17",
       "notes": "Loops until every user's email is stored (bounded: at most 200 batches).",
       "notesInFlow": true
     }
@@ -368,7 +419,7 @@
       "main": [
         [
           {
-            "node": "Users to email",
+            "node": "Run to notify",
             "type": "main",
             "index": 0
           }
@@ -376,6 +427,17 @@
       ]
     },
     "From B (run)": {
+      "main": [
+        [
+          {
+            "node": "Run to notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run to notify": {
       "main": [
         [
           {
@@ -390,7 +452,7 @@
       "main": [
         [
           {
-            "node": "Sign dashboard links",
+            "node": "Anyone to email?",
             "type": "main",
             "index": 0
           }
@@ -457,6 +519,24 @@
         [
           {
             "node": "One email at a time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anyone to email?": {
+      "main": [
+        [
+          {
+            "node": "Sign dashboard links",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All results -> one item",
             "type": "main",
             "index": 0
           }

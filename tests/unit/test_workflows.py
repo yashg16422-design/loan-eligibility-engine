@@ -206,3 +206,19 @@ def test_free_text_reaches_postgres_only_as_json():
             for part in params.strip("={} []").split(", "):
                 if risky.search(part):
                     assert "JSON.stringify" in params, f"{name} > {node['name']}: {part}"
+
+
+def test_c_always_reaches_its_finish_step_even_with_nobody_to_email():
+    """A re-run after a crash (all sends already recorded) must still record the run, or the
+    sweeper would keep picking it up."""
+    c = WORKFLOWS["C_notification.json"]
+    out = lambda name, i: [e["node"] for e in c["connections"][name]["main"][i]]  # noqa: E731
+    assert out("From B (run)", 0) == ["Run to notify"]
+    assert out("Latest run with new matches", 0) == ["Run to notify"]
+    users = next(n for n in c["nodes"] if n["name"] == "Users to email")
+    assert users.get("alwaysOutputData") is True
+    assert out("Users to email", 0) == ["Anyone to email?"]
+    assert out("Anyone to email?", 0) == ["Sign dashboard links"]
+    assert out("Anyone to email?", 1) == ["All results -> one item"]
+    # Every later node reads the run from "Run to notify", never from the (maybe empty) users.
+    assert "$('Users to email').first().json.run_id" not in json.dumps(c)

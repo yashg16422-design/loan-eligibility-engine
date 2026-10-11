@@ -175,7 +175,9 @@ NODE_NOTES: dict[str, dict[str, str]] = {
         "Run now (latest run)": "Manual trigger for the newest run with new matches.",
         "Latest run with new matches": "Finds that run.",
         "From B (run)": "Called by B after a successful match run.",
+        "Run to notify": "The run being notified, read by every later node.",
         "Users to email": "Users with new matches: top 5 picks, one per lender, best platform.",
+        "Anyone to email?": "Nobody left (already sent) goes straight to recording the run.",
         "Sign dashboard links": "One call to the api Lambda: a signed 14-day dashboard link per user.",
         "Compose emails": "email.js: personal HTML + text; recipient guarded to the test aliases.",
         "One email at a time": "Loop: one email per iteration.",
@@ -1763,13 +1765,33 @@ ORDER BY finished_at DESC LIMIT 1
         {"inputSource": "passthrough"},
         (0, 100),
     )
+    # The run, in one place: every later node reads it from here, so C still knows its run when
+    # there is nobody left to email (and can record that).
+    f.add(
+        "Run to notify",
+        CODE_T,
+        2,
+        {"jsCode": js(entry="return [{ json: { run_id: $input.first().json.run_id } }];")},
+        (330, 0),
+    )
     f.add(
         "Users to email",
         PG_T,
         2.5,
-        pg_query(sql_file("notify_users.sql"), f"={{{{ [ $json.run_id, {DEMO_MAX_EMAILS} ] }}}}"),
+        pg_query(
+            sql_file("notify_users.sql"),
+            f"={{{{ [ $('Run to notify').first().json.run_id, {DEMO_MAX_EMAILS} ] }}}}",
+        ),
         (440, 0),
         credentials=PG,
+        alwaysOutputData=True,  # nobody to email still continues to the finish step
+    )
+    f.add(
+        "Anyone to email?",
+        IF_T,
+        2,
+        if_true("={{ !!$('Users to email').first().json.user_id }}"),
+        (500, 120),
     )
     # ONE call per run: the api Lambda signs a 14-day dashboard link per user. The HMAC key
     # stays in AWS; n8n authenticates with the same Header Auth credential as the webhook.
@@ -1876,7 +1898,7 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
         2.5,
         pg_query(
             sql_file("notify_record_send.sql"),
-            "={{ [ JSON.stringify({ run_id: $('Users to email').first().json.run_id, "
+            "={{ [ JSON.stringify({ run_id: $('Run to notify').first().json.run_id, "
             "user_id: $json.user_id, alias_email: $json.alias_email, status: $json.status, "
             "ses_message_id: $json.ses_message_id || '', error: $json.error || '', "
             "subject: $json.subject || '', body_text: $json.text || '' }) ] }}",
@@ -1901,7 +1923,7 @@ return [{ json: { user_id: email.user_id, alias_email: email.to, status: r.error
             "jsCode": js(
                 entry="""
 // Sends were recorded one by one; the summary only needs the run.
-return [{ json: { run_id: $('Users to email').first().json.run_id, results: $input.all().length } }];
+return [{ json: { run_id: $('Run to notify').first().json.run_id, results: $input.all().length } }];
 """
             )
         },
@@ -1918,9 +1940,10 @@ return [{ json: { run_id: $('Users to email').first().json.run_id, results: $inp
 
     for a, b in [
         ("Run now (latest run)", "Latest run with new matches"),
-        ("Latest run with new matches", "Users to email"),
-        ("From B (run)", "Users to email"),
-        ("Users to email", "Sign dashboard links"),
+        ("Latest run with new matches", "Run to notify"),
+        ("From B (run)", "Run to notify"),
+        ("Run to notify", "Users to email"),
+        ("Users to email", "Anyone to email?"),
         ("Sign dashboard links", "Compose emails"),
         ("Compose emails", "One email at a time"),
         ("Send via AWS SES", "Delivery result"),
@@ -1954,6 +1977,10 @@ return [{ json: { run_id: $('Users to email').first().json.run_id, results: $inp
         ),
         (1540, -120),
     )
+    f.link("Anyone to email?", "Sign dashboard links", out=0)
+    # Nobody to email (all sent already, e.g. a re-run after a crash): go straight to the finish
+    # step, which records the skipped users and the run's counters.
+    f.link("Anyone to email?", "All results -> one item", out=1)
     f.link("One email at a time", "All results -> one item", out=0)  # done
     f.link("All results -> one item", "Record notifications")
     f.link("Record notifications", "Compose the rest (C1)")
