@@ -536,8 +536,13 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
             SELECT j.*,
                    (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
                        AS users_now,
-                   (SELECT count(*) FROM matches m JOIN users u USING (user_id)
-                     WHERE u.upload_job_id = j.job_id AND m.status = 'active')::int AS matches,
+                   -- Matches found for the file, from its runs' own counter: counting the
+                   -- active matches live read ~260k rows per 10k upload on every page load
+                   -- (17 s while a run kept RDS busy). A cleared upload has none left.
+                   (CASE WHEN j.purged_at IS NOT NULL THEN 0
+                         ELSE (SELECT coalesce(sum(r.matches_new), 0) FROM pipeline_runs r
+                               WHERE r.job_id = j.job_id AND r.status = 'done') END)::int
+                       AS matches,
                    (SELECT count(*) FROM notifications n
                      WHERE n.job_id = j.job_id AND n.status = 'sent')::int AS emails_sent
             FROM j ORDER BY j.created_at DESC

@@ -664,3 +664,27 @@ def test_sweeper_finds_runs_that_matched_but_never_emailed(db):
         .fetchone()[0]
         .startswith("recovered by the sweeper")
     )
+
+
+def test_upload_list_reads_match_counts_from_its_runs(db):
+    """The uploads list is cheap: matches come from the runs' counters, not a live recount."""
+    from loan_engine.api import repository
+
+    db.execute(
+        "INSERT INTO accounts (account_id, email) VALUES ('list-sub', 'list@example.org') "
+        "ON CONFLICT DO NOTHING"
+    )
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "big.csv", account_id="list-sub")
+    db.execute("UPDATE upload_jobs SET status = 'COMPLETED' WHERE job_id = %s", (job,))
+    for status, new in (("done", 120), ("done", 0), ("failed", 99)):  # a retry, a failed run
+        db.execute(
+            "INSERT INTO pipeline_runs (mode, job_id, status, matches_new) "
+            "VALUES ('upload', %s, %s, %s)",
+            (job, status, new),
+        )
+    row = next(u for u in repository.list_uploads(db, "list-sub") if u["job_id"] == job)
+    assert row["matches"] == 120
+    db.execute("UPDATE upload_jobs SET purged_at = now() WHERE job_id = %s", (job,))
+    row = next(u for u in repository.list_uploads(db, "list-sub") if u["job_id"] == job)
+    assert row["matches"] == 0
