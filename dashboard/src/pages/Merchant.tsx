@@ -130,7 +130,7 @@ export function Merchant() {
   useEffect(() => {
     if (!live?.finished || loadedJob !== live.jobId || live.progress?.job.match_status !== "DONE") return;
     const customers = (live.progress.job.inserted ?? 0) + (live.progress.job.updated ?? 0);
-    if (customers < 100) return; // a tiny file costs nothing to keep
+    if (customers < 1) return; // nothing was stored
     const asked = `clickpar-freeup-${live.jobId}`;
     try {
       if (sessionStorage.getItem(asked)) return;

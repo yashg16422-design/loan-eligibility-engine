@@ -138,7 +138,6 @@ export function resumed(): UploadState {
 export function UploadProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<UploadState>(resumed);
   const input = useRef<HTMLInputElement>(null);
-  const pending = useRef<File | null>(null); // the file waiting while an earlier upload is cleared
 
   useEffect(() => {
     if (state.phase !== "tracking") return;
@@ -180,7 +179,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         const blocking = err instanceof ApiError && err.status === 409 ? (err.detail?.blocking as Blocking | undefined) : undefined;
         if (!blocking) throw err;
-        pending.current = file;
+        // One upload per account: this file is NOT uploaded; the dialog explains why.
         setState({ phase: "blocked", name: file.name, bytes: file.size, blocking });
         return;
       }
@@ -236,19 +235,17 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       {children}
       {state.phase === "blocked" && (
         <UploadBlockedDialog
-          name={state.name}
           blocking={state.blocking}
-          onClear={async (onStatus) => {
-            await clearUpload(state.blocking.job_id, onStatus);
-            const file = pending.current;
-            pending.current = null;
-            if (file) void start(file);
-            else setState({ phase: "idle" });
+          onDelete={async (onStatus) => {
+            await api.purgeUpload(state.blocking.job_id, (deleted, left, waiting) =>
+              onStatus(waiting ? "Waiting for its emails to finish…" : left > 0 ? `Deleting… ${n(deleted)} done, ${n(left)} to go.` : "Deleted."),
+            );
           }}
-          onCancel={() => {
-            pending.current = null;
+          onChooseAgain={() => {
             setState({ phase: "idle" });
+            input.current?.click();
           }}
+          onClose={() => setState({ phase: "idle" })}
         />
       )}
       <input
