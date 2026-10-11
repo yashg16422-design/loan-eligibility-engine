@@ -902,13 +902,16 @@ def store_analytics(
 
 
 def _json_dumps(value: object) -> str:
-    """JSON for stored payloads: database decimals become numbers, dates ISO strings."""
+    """JSON for stored payloads: database decimals become numbers, dates ISO strings, ids text
+    (the kept example emails carry user ids; a UUID once broke the delete, found live)."""
 
     def default(o: object) -> object:
         if isinstance(o, Decimal):
             return float(o)
         if isinstance(o, (date, datetime)):
             return o.isoformat()
+        if isinstance(o, uuid.UUID):
+            return str(o)
         raise TypeError(f"not JSON serializable: {type(o).__name__}")
 
     return json.dumps(value, default=default)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime
 
 import psycopg
 import pytest
@@ -882,7 +883,12 @@ def test_analytics_snapshot_survives_deleting_the_records(db):
         (job,),
     )
     before = repository.analytics(db, job)
-    repository.store_analytics(db, job, "t|None", before)
+    # Stored with real rows from the database, as the delete route stores them: example emails
+    # carry UUIDs and timestamps (a UUID broke this live; unit tests had stubbed the store).
+    emails = [{"user_id": uuid.uuid4(), "sent_at": datetime.now(UTC), "picks": []}]
+    repository.store_analytics(db, job, "t|None", {**before, "email_previews": emails})
+    kept = repository.analytics_snapshot(db, job)["email_previews"]
+    assert kept[0]["user_id"] == str(emails[0]["user_id"])
     assert repository.purge_upload(db, job) == 4
     assert repository.analytics(db, job)["users"] == 0  # the tables really are empty now
     assert repository.analytics_snapshot(db, job)["users"] == before["users"] == 4
