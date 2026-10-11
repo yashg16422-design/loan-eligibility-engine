@@ -572,7 +572,7 @@ def list_uploads(conn: psycopg.Connection, account_id: str | None) -> list[dict[
 # longer than the API timeout in one transaction (found live). Each chunk is its own short
 # transaction, and a call stops after a time budget and reports what is left; the client calls
 # again until nothing is. A half-deleted upload is simply resumed by the next call.
-PURGE_CHUNK = 2000
+PURGE_CHUNK = 1000
 PURGE_BUDGET_S = 15.0
 
 
@@ -629,6 +629,16 @@ def unpurged_csv_jobs(conn: psycopg.Connection, account_id: str | None) -> list[
     return [r[0] for r in rows]
 
 
+def csv_customers_left(conn: psycopg.Connection, account_id: str | None) -> int:
+    """Customers still stored from bulk uploads (of one account, or of all)."""
+    row = conn.execute(
+        "SELECT count(*) FROM users u JOIN upload_jobs j ON j.job_id = u.upload_job_id"
+        " WHERE j.source = 'csv' AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)",
+        {"a": account_id},
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def purge_csv_uploads(
     conn: psycopg.Connection,
     account_id: str | None = None,
@@ -670,23 +680,8 @@ def purge_csv_uploads(
             if n < chunk:
                 return {"deleted_users": deleted, "uploads": uploads, "remaining": 0}
         if time.monotonic() - started > budget_s:
-            row = conn.execute(
-                "SELECT count(*) FROM users u JOIN upload_jobs j ON j.job_id = u.upload_job_id"
-                " WHERE j.source = 'csv' AND (%(a)s::text IS NULL OR j.account_id = %(a)s::text)",
-                {"a": account_id},
-            ).fetchone()
-            left = int(row[0]) if row else 0
+            left = csv_customers_left(conn, account_id)
             return {"deleted_users": deleted, "uploads": uploads, "remaining": left}
-
-
-def stored_csv_customers(conn: psycopg.Connection) -> int:
-    """Customers from bulk uploads stored right now, across every account (the capacity guard:
-    instant checks are single rows and never count)."""
-    row = conn.execute(
-        "SELECT count(*) FROM users u JOIN upload_jobs j ON j.job_id = u.upload_job_id"
-        " WHERE j.source = 'csv'"
-    ).fetchone()
-    return int(row[0]) if row else 0
 
 
 # A matching run that has not finished after this long is stuck (a 10,000-customer run takes
@@ -694,15 +689,19 @@ def stored_csv_customers(conn: psycopg.Connection) -> int:
 STALLED_MATCH = "interval '15 minutes'"
 
 
-def account_blocker(conn: psycopg.Connection, account_id: str) -> dict[str, Any] | None:
-    """The account's upload that must be dealt with before it can upload another, or None.
+def account_blocker(
+    conn: psycopg.Connection, account_id: str, others: bool = False
+) -> dict[str, Any] | None:
+    """The upload that must be dealt with before this account can upload another, or None:
+    its own (`others=False`), or any other account's (`others=True`).
 
-    One live upload per account keeps the shared free-tier database small, and stops a new
-    file from being loaded while an older one is still running or half-deleted (found live: a
-    re-upload made during a delete counted the doomed rows as "unchanged", then lost them).
-    `state` is "running" (loading, matching or emailing) or "stored" (finished, customers kept).
-    A ticket whose file never arrived stops blocking after 15 minutes.
+    One stored upload at a time, across every account, keeps the shared free-tier database
+    small, and stops a new file from being loaded while an older one is still running or
+    half-deleted (found live: a re-upload made during a delete counted the doomed rows as
+    "unchanged", then lost them). `stage` is loading, matching, emailing, or "stored"
+    (finished, customers kept). A ticket whose file never arrived stops blocking after 15 min.
     """
+    owner = "j.account_id IS DISTINCT FROM %s" if others else "j.account_id = %s"
     with conn.cursor(row_factory=dict_row) as cur:
         return cur.execute(
             f"""
@@ -716,7 +715,7 @@ def account_blocker(conn: psycopg.Connection, account_id: str) -> dict[str, Any]
                    (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
                        AS customers
             FROM upload_jobs j
-            WHERE j.source = 'csv' AND j.account_id = %s AND j.purged_at IS NULL
+            WHERE j.source = 'csv' AND {owner} AND j.purged_at IS NULL
               AND (j.status = 'PROCESSING'
                    OR (j.status = 'AWAITING_UPLOAD'
                        AND j.created_at > now() - interval '15 minutes')

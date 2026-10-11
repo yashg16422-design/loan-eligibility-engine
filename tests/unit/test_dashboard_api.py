@@ -196,9 +196,8 @@ def deps(monkeypatch):
     monkeypatch.setattr(api, "db", fake_db)
     monkeypatch.setattr(api, "token_key", lambda arn: KEY)
     # No earlier upload in the way, nothing to snapshot (both tested on their own).
-    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
+    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account, others=False: None)
     monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [])
-    monkeypatch.setattr(api.repository, "stored_csv_customers", lambda conn: 0)
     # Every signed-in route resolves the account row first (one per verified email).
     monkeypatch.setattr(
         api.repository,
@@ -560,12 +559,14 @@ class TestDataReset:
         monkeypatch.setattr(
             api.repository, "upload_owner", lambda conn, j: (j in owners, owners.get(j))
         )
-        monkeypatch.setattr(api.repository, "purge_upload", lambda conn, j: purged.append(j) or 7)
+        monkeypatch.setattr(
+            api.repository, "purge_upload", lambda conn, j, **kw: purged.append(j) or 7
+        )
         monkeypatch.setattr(api.repository, "users_left", lambda conn, j: 0)
         monkeypatch.setattr(
             api.repository,
             "purge_csv_uploads",
-            lambda conn, account=None: purged.append(account or "all")
+            lambda conn, account=None, **kw: purged.append(account or "all")
             or {"deleted_users": 9, "uploads": 2},
         )
         one = {"routeKey": "DELETE /uploads/{job_id}", "pathParameters": {"job_id": str(self.JOB)}}
@@ -595,7 +596,7 @@ class TestDataReset:
         monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (False, None))
         assert invoke(event, lambda_context)["statusCode"] == 404
 
-        def busy(conn, job):
+        def busy(conn, job, **kw):
             raise api.repository.JobBusyError
 
         monkeypatch.setattr(api.repository, "upload_owner", lambda conn, j: (True, None))
@@ -734,7 +735,7 @@ def test_admin_belongs_to_the_account_not_one_sign_in_method(deps, monkeypatch, 
     monkeypatch.setattr(
         api.repository,
         "purge_csv_uploads",
-        lambda conn, account=None: {"deleted_users": 0, "uploads": 0},
+        lambda conn, account=None, **kw: {"deleted_users": 0, "uploads": 0},
     )
     monkeypatch.setattr(api.repository, "list_uploads", lambda conn, account: [])
     google = {**MERCHANT, "sub": "google-sub"}  # not in the Cognito admin group
@@ -800,20 +801,54 @@ def test_snapshot_before_delete_keeps_charts_and_emails_once(monkeypatch):
     assert stored == {"t|None": {"users": 4, api.EMAILS_KEPT: [{"name": "A"}]}}
 
 
-def test_new_uploads_wait_while_the_shared_database_is_full(deps, monkeypatch, lambda_context):
+def test_one_upload_in_the_whole_database(deps, monkeypatch, lambda_context):
+    """Another account's upload blocks everyone else (503), with no detail about it."""
     created = []
     monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
+    theirs = {"job_id": str(USER), "filename": "their.csv", "stage": "stored", "customers": 9}
     monkeypatch.setattr(
-        api.repository, "stored_csv_customers", lambda conn: api.MAX_STORED_CUSTOMERS
+        api.repository,
+        "account_blocker",
+        lambda conn, account, others=False: theirs if others else None,
     )
     monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
     event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
     res = invoke({**event, "requestContext": signed_in_as(MERCHANT)}, lambda_context)
     message = json.loads(res["body"])["error"]
     assert res["statusCode"] == 503 and "ask them to delete" in message and "10 minutes" in message
+    assert "their.csv" not in message and "blocking" not in json.loads(res["body"])
     res = invoke({**event, "requestContext": signed_in_as(ADMIN)}, lambda_context)
     assert "Delete every account's uploads" in json.loads(res["body"])["error"]
     assert created == []
+
+
+def test_a_slow_chart_snapshot_hands_the_delete_to_the_next_call(deps, monkeypatch, lambda_context):
+    """Found live: charts for two 10k uploads, then 15 s of deleting, passed the API's 28 s.
+    Past the snapshot budget a call returns what is left instead; nothing is deleted unkept."""
+    now = [0.0]
+    monkeypatch.setattr(api.time, "monotonic", lambda: now[0])
+    second = uuid.uuid4()
+    kept, purged = [], []
+
+    def slow_snapshot(conn, job_id):
+        kept.append(job_id)
+        now[0] += api.SNAPSHOT_BUDGET_S + 1  # one big upload's charts took the whole budget
+
+    monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [USER, second])
+    monkeypatch.setattr(api, "snapshot_before_delete", slow_snapshot)
+    monkeypatch.setattr(api.repository, "csv_customers_left", lambda conn, account: 20000)
+    monkeypatch.setattr(api.repository, "purge_csv_uploads", lambda *a, **k: purged.append(1))
+    res = invoke(
+        {"routeKey": "DELETE /uploads", "requestContext": signed_in_as(MERCHANT)}, lambda_context
+    )
+    assert json.loads(res["body"]) == {"deleted_users": 0, "uploads": 0, "remaining": 20000}
+    assert kept == [USER] and purged == []
+
+
+def test_delete_budget_never_runs_out_entirely(monkeypatch):
+    monkeypatch.setattr(api.time, "monotonic", lambda: 100.0)
+    assert api.budget_left(100.0) == api.DELETE_BUDGET_S
+    assert api.budget_left(50.0) == 1.0  # always room for one chunk
 
 
 # ---------------------------------------------------------------- account isolation (T4)
@@ -868,7 +903,9 @@ def test_one_live_upload_per_account(deps, monkeypatch, lambda_context):
     created = []
     blocking = {"job_id": str(USER), "filename": "users.csv", "stage": "stored", "customers": 10000}
     monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
-    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: blocking)
+    monkeypatch.setattr(
+        api.repository, "account_blocker", lambda conn, account, others=False: blocking
+    )
     monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
     event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
     for who in (MERCHANT, ADMIN):
@@ -892,8 +929,9 @@ def test_workspace_reset_keeps_each_uploads_charts(deps, monkeypatch, lambda_con
 
     monkeypatch.setattr(api, "snapshot_before_delete", snapshot)
 
-    def purge(conn, account):
+    def purge(conn, account, budget_s):
         order.append("purge")
+        assert 0 < budget_s <= api.DELETE_BUDGET_S  # what the charts left of one budget
         return {"deleted_users": 3, "uploads": 1, "remaining": 0}
 
     monkeypatch.setattr(api.repository, "purge_csv_uploads", purge)

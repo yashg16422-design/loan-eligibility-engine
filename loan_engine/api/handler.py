@@ -67,9 +67,10 @@ logger = Logger(service="api")
 # Each upload can email up to the demo cap of users; the SES sandbox allows 200 emails a day.
 MAX_UPLOADS_PER_DAY = 50
 MAX_UPLOADS_PER_ACCOUNT_PER_DAY = 10  # one merchant cannot use up everyone's daily budget
-# Three full 10k uploads (~780k match rows) is what the 1 GB free-plan RDS serves well; a 4th
-# started swapping in testing. A new upload waits until others delete theirs.
-MAX_STORED_CUSTOMERS = 30_000
+# A delete call must answer within the API's 28 s: saving the charts first and then deleting
+# for 15 s timed out live on two 10k uploads. One budget covers both; the client calls again.
+DELETE_BUDGET_S = 18.0
+SNAPSHOT_BUDGET_S = 10.0
 MAX_EMAIL_TOKENS = 50  # Workflow C sends at most a handful per run (SES sandbox)
 ADMIN_GROUP = "admin"  # a Cognito user pool group (serverless.yml AdminGroup)
 
@@ -130,21 +131,20 @@ class UploadBlockedError(ApiError):
 
 
 class DatabaseBusyError(ApiError):
-    """The shared demo database already holds as many uploaded customers as it serves well."""
+    """Another account's upload is in the shared demo database, which holds one at a time."""
 
     status = 503
 
     def __init__(self, admin: bool) -> None:
         super().__init__(
-            "The shared demo database is busy: other reviewers' uploads hold"
-            f" {MAX_STORED_CUSTOMERS:,}+ customers right now."
+            "Another reviewer's upload is in the shared demo database right now, and it holds"
+            " one upload at a time."
             + (
-                ' Use "Delete every account\'s uploads" in Your uploads to clear them'
-                " (their charts are kept)."
+                ' Use "Delete every account\'s uploads" in Your uploads to clear it'
+                " (its charts are kept)."
                 if admin
-                else " Please ask them to delete their uploads once their run is done"
-                " (Delete in Your uploads; their charts are kept), or try again in about"
-                " 10 minutes."
+                else " Please ask them to delete it once their run is done (Delete in Your"
+                " uploads; their charts are kept), or try again in about 10 minutes."
             )
         )
 
@@ -481,11 +481,12 @@ def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
         mine = repository.csv_uploads_last_24h(conn, who.account_id)
         if not who.is_admin and mine >= MAX_UPLOADS_PER_ACCOUNT_PER_DAY:
             raise TooManyChecksError
-        # One live upload per account, admins included (one shared free-tier database).
+        # One stored upload per account, admins included (one shared free-tier database)...
         blocking = repository.account_blocker(conn, who.account_id)
         if blocking is not None:
             raise UploadBlockedError(blocking)
-        if repository.stored_csv_customers(conn) >= MAX_STORED_CUSTOMERS:
+        # ...and one in the whole database: another account's upload must be deleted first.
+        if repository.account_blocker(conn, who.account_id, others=True) is not None:
             raise DatabaseBusyError(who.is_admin)
         repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
@@ -679,6 +680,11 @@ def cached_analytics(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
 EMAILS_KEPT = "email_previews"
 
 
+def budget_left(started: float) -> float:
+    """Seconds a delete may still spend in this call (it always does at least one chunk)."""
+    return max(1.0, DELETE_BUDGET_S - (time.monotonic() - started))
+
+
 def snapshot_before_delete(conn: psycopg.Connection, job_id: uuid.UUID) -> None:
     """Keep an upload's charts and up to 3 of its sent emails before its records go, so the
     console still shows both afterwards. Taken once: a delete runs in several calls, and later
@@ -837,11 +843,16 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
         raise BadRequestError("scope must be mine or all")
     if scope == "all" and not who.is_admin:
         raise ForbiddenError
+    started = time.monotonic()
     with db(deps) as conn:
         account = None if scope == "all" else who.account_id
         for job_id in repository.unpurged_csv_jobs(conn, account):
+            if time.monotonic() - started > SNAPSHOT_BUDGET_S:
+                # Charts of the rest are kept on the next call, before anything of theirs goes.
+                left = repository.csv_customers_left(conn, account)
+                return {"deleted_users": 0, "uploads": 0, "remaining": left}
             snapshot_before_delete(conn, job_id)  # as a single delete does
-        counts = repository.purge_csv_uploads(conn, account)
+        counts = repository.purge_csv_uploads(conn, account, budget_s=budget_left(started))
     logger.info("uploads purged", extra={"scope": scope, **counts})
     return counts
 
@@ -884,8 +895,9 @@ def purge_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]
     """Delete one upload's users (owner or admin), so the file can be uploaded again as new."""
     with db(deps) as conn:
         own_upload(conn, job_id, who)
+        started = time.monotonic()
         snapshot_before_delete(conn, job_id)  # charts and example emails, before any record goes
-        deleted = repository.purge_upload(conn, job_id)
+        deleted = repository.purge_upload(conn, job_id, budget_s=budget_left(started))
         if deleted is None:
             raise NotFoundError("job not found")
         left = repository.users_left(conn, job_id)

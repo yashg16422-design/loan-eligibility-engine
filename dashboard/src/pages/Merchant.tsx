@@ -413,7 +413,7 @@ function DropZone() {
           <h3 className="text-xl font-light">Drop a customers CSV, or choose one</h3>
           <p className="mt-2 max-w-[64ch] text-sm text-mute">
             A .csv with a header row: user_id, name, email, monthly_income, credit_score, employment_status, age. Up to
-            50 MB, one upload at a time per account (the last one is deleted first, its charts kept), 10 a day. Rows that
+            50 MB, one upload at a time in the shared database (the last one is deleted first, its charts kept), 10 a day. Rows that
             fail a check are set aside with the reason; the rest are matched.
           </p>
           {state.phase === "stopped" && (

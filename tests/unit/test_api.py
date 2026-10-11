@@ -219,8 +219,9 @@ class TestCreateUploadRoute:
         monkeypatch.setattr(
             api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0
         )  # under the cap
-        monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
-        monkeypatch.setattr(api.repository, "stored_csv_customers", lambda conn: 0)
+        monkeypatch.setattr(
+            api.repository, "account_blocker", lambda conn, account, others=False: None
+        )
         monkeypatch.setattr(
             api.repository,
             "upsert_account",

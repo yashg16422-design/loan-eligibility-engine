@@ -113,6 +113,22 @@ describe("big deletes", () => {
     expect(waits).toEqual([true, true, false]);
   });
 
+  it("calls again after a cut-off call (timeout), a few times at most", async () => {
+    const { untilDone, ApiError } = await import("./client");
+    let calls = 0;
+    const r = await untilDone(async () => {
+      if (++calls === 1) throw new ApiError(500, "Internal Server Error");
+      return { deleted_users: 4, remaining: 0 };
+    }, undefined, 200, 0);
+    expect(r.deleted_users).toBe(4);
+    let down = 0;
+    await expect(untilDone(async () => {
+      down++;
+      throw new ApiError(503, "down");
+    }, undefined, 200, 0)).rejects.toThrow("down");
+    expect(down).toBe(4);
+  });
+
   it("does not retry other errors", async () => {
     const { untilDone, ApiError } = await import("./client");
     let calls = 0;

@@ -195,6 +195,7 @@ export type Progress = (deleted: number, remaining: number, waiting?: boolean) =
 // A delete right after a run waits for its emails (the server says 409 for about two minutes)
 // instead of failing: retried every 8 s for up to ~3 minutes.
 const BUSY_RETRIES = 25;
+const FAILED_RETRIES = 3;
 
 /** Repeat a chunked delete until the server says nothing is left; totals across calls. */
 export async function untilDone(
@@ -206,11 +207,18 @@ export async function untilDone(
   let deleted = 0;
   let uploads = 0;
   let busy = 0;
+  let failed = 0;
   for (let i = 0; i < maxCalls; i++) {
     let r: Purged;
     try {
       r = await call();
     } catch (err) {
+      // A cut-off call (gateway timeout, 5xx) rolled back its unfinished chunk, so calling
+      // again is safe: it resumes where the last finished chunk stopped.
+      if (err instanceof ApiError && (err.status >= 500 || err.status === 0) && ++failed <= FAILED_RETRIES) {
+        await new Promise((ok) => setTimeout(ok, busyPauseMs / 4));
+        continue;
+      }
       if (!(err instanceof ApiError && err.status === 409) || ++busy > BUSY_RETRIES) throw err;
       onProgress?.(deleted, -1, true);
       await new Promise((ok) => setTimeout(ok, busyPauseMs));
