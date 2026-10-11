@@ -20,12 +20,22 @@ export type UploadState =
       startedAt: number; // epoch ms, for the "while you wait" timer
       reconnecting?: boolean; // the last poll failed transiently; still tracking
     }
-  | { phase: "error"; name?: string; message: string };
+  | { phase: "error"; name?: string; message: string }
+  | { phase: "stopped"; name: string; message: string };
 
 interface Ctx {
   state: UploadState;
   pick: () => void;
   reset: () => void;
+  stop: () => Promise<void>;
+}
+
+/** What Stop did, in words (server outcome -> sentence). */
+export function stopMessage(outcome: string): string {
+  if (outcome === "cancelled") return "Stopped. The file was never loaded, so nothing was matched or emailed.";
+  if (outcome === "running")
+    return "Stopped watching. The customers were already loaded and matching runs on the server until it finishes; delete the upload afterwards to remove its data.";
+  return "This upload had already finished. Delete it below if you want its customers removed.";
 }
 
 const UploadContext = createContext<Ctx | null>(null);
@@ -128,6 +138,17 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     reset: () => {
       remember(null);
       setState({ phase: "idle" });
+    },
+    stop: async () => {
+      if (state.phase !== "tracking") return;
+      const { jobId, name } = state;
+      remember(null);
+      try {
+        const { outcome } = await api.cancelUpload(jobId);
+        setState({ phase: "stopped", name, message: stopMessage(outcome) });
+      } catch (err) {
+        setState({ phase: "stopped", name, message: err instanceof Error ? err.message : "Could not reach the server. Stopped watching." });
+      }
     },
   };
 

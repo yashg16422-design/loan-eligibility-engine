@@ -764,6 +764,18 @@ def purge_uploads(who: SignedIn, deps: Deps, scope: str = "mine") -> dict[str, i
     return counts
 
 
+@app.post("/uploads/{job_id}/cancel")
+def cancel_upload(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, str]:
+    """Stop an upload (owner or admin): cancelled before loading; otherwise say what is running."""
+    with db(deps) as conn:
+        own_upload(conn, job_id, who)
+        outcome = repository.cancel_upload(conn, job_id)
+    if outcome is None:
+        raise NotFoundError("job not found")
+    logger.info("upload cancel requested", job_id=str(job_id), outcome=outcome)
+    return {"job_id": str(job_id), "outcome": outcome}
+
+
 @app.get("/uploads/{job_id}/analytics")
 def get_upload_analytics(job_id: uuid.UUID, who: SignedIn, deps: Deps) -> dict[str, Any]:
     """Charts for one of my uploads (owner or admin): aggregates only."""

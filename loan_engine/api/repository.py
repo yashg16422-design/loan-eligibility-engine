@@ -651,6 +651,31 @@ def purge_csv_uploads(
             return {"deleted_users": deleted, "uploads": uploads, "remaining": left}
 
 
+def cancel_upload(conn: psycopg.Connection, job_id: uuid.UUID) -> str | None:
+    """Stop an upload. Before its file is loaded it is cancelled for real ("cancelled": the job
+    is FAILED, so a later SQS delivery of the file is ignored by ingest's claim). Once loaded,
+    matching runs in n8n and cannot be stopped halfway ("running"), or it is already over
+    ("finished"). None if the job does not exist.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT status, match_status FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        status, match_status = row
+        if status in ("AWAITING_UPLOAD", "PROCESSING"):
+            conn.execute(
+                "UPDATE upload_jobs SET status = 'FAILED', completed_at = now(),"
+                " error = 'Cancelled by you before the file was loaded.' WHERE job_id = %s",
+                (job_id,),
+            )
+            return "cancelled"
+        if status == "COMPLETED" and match_status in (None, "RUNNING"):
+            return "running"
+        return "finished"
+
+
 def delete_check(conn: psycopg.Connection, user_id: uuid.UUID) -> str:
     """A person deletes their own instant check: "deleted", "not_found", "csv_user" or "busy".
 

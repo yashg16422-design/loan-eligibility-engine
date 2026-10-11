@@ -185,6 +185,10 @@ functions:
           method: GET
           path: /uploads/{job_id}/analytics
           authorizer: { name: cognito }
+      - httpApi:
+          method: POST
+          path: /uploads/{job_id}/cancel
+          authorizer: { name: cognito }
       - httpApi: POST /check
       - httpApi: GET /me
       - httpApi: GET /me/matches

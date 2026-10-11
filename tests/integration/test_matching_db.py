@@ -740,3 +740,26 @@ def test_a_big_delete_runs_in_chunks_and_resumes_until_done(db):
     while first["remaining"]:
         first = repository.purge_csv_uploads(db, "chunk-sub", chunk=2, budget_s=0)
     assert repository.users_left(db, job2) == 0
+
+
+def test_cancel_stops_an_upload_before_its_file_is_loaded(db):
+    """Stop: a job waiting for its file is cancelled for real; a loaded one says it is running."""
+    from loan_engine.api import repository
+
+    waiting = uuid.uuid4()
+    repository.create_job(db, waiting, f"raw/{waiting}.csv", "w.csv")
+    assert repository.cancel_upload(db, waiting) == "cancelled"
+    status, error = db.execute(
+        "SELECT status, error FROM upload_jobs WHERE job_id = %s", (waiting,)
+    ).fetchone()
+    assert status == "FAILED" and "Cancelled by you" in error
+    loaded = uuid.uuid4()
+    repository.create_job(db, loaded, f"raw/{loaded}.csv", "l.csv")
+    db.execute(
+        "UPDATE upload_jobs SET status = 'COMPLETED', match_status = 'RUNNING' WHERE job_id = %s",
+        (loaded,),
+    )
+    assert repository.cancel_upload(db, loaded) == "running"
+    db.execute("UPDATE upload_jobs SET match_status = 'DONE' WHERE job_id = %s", (loaded,))
+    assert repository.cancel_upload(db, loaded) == "finished"
+    assert repository.cancel_upload(db, uuid.uuid4()) is None

@@ -35,7 +35,7 @@ export function stages(state: UploadState): Node[] {
     {
       key: "s3", title: "Upload", where: "Browser → S3 (presigned POST)", tick: "var(--color-acc-2)",
       status: failedUpload ? "failed" : sending ? "active" : sent ? "done" : "waiting",
-      lines: failedUpload ? [state.message] : state.phase === "idle" ? ["The file goes straight to S3, never through the API"]
+      lines: failedUpload ? [state.message] : state.phase === "idle" || state.phase === "stopped" ? ["The file goes straight to S3, never through the API"]
         : [`${state.name}`, `${n(Math.round(state.bytes / 1024))} KB`],
     },
     {

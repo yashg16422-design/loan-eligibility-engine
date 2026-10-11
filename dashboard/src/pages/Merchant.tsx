@@ -302,7 +302,7 @@ function Bulk() {
       <DropZone />
       <WorkflowMap state={upload.state} />
       {(upload.state.phase === "sending" || (upload.state.phase === "tracking" && !upload.state.finished)) && (
-        <WaitPanel state={upload.state} />
+        <WaitPanel state={upload.state} onStop={upload.stop} />
       )}
       {p && (
         <div className="grid gap-px border border-line bg-line lg:grid-cols-2 [&>*]:min-w-0" aria-live="polite">
@@ -382,6 +382,9 @@ function DropZone() {
             A .csv with a header row: user_id, name, email, monthly_income, credit_score, employment_status, age. Up to
             50 MB, 10 uploads per account a day. Rows that fail a check are set aside with the reason; the rest are matched.
           </p>
+          {state.phase === "stopped" && (
+            <p role="status" className="mt-4 text-sm text-fg"><b className="font-medium">{state.name}: </b>{state.message}</p>
+          )}
           {state.phase === "error" && (
             <p role="alert" className="mt-4 flex items-start gap-2 text-sm text-coral">
               <WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden />
@@ -391,7 +394,7 @@ function DropZone() {
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {(state.phase === "error" || (state.phase === "tracking" && state.finished)) && (
+        {(state.phase === "error" || state.phase === "stopped" || (state.phase === "tracking" && state.finished)) && (
           <button type="button" onClick={reset} className="btn btn-ghost">Clear</button>
         )}
         <button type="button" onClick={pick} disabled={busy} className="btn btn-primary">

@@ -144,6 +144,10 @@ export const api = {
     ).then((r) => r.body),
   upload: (jobId: string) => request<UploadProgress>(`/uploads/${jobId}`, {}, false, true).then((r) => r.body),
   uploads: () => request<UploadRecord[]>("/uploads", {}, false, true).then((r) => r.body),
+  cancelUpload: (jobId: string) =>
+    request<{ job_id: string; outcome: "cancelled" | "running" | "finished" }>(
+      `/uploads/${encodeURIComponent(jobId)}/cancel`, { method: "POST" }, false, true,
+    ).then((r) => r.body),
   emailPreviews: (jobId: string) => request<EmailPreview[]>(`/uploads/${jobId}/emails`, {}, false, true).then((r) => r.body),
   // Public: only the reference dataset. Signed in: one of my uploads (owner or admin), with the ID token.
   analytics: (jobId?: string | null) =>

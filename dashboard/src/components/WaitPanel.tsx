@@ -27,8 +27,10 @@ function clock(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
-export function WaitPanel({ state }: { state: UploadState }) {
+export function WaitPanel({ state, onStop }: { state: UploadState; onStop?: () => Promise<void> }) {
   const [now, setNow] = useState(() => Date.now());
+  const [asking, setAsking] = useState(false);
+  const [stopping, setStopping] = useState(false);
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
@@ -48,9 +50,12 @@ export function WaitPanel({ state }: { state: UploadState }) {
       <p className="mt-4 text-lg font-light" aria-live="polite">
         {tracking?.reconnecting
           ? "Connection hiccup. The pipeline keeps running on the server; reconnecting…"
-          : active
-            ? NOW[active.key]
-            : "Starting the pipeline…"}
+          : active?.key === "ingest" && since && now - since > 60_000 && tracking?.progress?.job.status === "AWAITING_UPLOAD"
+            // The ingest Lambda could not reach the database yet: SQS retries the file by itself.
+            ? "The file is safely in S3, waiting for the database. It is retried automatically within a few minutes; you can also stop it."
+            : active
+              ? NOW[active.key]
+              : "Starting the pipeline…"}
       </p>
       <div aria-hidden className="mt-5 h-px w-full overflow-hidden bg-line">
         <div className="loading-bar h-full w-1/3 bg-peri" />
@@ -59,6 +64,26 @@ export function WaitPanel({ state }: { state: UploadState }) {
         <span className="text-fg">Did you know? </span>
         {fact}
       </p>
+      {onStop && tracking && (
+        <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-5 text-sm">
+          {asking ? (
+            <>
+              <span className="text-mute">
+                {active?.key === "ingest" || !active
+                  ? "Stop this upload? If its file is not loaded yet, nothing will be."
+                  : "Matching already runs on the server and finishes on its own. Stop watching?"}
+              </span>
+              <button type="button" disabled={stopping} className="btn btn-ghost min-h-9 px-3 text-coral"
+                onClick={async () => { setStopping(true); await onStop(); }}>
+                {stopping ? "Stopping" : "Yes, stop"}
+              </button>
+              <button type="button" disabled={stopping} className="btn btn-ghost min-h-9 px-3" onClick={() => setAsking(false)}>Keep going</button>
+            </>
+          ) : (
+            <button type="button" className="btn btn-ghost min-h-9 px-3" onClick={() => setAsking(true)}>Stop</button>
+          )}
+        </div>
+      )}
     </section>
   );
 }

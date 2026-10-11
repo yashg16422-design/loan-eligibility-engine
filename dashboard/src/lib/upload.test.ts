@@ -46,3 +46,12 @@ describe("the email step", () => {
     expect(isFinished(p)).toBe(true);
   });
 });
+
+describe("Stop", () => {
+  it("says plainly what stopping did", async () => {
+    const { stopMessage } = await import("./upload");
+    expect(stopMessage("cancelled")).toMatch(/never loaded/);
+    expect(stopMessage("running")).toMatch(/runs on the server/);
+    expect(stopMessage("finished")).toMatch(/already finished/);
+  });
+});
