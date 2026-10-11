@@ -254,7 +254,7 @@ function Workspace({ email, admin, records }: { email: string; admin: boolean; r
         </div>
         <p className="flex items-center gap-4 py-3 text-sm text-mute">
           <span className="max-w-[260px] truncate">{email}{admin && <span className="label ml-2 text-fg">admin</span>}</span>
-          <button type="button" onClick={() => auth.signOut()} className="inline-flex items-center gap-1.5 hover:text-fg">
+          <button type="button" onClick={() => void auth.signOut()} className="inline-flex items-center gap-1.5 hover:text-fg">
             <SignOut size={15} aria-hidden /> Sign out
           </button>
         </p>

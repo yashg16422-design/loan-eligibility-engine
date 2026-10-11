@@ -821,6 +821,20 @@ resources:
       Properties:
         UserPoolId: !Ref UserPool
         Domain: ${self:custom.authDomain}
+        # Managed login (not the classic hosted UI): it forwards prompt=select_account to Google,
+        # so people with several Google accounts choose one. In-place update (no replacement).
+        ManagedLoginVersion: 2
+
+    # Managed login needs a style per app client; a client made by CloudFormation has none.
+    # Cognito's default style: the app never shows these pages (Google sign-in goes straight
+    # to Google, email sign-in uses the Cognito API from the app's own form).
+    ManagedLoginBranding:
+      Type: AWS::Cognito::ManagedLoginBranding
+      DependsOn: UserPoolDomain
+      Properties:
+        UserPoolId: !Ref UserPool
+        ClientId: !Ref UserPoolClient
+        UseCognitoProvidedValues: true
 
     # Google as an identity provider. The client secret is a Secrets Manager dynamic reference:
     # resolved by CloudFormation at deploy time, never in the repo or the template.

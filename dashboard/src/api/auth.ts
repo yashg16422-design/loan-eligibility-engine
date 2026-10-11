@@ -17,6 +17,7 @@ interface Session {
   refreshToken: string;
   email: string;
   expiresAt: number; // epoch seconds of the ID token
+  method?: "password" | "google"; // how this session signed in (sign-out differs)
 }
 
 const KEY = "clickpar-account";
@@ -46,6 +47,21 @@ const MESSAGES: Record<string, string> = {
   InvalidParameterException: "Check the email address and try again.",
 };
 
+/** The sentence to show for a Cognito error, specific to what the person was doing. */
+export function messageFor(code: string, raw: string, action: string): string {
+  // Cognito's own sender has a daily quota; say so instead of a vague "too many attempts".
+  if (code === "LimitExceededException" && /daily|email/i.test(raw)) {
+    return "Today's email limit for sign-in codes is reached. Try again tomorrow, or sign in with Google.";
+  }
+  if (action === "ForgotPassword" && code === "InvalidParameterException") {
+    return "This account's email was never confirmed, so a reset code can't be sent. Create the account again with this email, or sign in with Google.";
+  }
+  if (action === "ForgotPassword" && code === "UserNotConfirmedException") {
+    return "This email is not confirmed yet. Choose Create account with it, then enter the code we email you.";
+  }
+  return MESSAGES[code] ?? raw ?? "Something went wrong. Try again.";
+}
+
 function getConfig(): Promise<AuthConfig> {
   config ??= fetch("/auth/config").then((r) => {
     if (!r.ok) throw new AuthError("Config", "Sign-in is unavailable right now.");
@@ -67,7 +83,7 @@ async function cognito<T>(action: string, body: Record<string, unknown>): Promis
   const data = (await res.json().catch(() => ({}))) as T & { __type?: string; message?: string };
   if (!res.ok) {
     const code = String(data.__type ?? "Unknown").split("#").pop() ?? "Unknown";
-    throw new AuthError(code, MESSAGES[code] ?? data.message ?? "Something went wrong. Try again.");
+    throw new AuthError(code, messageFor(code, data.message ?? "", action));
   }
   return data;
 }
@@ -100,21 +116,38 @@ function load(): Session | null {
 /** Session from an OAuth token response (Google via Cognito). */
 function fromTokens(t: { id_token: string; refresh_token?: string }): Session {
   const c = claims(t.id_token);
-  return { idToken: t.id_token, refreshToken: t.refresh_token ?? "", email: String(c.email ?? ""), expiresAt: Number(c.exp ?? 0) };
+  return {
+    idToken: t.id_token,
+    refreshToken: t.refresh_token ?? "",
+    email: String(c.email ?? ""),
+    expiresAt: Number(c.exp ?? 0),
+    method: "google",
+  };
 }
 
 const OAUTH = "clickpar-oauth"; // PKCE verifier + state + where to return, for one round trip
 const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const callbackUrl = () => `${window.location.origin}/app/auth/callback`;
 
-function fromResult(r: { AuthenticationResult: { IdToken: string; RefreshToken?: string } }, refresh?: string): Session {
+function fromResult(
+  r: { AuthenticationResult: { IdToken: string; RefreshToken?: string } },
+  refresh?: string,
+  method: Session["method"] = "password",
+): Session {
   const c = claims(r.AuthenticationResult.IdToken);
   return {
     idToken: r.AuthenticationResult.IdToken,
     refreshToken: r.AuthenticationResult.RefreshToken ?? refresh ?? "",
     email: String(c.email ?? ""),
     expiresAt: Number(c.exp ?? 0),
+    method,
   };
+}
+
+/** Cognito's sign-out URL: ends its one-hour sign-in cookie, then comes back to the console. */
+export function logoutUrl(domain: string, clientId: string, origin: string): string {
+  const q = new URLSearchParams({ client_id: clientId, logout_uri: `${origin}/app/merchant` });
+  return `https://${domain}/logout?${q}`;
 }
 
 export const auth = {
@@ -153,8 +186,22 @@ export const auth = {
     store(fromResult(r));
   },
 
-  signOut() {
+  /**
+   * Sign out everywhere this app can: revoke the refresh token (best effort) and forget the
+   * session. After a Google sign-in, also end Cognito's one-hour sign-in cookie, so the next
+   * "Continue with Google" asks which Google account to use instead of reusing the last one.
+   */
+  async signOut(): Promise<void> {
+    const s = load();
     store(null);
+    if (!s) return;
+    try {
+      const { client_id, domain } = await getConfig();
+      if (s.refreshToken) await cognito("RevokeToken", { Token: s.refreshToken, ClientId: client_id }).catch(() => {});
+      if (s.method === "google" && domain) window.location.assign(logoutUrl(domain, client_id, window.location.origin));
+    } catch {
+      /* already signed out locally */
+    }
   },
 
   /** Is "Continue with Google" available on this deployment? */
@@ -183,6 +230,9 @@ export const auth = {
       state,
       code_challenge: challenge,
       code_challenge_method: "S256",
+      // Forwarded to Google by Cognito's managed login: always show the account chooser, so
+      // someone with several Google accounts picks one instead of getting the last one used.
+      prompt: "select_account",
     });
     window.location.assign(`https://${domain}/oauth2/authorize?${q}`);
   },
@@ -234,7 +284,7 @@ export const auth = {
         AuthFlow: "REFRESH_TOKEN_AUTH",
         AuthParameters: { REFRESH_TOKEN: s.refreshToken },
       });
-      const next = fromResult(r, s.refreshToken);
+      const next = fromResult(r, s.refreshToken, s.method);
       store(next);
       return next.idToken;
     } catch {

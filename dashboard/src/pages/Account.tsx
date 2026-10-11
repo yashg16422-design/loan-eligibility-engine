@@ -30,6 +30,9 @@ const TITLES: Record<Step["mode"], [string, string]> = {
  * Cognito sign-in, sign-up (email code), forgot / reset password, and "Continue with Google".
  * `embedded` renders just the form (merchant console); `onDone` runs after a successful sign-in.
  */
+// Cognito's answers to a wrong email or password (also what a Google-only email gets).
+const WRONG_LOGIN = new Set(["NotAuthorizedException", "UserNotFoundException"]);
+
 export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; onDone?: () => void }) {
   const [step, setStep] = useState<Step>({ mode: pendingSave.peek() ? "signup" : "signin" });
   const [error, setError] = useState<string | null>(null);
@@ -61,10 +64,12 @@ export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; o
         afterSignIn();
       } else if (step.mode === "signup") {
         await auth.signUp(email, password);
+        startCooldown();
         go({ mode: "confirm", email, password }, `We sent a 6-digit code to ${email}. It comes from no-reply@verificationemail.com; check spam if it is not in your inbox within a minute.`);
       } else if (step.mode === "forgot") {
         await auth.forgotPassword(email);
-        go({ mode: "reset", email }, `If an account exists for ${email}, a reset code is on its way (from no-reply@verificationemail.com; check spam).`);
+        startCooldown();
+        go({ mode: "reset", email }, `If ${email} has a password, a 6-digit code is on its way from no-reply@verificationemail.com.`);
       } else if (step.mode === "reset") {
         await auth.resetPassword(step.email, String(f.get("code")), password);
         await auth.signIn(step.email, password);
@@ -77,6 +82,9 @@ export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; o
       if (err instanceof AuthError && err.code === "UserNotConfirmedException" && step.mode === "signin") {
         await auth.resend(email).catch(() => {});
         go({ mode: "confirm", email, password }, `Confirm your email first: we sent a new code to ${email}.`);
+      } else if (err instanceof AuthError && google && step.mode === "signin" && WRONG_LOGIN.has(err.code)) {
+        // A Google-only account has no password at all: say so instead of only "incorrect".
+        setError(`${err.message} If you signed up with Google, use Continue with Google above.`);
       } else {
         setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
       }
@@ -85,12 +93,23 @@ export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; o
     }
   }
 
+  // A new code at most every 30 s: retries must not burn Cognito's daily email quota.
+  const [cooldown, setCooldown] = useState(0);
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = window.setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => window.clearTimeout(id);
+  }, [cooldown]);
+  const startCooldown = () => setCooldown(30);
+
   const resend = async () => {
     if (step.mode !== "confirm" && step.mode !== "reset") return;
+    if (cooldown > 0) return;
     setError(null);
     try {
       if (step.mode === "confirm") await auth.resend(step.email);
       else await auth.forgotPassword(step.email);
+      startCooldown();
       setNotice(`A new code is on its way to ${step.email}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not send a new code.");
@@ -154,10 +173,24 @@ export function SignInFlow({ embedded = false, onDone }: { embedded?: boolean; o
         <button type="submit" disabled={busy} className="btn btn-primary">{busy ? "One moment" : label}</button>
         <p className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
           {step.mode === "signin" && <button type="button" onClick={() => go({ mode: "forgot" })} className="text-mute underline underline-offset-4 hover:text-fg">Forgot password?</button>}
-          {(step.mode === "confirm" || step.mode === "reset") && <button type="button" onClick={resend} className="text-mute underline underline-offset-4 hover:text-fg">Send a new code</button>}
+          {(step.mode === "confirm" || step.mode === "reset") && (
+            <button type="button" onClick={resend} disabled={cooldown > 0} className="text-mute underline underline-offset-4 hover:text-fg disabled:no-underline disabled:opacity-60">
+              {cooldown > 0 ? `Send a new code in ${cooldown} s` : "Send a new code"}
+            </button>
+          )}
           {!tabs && <button type="button" onClick={() => go({ mode: "signin" })} className="text-mute underline underline-offset-4 hover:text-fg">Back to sign in</button>}
         </p>
         {notice && <p role="status" className="text-sm text-acc">{notice}</p>}
+        {(step.mode === "reset" || step.mode === "confirm") && (
+          <div className="border-t border-line pt-4 text-sm text-mute">
+            <p className="text-fg">No email after a minute?</p>
+            <ul className="mt-2 grid list-disc gap-1 pl-5">
+              <li>Check Spam and Promotions; the sender is no-reply@verificationemail.com.</li>
+              {step.mode === "reset" && <li>If you signed up with Google, this email has no password to reset. Go back and use Continue with Google, or choose Create account with the same email to add a password; it stays the same account.</li>}
+              <li>Use the newest code; each new request replaces the last one.</li>
+            </ul>
+          </div>
+        )}
         {error && <p role="alert" className="flex items-start gap-2 text-sm text-coral"><WarningCircle size={18} className="mt-0.5 shrink-0" aria-hidden /> {error}</p>}
       </form>
     </>
@@ -251,7 +284,7 @@ function SignedIn({ email }: { email: string }) {
           <h1 className="text-3xl sm:text-4xl">Your account</h1>
           <p className="mt-2 text-mute">{email}</p>
         </div>
-        <button type="button" onClick={() => (auth.signOut(), navigate("account"))} className="btn btn-ghost">
+        <button type="button" onClick={() => void auth.signOut().then(() => navigate("account"))} className="btn btn-ghost">
           <SignOut size={16} aria-hidden /> Sign out
         </button>
       </div>
