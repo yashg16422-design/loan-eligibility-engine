@@ -1,5 +1,5 @@
 // A new upload while the account's last one is still running or still holds customers: one
-// upload at a time keeps the shared free-plan database small. Offers to clear the old one
+// upload per account keeps the shared free-plan database small. Offers to clear the old one
 // (stop, let it finish, delete), then uploads the new file by itself.
 import { Database } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
@@ -51,7 +51,7 @@ export function UploadBlockedDialog({
       <div role="dialog" aria-modal="true" aria-labelledby="blocked-title" className="box tick w-full max-w-[560px] p-7"
         style={{ ["--tick" as string]: "var(--color-acc)" }}>
         <p className="flex items-center gap-2 text-sm text-acc">
-          <Database size={18} aria-hidden /> One upload at a time
+          <Database size={18} aria-hidden /> One upload per account
         </p>
         <h2 id="blocked-title" className="mt-4 text-2xl font-light">
           {running ? `${old} is still ${blocking.stage}` : `Delete ${old} first?`}
@@ -59,7 +59,7 @@ export function UploadBlockedDialog({
         <p className="mt-4 text-sm text-mute">
           {running
             ? "Stopping clears it completely: a file not yet loaded is cancelled; one already matching finishes on the server first (usually within two minutes), then its records are deleted."
-            : `It still has ${n(blocking.customers)} customers stored. This demo shares one small free-plan database (Amazon RDS db.t4g.micro, 1 GB) between every reviewer, so it keeps one upload at a time.`}
+            : `It still has ${n(blocking.customers)} customers stored. This demo shares one small free-plan database (Amazon RDS db.t4g.micro, 1 GB) between every reviewer, so each account keeps one upload at a time, whatever its size.`}
         </p>
         <p className="mt-3 text-sm text-mute">
           {running ? "" : "Its analytics and run history are kept. "}

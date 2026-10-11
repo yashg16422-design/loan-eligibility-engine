@@ -10,7 +10,7 @@ const FACTS = [
   "Every run re-checks every customer and lender pair the slow way, before and after writing. Mismatches so far: 0.",
   "In the scale test, one million customers still came down to 360 classes.",
   "Emails only ever reach the project's test inboxes, never the addresses in your file.",
-  "The shared free-plan database keeps one upload at a time; deleting it frees its rows and keeps its charts.",
+  "Each account keeps one upload at a time on the shared free-plan database; deleting one frees its rows and keeps its charts.",
   "A 50 MB file streams straight into PostgreSQL with flat memory: 0.1 MB of Python memory, measured.",
   "ICICI Bank asks self-employed applicants to be 28 or older. The AI turned that sentence into a rule that every class is checked against.",
 ];

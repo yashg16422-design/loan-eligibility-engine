@@ -843,9 +843,8 @@ def test_one_live_upload_per_account(db):
     )
     stored = repository.csv_customers_left(db, None)
     assert stored >= 3 and repository.csv_customers_left(db, "one-sub") == 3
-    # The whole database holds one upload: every other account is blocked by this one.
-    theirs = repository.account_blocker(db, "another-account", others=True)
-    assert theirs is not None and theirs["stage"] == "stored"
+    assert repository.live_uploads(db) >= 1  # counts against the database-wide limit
+    assert repository.account_blocker(db, "another-account") is None  # not theirs to clear
     assert repository.purge_upload(db, job) == 3
     assert repository.csv_customers_left(db, None) == stored - 3
     # The upload's own figures are gone, its run's measured figures stay ("last run").

@@ -629,6 +629,12 @@ def unpurged_csv_jobs(conn: psycopg.Connection, account_id: str | None) -> list[
     return [r[0] for r in rows]
 
 
+def live_uploads(conn: psycopg.Connection) -> int:
+    """Bulk uploads running or holding customers right now, across every account."""
+    row = conn.execute(f"SELECT count(*) FROM upload_jobs j WHERE {_LIVE_UPLOAD}").fetchone()
+    return int(row[0]) if row else 0
+
+
 def csv_customers_left(conn: psycopg.Connection, account_id: str | None) -> int:
     """Customers still stored from bulk uploads (of one account, or of all)."""
     row = conn.execute(
@@ -689,19 +695,25 @@ def purge_csv_uploads(
 STALLED_MATCH = "interval '15 minutes'"
 
 
-def account_blocker(
-    conn: psycopg.Connection, account_id: str, others: bool = False
-) -> dict[str, Any] | None:
-    """The upload that must be dealt with before this account can upload another, or None:
-    its own (`others=False`), or any other account's (`others=True`).
+# A bulk upload that is running or still holds customers: it counts against the limits below.
+# A ticket whose file never arrived stops counting after 15 minutes.
+_LIVE_UPLOAD = f"""
+    j.source = 'csv' AND j.purged_at IS NULL
+    AND (j.status = 'PROCESSING'
+         OR (j.status = 'AWAITING_UPLOAD' AND j.created_at > now() - interval '15 minutes')
+         OR (j.status = 'COMPLETED' AND ({_BUSY} OR j.match_status IS NULL))
+         OR EXISTS (SELECT 1 FROM users u WHERE u.upload_job_id = j.job_id))
+"""
 
-    One stored upload at a time, across every account, keeps the shared free-tier database
-    small, and stops a new file from being loaded while an older one is still running or
-    half-deleted (found live: a re-upload made during a delete counted the doomed rows as
-    "unchanged", then lost them). `stage` is loading, matching, emailing, or "stored"
-    (finished, customers kept). A ticket whose file never arrived stops blocking after 15 min.
+
+def account_blocker(conn: psycopg.Connection, account_id: str) -> dict[str, Any] | None:
+    """The account's own upload that must be dealt with before it can upload another, or None.
+
+    One upload per account, whatever its size, keeps the shared free-tier database small, and
+    stops a new file from being loaded while an older one is still running or half-deleted
+    (found live: a re-upload made during a delete counted the doomed rows as "unchanged",
+    then lost them). `stage` is loading, matching, emailing, or "stored" (customers kept).
     """
-    owner = "j.account_id IS DISTINCT FROM %s" if others else "j.account_id = %s"
     with conn.cursor(row_factory=dict_row) as cur:
         return cur.execute(
             f"""
@@ -715,12 +727,7 @@ def account_blocker(
                    (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
                        AS customers
             FROM upload_jobs j
-            WHERE j.source = 'csv' AND {owner} AND j.purged_at IS NULL
-              AND (j.status = 'PROCESSING'
-                   OR (j.status = 'AWAITING_UPLOAD'
-                       AND j.created_at > now() - interval '15 minutes')
-                   OR (j.status = 'COMPLETED' AND ({_BUSY} OR j.match_status IS NULL))
-                   OR EXISTS (SELECT 1 FROM users u WHERE u.upload_job_id = j.job_id))
+            WHERE j.account_id = %s AND {_LIVE_UPLOAD}
             ORDER BY j.created_at DESC LIMIT 1
             """,
             (account_id,),

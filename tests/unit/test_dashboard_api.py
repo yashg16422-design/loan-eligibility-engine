@@ -196,7 +196,8 @@ def deps(monkeypatch):
     monkeypatch.setattr(api, "db", fake_db)
     monkeypatch.setattr(api, "token_key", lambda arn: KEY)
     # No earlier upload in the way, nothing to snapshot (both tested on their own).
-    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account, others=False: None)
+    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: None)
+    monkeypatch.setattr(api.repository, "live_uploads", lambda conn: 0)
     monkeypatch.setattr(api.repository, "unpurged_csv_jobs", lambda conn, account: [])
     # Every signed-in route resolves the account row first (one per verified email).
     monkeypatch.setattr(
@@ -801,22 +802,18 @@ def test_snapshot_before_delete_keeps_charts_and_emails_once(monkeypatch):
     assert stored == {"t|None": {"users": 4, api.EMAILS_KEPT: [{"name": "A"}]}}
 
 
-def test_one_upload_in_the_whole_database(deps, monkeypatch, lambda_context):
-    """Another account's upload blocks everyone else (503), with no detail about it."""
+def test_new_uploads_wait_while_the_shared_database_is_full(deps, monkeypatch, lambda_context):
+    """Other accounts' uploads fill the database: a 503 with no detail about theirs (the
+    allowed path, below the cap, is the end-to-end test in tests/integration)."""
     created = []
     monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
-    theirs = {"job_id": str(USER), "filename": "their.csv", "stage": "stored", "customers": 9}
-    monkeypatch.setattr(
-        api.repository,
-        "account_blocker",
-        lambda conn, account, others=False: theirs if others else None,
-    )
+    monkeypatch.setattr(api.repository, "live_uploads", lambda conn: api.MAX_LIVE_UPLOADS)
     monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
     event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
     res = invoke({**event, "requestContext": signed_in_as(MERCHANT)}, lambda_context)
     message = json.loads(res["body"])["error"]
     assert res["statusCode"] == 503 and "ask them to delete" in message and "10 minutes" in message
-    assert "their.csv" not in message and "blocking" not in json.loads(res["body"])
+    assert "blocking" not in json.loads(res["body"])
     res = invoke({**event, "requestContext": signed_in_as(ADMIN)}, lambda_context)
     assert "Delete every account's uploads" in json.loads(res["body"])["error"]
     assert created == []
@@ -903,9 +900,7 @@ def test_one_live_upload_per_account(deps, monkeypatch, lambda_context):
     created = []
     blocking = {"job_id": str(USER), "filename": "users.csv", "stage": "stored", "customers": 10000}
     monkeypatch.setattr(api.repository, "csv_uploads_last_24h", lambda conn, account=None: 0)
-    monkeypatch.setattr(
-        api.repository, "account_blocker", lambda conn, account, others=False: blocking
-    )
+    monkeypatch.setattr(api.repository, "account_blocker", lambda conn, account: blocking)
     monkeypatch.setattr(api.repository, "create_job", lambda *a, **k: created.append(a))
     event = {"routeKey": "POST /uploads", "body": json.dumps({"filename": "u.csv"})}
     for who in (MERCHANT, ADMIN):

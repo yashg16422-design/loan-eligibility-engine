@@ -62,7 +62,7 @@ export function FreeUpDialog({
         <p className="mt-3 text-sm text-mute">
           Deleting removes this upload's {n(customers)} customer records, their matches and email records.{" "}
           <span className="text-fg">Your analytics stay on this page</span>, and the run history and Treasure Hunt numbers
-          are kept. The database keeps one upload at a time, so other reviewers can upload only after this is deleted.
+          are kept. Each account keeps one upload at a time, so it is deleted before your next upload anyway.
         </p>
         {status && (
           <p role="status" className={`mt-4 text-sm ${failed ? "text-coral" : "text-fg"}`}>{status}</p>

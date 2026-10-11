@@ -69,6 +69,9 @@ MAX_UPLOADS_PER_DAY = 50
 MAX_UPLOADS_PER_ACCOUNT_PER_DAY = 10  # one merchant cannot use up everyone's daily budget
 # A delete call must answer within the API's 28 s: saving the charts first and then deleting
 # for 15 s timed out live on two 10k uploads. One budget covers both; the client calls again.
+# Two stored 10k uploads (~520k match rows) is the most the 1 GB free-plan RDS holds: with two
+# stored plus a delete running it ran out of memory and AWS restarted it (found live).
+MAX_LIVE_UPLOADS = 2
 DELETE_BUDGET_S = 18.0
 SNAPSHOT_BUDGET_S = 10.0
 MAX_EMAIL_TOKENS = 50  # Workflow C sends at most a handful per run (SES sandbox)
@@ -131,20 +134,20 @@ class UploadBlockedError(ApiError):
 
 
 class DatabaseBusyError(ApiError):
-    """Another account's upload is in the shared demo database, which holds one at a time."""
+    """Other reviewers' uploads fill the shared demo database (MAX_LIVE_UPLOADS at a time)."""
 
     status = 503
 
     def __init__(self, admin: bool) -> None:
         super().__init__(
-            "Another reviewer's upload is in the shared demo database right now, and it holds"
-            " one upload at a time."
+            "The shared demo database is full: other reviewers' uploads are in it right now,"
+            f" and it holds {MAX_LIVE_UPLOADS} at a time."
             + (
                 ' Use "Delete every account\'s uploads" in Your uploads to clear it'
                 " (its charts are kept)."
                 if admin
-                else " Please ask them to delete it once their run is done (Delete in Your"
-                " uploads; their charts are kept), or try again in about 10 minutes."
+                else " Please ask them to delete theirs once their run is done (Delete in"
+                " Your uploads; their charts are kept), or try again in about 10 minutes."
             )
         )
 
@@ -485,8 +488,8 @@ def create_upload(who: SignedIn, body: Body, deps: Deps) -> dict[str, Any]:
         blocking = repository.account_blocker(conn, who.account_id)
         if blocking is not None:
             raise UploadBlockedError(blocking)
-        # ...and one in the whole database: another account's upload must be deleted first.
-        if repository.account_blocker(conn, who.account_id, others=True) is not None:
+        # ...and at most MAX_LIVE_UPLOADS in the whole database (the account has none now).
+        if repository.live_uploads(conn) >= MAX_LIVE_UPLOADS:
             raise DatabaseBusyError(who.is_admin)
         repository.create_job(conn, job_id, policy.key, filename, account_id=who.account_id)
 
