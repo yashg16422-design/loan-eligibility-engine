@@ -894,3 +894,49 @@ def test_analytics_snapshot_survives_deleting_the_records(db):
     assert repository.purge_upload(db, job) == 4
     assert repository.analytics(db, job)["users"] == 0  # the tables really are empty now
     assert repository.analytics_snapshot(db, job)["users"] == before["users"] == 4
+
+
+def test_delete_waits_until_every_email_is_written(db):
+    """C1 writes the email of every customer the demo did not send to: until the last one is
+    written, the upload cannot be deleted (it would fail C1 halfway) and the console shows it
+    as not yet deletable. An upload whose C1 never finished is deletable after 30 minutes."""
+    from loan_engine.api import repository
+
+    job = uuid.uuid4()
+    repository.create_job(db, job, f"raw/{job}.csv", "mail.csv")
+    db.execute(
+        "INSERT INTO users (user_id, email, monthly_income, credit_score, employment_status, age,"
+        " upload_job_id) SELECT gen_random_uuid(), 'mail' || g || '@example.com', 50000, 700,"
+        " 'salaried', 30, %s FROM generate_series(1, 3) g",
+        (job,),
+    )
+    db.execute(
+        "UPDATE upload_jobs SET status = 'COMPLETED', match_status = 'DONE',"
+        " matched_at = now() - interval '5 minutes' WHERE job_id = %s",
+        (job,),
+    )
+    # C's send loop is over; C1 still has two emails to write (no subject yet).
+    db.execute(
+        "INSERT INTO notifications (user_id, alias_email, job_id, status)"
+        " SELECT user_id, '(demo cap: not sent)', %s, 'skipped_demo' FROM users"
+        " WHERE upload_job_id = %s LIMIT 2",
+        (job, job),
+    )
+
+    def deletable():
+        return repository.get_job_progress(db, job)["job"]["deletable"]
+
+    assert deletable() is False
+    with pytest.raises(repository.JobBusyError):
+        repository.purge_upload(db, job)
+    # C1 writes them: now it can be deleted.
+    db.execute("UPDATE notifications SET subject = 'Your matches' WHERE job_id = %s", (job,))
+    assert deletable() is True
+    # A C1 that never finished does not block a delete forever.
+    db.execute("UPDATE notifications SET subject = NULL WHERE job_id = %s", (job,))
+    db.execute(
+        "UPDATE upload_jobs SET matched_at = now() - interval '31 minutes' WHERE job_id = %s",
+        (job,),
+    )
+    assert deletable() is True
+    assert repository.purge_upload(db, job) == 3

@@ -149,6 +149,7 @@ export interface UploadProgress {
     rejected: number | null;
     error: string | null;
     match_status: "RUNNING" | "DONE" | "FAILED" | null;
+    deletable?: boolean; // nothing is loading, matching or emailing it any more
   };
   rejects: { row_number: number; reason: string; raw_line: string }[];
   match_run: Partial<Run> | null;

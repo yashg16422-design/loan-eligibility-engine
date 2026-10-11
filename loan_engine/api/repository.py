@@ -89,12 +89,14 @@ def get_job_progress(conn: psycopg.Connection, job_id: uuid.UUID) -> dict[str, A
     wrote `created_at` (no Lambda/DB clock skew).
     """
     with conn.cursor(row_factory=dict_row) as cur:
+        # deletable: nothing is loading, matching or emailing it any more (see _BUSY), so the
+        # console can offer to delete it.
         job = cur.execute(
-            """
+            f"""
             SELECT job_id, original_filename, status, attempts, total_rows, inserted,
                    updated, unchanged, rejected, error, created_at, completed_at,
-                   match_status, matched_at, now() AS db_now
-            FROM upload_jobs WHERE job_id = %s
+                   match_status, matched_at, now() AS db_now, NOT ({_BUSY}) AS deletable
+            FROM upload_jobs j WHERE j.job_id = %s
             """,
             (job_id,),
         ).fetchone()
@@ -459,10 +461,17 @@ class JobBusyError(Exception):
 
 
 # Workflow C emails right after Stage 3 stamps matched_at; a user deleted under it would make
-# its notification insert fail. Two minutes covers a C run with room to spare.
-_BUSY = (
-    "status = 'PROCESSING' OR match_status = 'RUNNING' OR matched_at > now() - interval '2 minutes'"
+# its notification insert fail. Two minutes covers C's send loop. After it, C1 writes the email
+# of every other matched customer (their rows have no subject yet): the emails are finished only
+# when none is left, so a delete waits for that too (capped at 30 minutes, so an upload whose
+# C1 never finished can still be deleted). Every query using these names upload_jobs `j`.
+_EMAILING = (
+    "matched_at > now() - interval '2 minutes'"
+    " OR (matched_at > now() - interval '30 minutes' AND EXISTS ("
+    "SELECT 1 FROM notifications n WHERE n.job_id = j.job_id"
+    " AND n.status = 'skipped_demo' AND n.subject IS NULL))"
 )
+_BUSY = f"status = 'PROCESSING' OR match_status = 'RUNNING' OR ({_EMAILING})"
 
 
 EMAIL_PREVIEWS = 3
@@ -603,7 +612,7 @@ def purge_upload(
     while True:
         with conn.transaction():
             row = conn.execute(
-                f"SELECT {_BUSY} FROM upload_jobs WHERE job_id = %s FOR UPDATE", (job_id,)
+                f"SELECT {_BUSY} FROM upload_jobs j WHERE j.job_id = %s FOR UPDATE", (job_id,)
             ).fetchone()
             if row is None:
                 return None
@@ -671,7 +680,7 @@ def purge_csv_uploads(
         with conn.transaction():
             busy = conn.execute(
                 f"SELECT bool_or({_BUSY}) FROM"
-                " (SELECT status, match_status, matched_at FROM upload_jobs"
+                " (SELECT job_id, status, match_status, matched_at FROM upload_jobs"
                 f" WHERE source = 'csv' AND {mine} FOR UPDATE) j",
                 {"a": account_id},
             ).fetchone()
@@ -729,7 +738,7 @@ def account_blocker(conn: psycopg.Connection, account_id: str) -> dict[str, Any]
                         THEN 'loading'
                         WHEN j.match_status = 'RUNNING' OR (j.status = 'COMPLETED'
                              AND j.match_status IS NULL) THEN 'matching'
-                        WHEN j.matched_at > now() - interval '2 minutes' THEN 'emailing'
+                        WHEN {_EMAILING} THEN 'emailing'
                         ELSE 'stored' END AS stage,
                    (SELECT count(*) FROM users u WHERE u.upload_job_id = j.job_id)::int
                        AS customers

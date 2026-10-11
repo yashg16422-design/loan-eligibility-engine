@@ -149,6 +149,7 @@ def test_the_whole_upload_lifecycle(stack):
     assert status == 503 and "blocking" not in body and "users.csv" not in body["error"]
 
     # 4. Anna deletes hers (the console's chunked loop); each call stays inside the API limit.
+    assert call("GET /uploads/{job_id}", ANNA, job)[1]["job"]["deletable"] is True  # emails done
     charts_before = call("GET /uploads/{job_id}/analytics", ANNA, job)[1]
     assert delete_until_done("DELETE /uploads/{job_id}", ANNA, job) == 10_000
     assert repository.users_left(conn, job) == 0
